@@ -1,6 +1,3 @@
 target/
 Cargo.lock
 dist/
-examples/with-daisyui/style/out.css
-examples/with-daisyui/style/daisyui.css
-examples/with-axum-daisyui/style/daisyui.css

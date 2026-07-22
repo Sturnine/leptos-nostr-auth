@@ -13,10 +13,11 @@ use crate::types::{NostrAuthError, PersistedSession};
 #[cfg(not(feature = "ssr"))]
 pub async fn restore_session(
     session: &PersistedSession,
+    bunker_timeout_secs: u32,
 ) -> Result<crate::signers::AuthResult, NostrAuthError> {
     #[cfg(feature = "ssr")]
     {
-        let _ = session;
+        let _ = (session, bunker_timeout_secs);
         // Unreachable in practice — this is only called from inside an Effect (client-only).
         return Err(NostrAuthError::ExtensionNotFound);
     }
@@ -44,7 +45,8 @@ pub async fn restore_session(
                     .bunker_uri
                     .as_deref()
                     .ok_or_else(|| NostrAuthError::InvalidBunkerUri("no URI stored".into()))?;
-                let session = crate::signers::BunkerSession::connect(uri, 30).await?;
+                let session =
+                    crate::signers::BunkerSession::connect(uri, bunker_timeout_secs).await?;
                 Ok(crate::signers::AuthResult::Bunker(Box::new(session)))
             }
             PersistedMethod::Passkey => {

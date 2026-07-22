@@ -1,7 +1,0 @@
-@import "tailwindcss";
-@import "./daisyui.css";
-@source inline("flex flex-col flex-1 items-center items-start justify-between justify-start justify-center justify-end shrink-0 min-w-0 gap-2 gap-3 gap-4 mb-4 mt-1 mt-2 mt-3 ml-2 my-1 py-2 py-3 py-4 p-3 w-2 w-full w-96 h-2 max-w-sm h-auto min-h-screen relative text-xs text-sm text-lg text-2xl text-left font-mono font-medium font-semibold font-bold block truncate break-all opacity-40 opacity-50 opacity-60 opacity-70 opacity-90 cursor-pointer list-disc list-inside space-y-1 space-y-2 rounded-full rounded-lg");
-
-[data-nostr-icon-amber] {
-    color: #f97316;
-}

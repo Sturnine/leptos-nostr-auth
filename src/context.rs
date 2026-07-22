@@ -119,7 +119,9 @@ pub fn NostrAuthProvider(
             set_restoring.set(true);
             let delete = delete_stored_session.clone();
             spawn_local(async move {
-                match crate::storage::restore_session(&session).await {
+                match crate::storage::restore_session(&session, cfg.get_value().bunker_timeout_secs)
+                    .await
+                {
                     Ok(result) => {
                         set_auth.set(Some(result));
                     }
@@ -188,9 +190,8 @@ pub fn NostrAuthProvider(
                 aria-label="Restoring session…"
                 data-nostr-restoring=""
                 style="position:fixed;bottom:1rem;right:1rem;z-index:9997;"
-                class=if cfg!(feature = "daisyui") { "badge badge-ghost gap-2 p-3" } else { "" }
             >
-                <span class=if cfg!(feature = "daisyui") { "loading loading-spinner loading-xs" } else { "" } />
+                <span data-nostr-spinner="" />
                 "Restoring session…"
             </div>
         </Show>

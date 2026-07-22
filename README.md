@@ -2,7 +2,7 @@
 
 Headless Nostr authentication modal widget for [Leptos](https://leptos.dev) applications.
 
-Drop-in login modal supporting every Nostr authentication method. Headless by default — bring your own CSS. Optional daisyUI dark-theme styling via a feature flag.
+Drop-in login modal supporting every Nostr authentication method. Headless — bring your own CSS.
 
 ## Login Methods
 
@@ -87,7 +87,7 @@ ssr    = ["leptos-nostr-auth/ssr", ...]
 
 The library is SSR-safe: all browser-only code is `cfg`-gated so no `window` or `crypto` access occurs on the server. Session restore is a no-op on the server; it runs only after hydration in the browser.
 
-See the `with-axum-ssr` and `with-axum-daisyui` examples for complete cargo-leptos project layouts.
+See the `with-axum-ssr` example for a complete cargo-leptos project layout.
 
 ## Feature Flags
 
@@ -98,29 +98,6 @@ You must select exactly one rendering mode feature:
 | `csr` | Client-side rendering only (Trunk) |
 | `hydrate` | Browser WASM target in SSR+hydrate setup |
 | `ssr` | Server binary target in SSR+hydrate setup |
-
-### `daisyui` — pre-styled dark theme
-
-```toml
-leptos-nostr-auth = { version = "0.1", features = ["csr", "daisyui"] }
-```
-
-Enables daisyUI 5 + Tailwind v4 styling with a dark theme scoped to the modal.
-
-**Additional setup required:**
-
-1. Install Tailwind CSS v4 and daisyUI v5 in your build pipeline (via Trunk or cargo-leptos).
-
-2. In your `style/tailwind.css` (or equivalent):
-
-   `daisyui.css` is a pre-compiled daisyUI v5 stylesheet. Download it from [daisyUI releases](https://github.com/saadeghi/daisyui/releases) or generate it with `npx daisyui@latest`. The `@source inline(...)` line ensures Tailwind generates all utility classes used inside `leptos-nostr-auth` without scanning the library source files.
-
-   ```css
-   @import "tailwindcss";
-   @import "./daisyui.css";
-   @source "./src/**/*.rs";
-   @source inline("block cursor-pointer flex flex-1 flex-col font-medium font-mono font-semibold gap-2 gap-3 gap-4 h-auto items-center items-start justify-between justify-start list-disc list-inside max-w-sm mb-4 min-w-0 ml-2 mt-1 mt-2 mt-3 my-1 opacity-40 opacity-50 opacity-60 opacity-70 opacity-90 p-3 py-2 py-3 py-4 relative shrink-0 space-y-1 text-left text-lg text-sm text-xs truncate w-full");
-   ```
 
 ### `insecure_nsec_input` — raw secret key paste (opt-in only)
 
@@ -202,14 +179,12 @@ Same passkey on any device → same Nostr identity. Syncs automatically via iClo
 
 ## Examples
 
-Four runnable examples are included in the `examples/` directory:
+Two runnable examples are included in the `examples/` directory:
 
 | Example | Rendering | Styling | Run |
 |---|---|---|---|
 | `basic-csr` | CSR (Trunk) | Headless (`data-nostr-*`) | `trunk serve` |
-| `with-daisyui` | CSR (Trunk) | daisyUI 5 + dark theme | `trunk serve` |
 | `with-axum-ssr` | SSR + Hydrate (cargo-leptos) | Headless | `cargo leptos serve` |
-| `with-axum-daisyui` | SSR + Hydrate (cargo-leptos) | daisyUI 5 + dark theme | `cargo leptos serve` |
 
 All examples demonstrate: login button, session restore indicator, sign event button, logout.
 
@@ -400,7 +375,7 @@ pub enum NostrAuthError {
 
 ## Headless CSS Hooks
 
-Without the `daisyui` feature, all elements emit `data-nostr-*` attributes for styling:
+All elements emit `data-nostr-*` attributes for styling:
 
 ```css
 [data-nostr-backdrop]        { /* modal overlay */ }
@@ -414,6 +389,7 @@ Without the `daisyui` feature, all elements emit `data-nostr-*` attributes for s
 [data-nostr-error]           { /* error message */ }
 [data-nostr-warning]         { /* security warning */ }
 [data-nostr-input]           { /* text inputs */ }
+[data-nostr-spinner]         { /* loading spinner */ }
 [data-nostr-back]            { /* back button */ }
 [data-nostr-close]           { /* close button */ }
 ```

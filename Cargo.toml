@@ -15,8 +15,6 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-# daisyUI 5 + Tailwind v4 styling with dark theme
-daisyui = []
 # Raw nsec/hex private key paste — XSS risk; must be explicitly opted in
 insecure_nsec_input = []
 

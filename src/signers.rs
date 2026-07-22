@@ -68,11 +68,9 @@ impl Nip07Handle {
 
         #[cfg(not(feature = "ssr"))]
         {
-            let js_pk = nostr_get_public_key().await.map_err(|e| {
-                NostrAuthError::ExtensionRejected(
-                    e.as_string().unwrap_or_else(|| "unknown error".into()),
-                )
-            })?;
+            let js_pk = nostr_get_public_key()
+                .await
+                .map_err(|e| NostrAuthError::ExtensionRejected(js_err_msg(&e)))?;
             let hex = js_pk.as_string().ok_or_else(|| {
                 NostrAuthError::ExtensionRejected("expected string pubkey".into())
             })?;
@@ -100,9 +98,9 @@ impl Nip07Handle {
         {
             let event_val = js_sys::JSON::parse(event_json)
                 .map_err(|_| NostrAuthError::SigningFailed("invalid event JSON".into()))?;
-            let signed = nostr_sign_event(event_val).await.map_err(|e| {
-                NostrAuthError::SigningFailed(e.as_string().unwrap_or_else(|| "rejected".into()))
-            })?;
+            let signed = nostr_sign_event(event_val)
+                .await
+                .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?;
             js_sys::JSON::stringify(&signed)
                 .map(|s| s.as_string().unwrap_or_default())
                 .map_err(|_| {
@@ -133,11 +131,7 @@ impl Nip07Handle {
         {
             nostr_nip44_encrypt(recipient_hex, plaintext)
                 .await
-                .map_err(|e| {
-                    NostrAuthError::SigningFailed(
-                        e.as_string().unwrap_or_else(|| "encrypt failed".into()),
-                    )
-                })?
+                .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?
                 .as_string()
                 .ok_or_else(|| NostrAuthError::SigningFailed("expected string ciphertext".into()))
         }
@@ -165,11 +159,7 @@ impl Nip07Handle {
         {
             nostr_nip44_decrypt(sender_hex, ciphertext)
                 .await
-                .map_err(|e| {
-                    NostrAuthError::SigningFailed(
-                        e.as_string().unwrap_or_else(|| "decrypt failed".into()),
-                    )
-                })?
+                .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?
                 .as_string()
                 .ok_or_else(|| NostrAuthError::SigningFailed("expected string plaintext".into()))
         }
@@ -201,7 +191,7 @@ fn parse_bunker_uri(uri: &str) -> Result<BunkerUri, NostrAuthError> {
         })?;
 
     let (pubkey_part, query) = stripped.split_once('?').unwrap_or((stripped, ""));
-    let remote_pubkey_hex = pubkey_part.to_string();
+    let remote_pubkey_hex = pubkey_part.to_lowercase();
 
     if remote_pubkey_hex.is_empty() {
         return Err(NostrAuthError::InvalidBunkerUri(
@@ -246,6 +236,12 @@ fn urlencoding_decode(s: &str) -> String {
 #[cfg(not(feature = "ssr"))]
 type PendingMap = Rc<RefCell<HashMap<String, Box<dyn Fn(Result<String, String>)>>>>;
 
+/// Slot holding the current persistent-WebSocket `onmessage` closure.
+/// Replacing it (rather than `Closure::forget()`-ing every reconnect's handler)
+/// drops the previous closure's captured `client_keys` clone promptly.
+#[cfg(not(feature = "ssr"))]
+type MessageHandlerSlot = Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MessageEvent)>>>>;
+
 /// An established NIP-46 remote signing session.
 ///
 /// Maintains a persistent WebSocket to the relay — reused across `sign_event` calls
@@ -268,6 +264,10 @@ pub struct BunkerSession {
     /// Persistent WebSocket — lazily opened on first `sign_event` call, reused thereafter.
     #[cfg(not(feature = "ssr"))]
     ws: SendWrapper<Rc<RefCell<Option<web_sys::WebSocket>>>>,
+    /// Current onmessage handler for `ws` — replaced (not leaked) on reconnect,
+    /// so reconnects don't accumulate closures holding client_keys clones.
+    #[cfg(not(feature = "ssr"))]
+    message_handler: SendWrapper<MessageHandlerSlot>,
     /// Pending RPC callbacks keyed by request ID.
     #[cfg(not(feature = "ssr"))]
     pending: SendWrapper<PendingMap>,
@@ -357,6 +357,7 @@ impl BunkerSession {
                 remote_pubkey,
                 relay_url: parsed.relay_url,
                 ws: SendWrapper::new(Rc::new(RefCell::new(None))),
+                message_handler: SendWrapper::new(Rc::new(RefCell::new(None))),
                 pending: SendWrapper::new(Rc::new(RefCell::new(HashMap::new()))),
             })
         }
@@ -397,7 +398,6 @@ impl BunkerSession {
                 .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
             v.as_str()
                 .map(std::string::ToString::to_string)
-                .or_else(|| Some(result_json.clone()))
                 .ok_or_else(|| NostrAuthError::SigningFailed("invalid sign_event response".into()))
         }
     }
@@ -493,6 +493,15 @@ impl BunkerSession {
             return Ok(ws.clone());
         }
 
+        // Tear down any stale socket before reconnecting so its handlers can't
+        // fire against the new connection and its closure is dropped cleanly.
+        if let Some(old_ws) = self.ws.borrow_mut().take() {
+            old_ws.set_onmessage(None);
+            old_ws.set_onopen(None);
+            old_ws.set_onerror(None);
+            let _ = old_ws.close();
+        }
+
         // Open a new persistent WS
         let ws = web_sys::WebSocket::new(&self.relay_url)
             .map_err(|e| NostrAuthError::BunkerConnectionFailed(format!("WebSocket: {e:?}")))?;
@@ -504,6 +513,7 @@ impl BunkerSession {
             &self.pending,
             &self.client_keys,
             &self.remote_pubkey,
+            &self.message_handler,
         );
 
         // Wait for open, then send REQ subscription
@@ -635,14 +645,16 @@ impl BunkerSession {
 }
 
 /// Install a persistent `onmessage` handler that decrypts NIP-46 responses and
-/// dispatches them to the pending map. Leaking this closure is intentional and
-/// correct — it must live for the entire WebSocket lifetime.
+/// dispatches them to the pending map. The closure is stored in `handler_slot`,
+/// which drops (and zeroizes) any previous handler's captured client_keys clone
+/// instead of leaking it — important since this runs on every reconnect.
 #[cfg(not(feature = "ssr"))]
 fn setup_persistent_message_handler(
     ws: &web_sys::WebSocket,
     pending: &PendingMap,
     client_keys: &Keys,
     remote_pubkey: &PublicKey,
+    handler_slot: &MessageHandlerSlot,
 ) {
     let pending_clone = pending.clone();
     let keys_clone = client_keys.clone();
@@ -696,8 +708,9 @@ fn setup_persistent_message_handler(
     });
 
     ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-    // Intentional: this handler must outlive the call stack (lives for WS lifetime)
-    on_message.forget();
+    // Replacing the slot drops any previous handler (and its captured client_keys
+    // clone) instead of leaking it, so reconnects don't accumulate key material.
+    *handler_slot.borrow_mut() = Some(on_message);
 }
 
 /// Create a Promise and extract its resolve/reject functions.
@@ -1356,9 +1369,13 @@ impl RawKeySession {
         let encrypted = nostr::nips::nip49::EncryptedSecretKey::from_bech32(ncryptsec)
             .map_err(|e| NostrAuthError::InvalidNcryptsec(e.to_string()))?;
 
-        let secret_key = encrypted
-            .decrypt(password)
-            .map_err(|_e| NostrAuthError::WrongPassword)?;
+        let secret_key = encrypted.decrypt(password).map_err(|e| {
+            if matches!(e, nostr::nips::nip49::Error::ChaCha20Poly1305(_)) {
+                NostrAuthError::WrongPassword
+            } else {
+                NostrAuthError::InvalidNcryptsec(e.to_string())
+            }
+        })?;
 
         let keys = Keys::new(secret_key.clone());
         Ok(Self {

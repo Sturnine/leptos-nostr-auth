@@ -130,7 +130,6 @@ pub fn NostrAuthModal(
                 // Backdrop
                 <div
                     data-nostr-backdrop=""
-                    class=if cfg!(feature = "daisyui") { "modal modal-open" } else { "" }
                     on:click={
                         move |_| {
                             if config.get_value().close_on_backdrop_click {
@@ -145,8 +144,6 @@ pub fn NostrAuthModal(
                         aria-modal="true"
                         aria-label="Connect to Nostr"
                         data-nostr-modal=""
-                        data-theme=if cfg!(feature = "daisyui") { "dark" } else { "" }
-                        class=if cfg!(feature = "daisyui") { "modal-box relative w-full max-w-sm" } else { "" }
                         on:click=|e| e.stop_propagation()
                     >
                         <ModalHeader
@@ -215,7 +212,6 @@ pub fn NostrAuthModal(
                             <div
                                 role="alert"
                                 data-nostr-error=""
-                                class=if cfg!(feature = "daisyui") { "alert alert-error mt-3 text-sm py-2" } else { "" }
                             >
                                 {move || error.get().unwrap_or_default()}
                             </div>
@@ -241,14 +237,12 @@ fn ModalHeader(
     view! {
         <div
             data-nostr-modal-header=""
-            class=if cfg!(feature = "daisyui") { "flex items-center justify-between mb-4" } else { "" }
         >
-            <div class=if cfg!(feature = "daisyui") { "flex items-center gap-2" } else { "" }>
+            <div>
                 <Show when=show_back fallback=|| ()>
                     <button
                         aria-label="Back to login methods"
                         data-nostr-back=""
-                        class=if cfg!(feature = "daisyui") { "btn btn-ghost btn-sm btn-circle" } else { "" }
                         on:click=move |_| {
                             set_step.set(ModalStep::MethodSelect);
                             set_error.set(None);
@@ -262,7 +256,6 @@ fn ModalHeader(
                 </Show>
                 <h2
                     data-nostr-modal-title=""
-                    class=if cfg!(feature = "daisyui") { "text-lg font-semibold" } else { "" }
                 >
                     {move || step.get().title()}
                 </h2>
@@ -270,7 +263,6 @@ fn ModalHeader(
             <button
                 aria-label="Close login modal"
                 data-nostr-close=""
-                class=if cfg!(feature = "daisyui") { "btn btn-ghost btn-sm btn-circle" } else { "" }
                 on:click=move |_| on_close()
             >
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -306,7 +298,7 @@ fn StepMethodSelect(
     let show_passkey = move || platform.get().supports_webauthn && passkey_allowed;
 
     view! {
-        <div data-nostr-methods="" class=if cfg!(feature = "daisyui") { "flex flex-col gap-2" } else { "" }>
+        <div data-nostr-methods="">
 
             // ── Apple: passkey first ──────────────────────────────────────────
             <Show when=move || matches!(platform.get().os, Os::Apple) && show_passkey() fallback=|| ()>
@@ -376,8 +368,7 @@ fn StepMethodSelect(
             </Show>
 
             // ── Divider ───────────────────────────────────────────────────────
-            <div data-nostr-divider=""
-                 class=if cfg!(feature = "daisyui") { "divider text-xs opacity-50 my-1" } else { "" }>
+            <div data-nostr-divider="">
                 "More options"
             </div>
 
@@ -406,10 +397,10 @@ fn StepMethodSelect(
             // ── Raw nsec (feature-gated) ──────────────────────────────────────
             <Show when=move || show_nsec fallback=|| ()>
                 <details data-nostr-advanced="">
-                    <summary class=if cfg!(feature = "daisyui") { "text-xs opacity-50 cursor-pointer mt-1" } else { "" }>
+                    <summary>
                         "Advanced"
                     </summary>
-                    <div class=if cfg!(feature = "daisyui") { "mt-2" } else { "" }>
+                    <div>
                         {
                             #[cfg(feature = "insecure_nsec_input")]
                             {
@@ -449,24 +440,19 @@ fn MethodButton(
         <button
             data-nostr-method=""
             aria-label=format!("Login with {title}")
-            class=if cfg!(feature = "daisyui") {
-                "btn btn-ghost btn-block justify-start gap-3 text-left h-auto py-3"
-            } else { "" }
             on:click=move |_| on_click()
         >
-            <span data-nostr-method-icon="" class=if cfg!(feature = "daisyui") { "text-2xl" } else { "" }>
+            <span data-nostr-method-icon="">
                 {icon}
             </span>
-            <span class=if cfg!(feature = "daisyui") { "flex-1 min-w-0" } else { "" }>
+            <span>
                 <span
                     data-nostr-method-title=""
-                    class=if cfg!(feature = "daisyui") { "block font-medium text-sm" } else { "" }
                 >
                     {title}
                     {badge.map(|b| view! {
                         <span
                             data-nostr-badge=""
-                            class=if cfg!(feature = "daisyui") { "badge badge-primary badge-sm ml-2" } else { "" }
                         >
                             {b}
                         </span>
@@ -474,13 +460,12 @@ fn MethodButton(
                 </span>
                 <span
                     data-nostr-method-subtitle=""
-                    class=if cfg!(feature = "daisyui") { "block text-xs opacity-60 truncate" } else { "" }
                 >
                     {subtitle}
                 </span>
             </span>
             // Chevron
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class=if cfg!(feature = "daisyui") { "opacity-40 shrink-0" } else { "" }>
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M9 18l6-6-6-6"/>
             </svg>
         </button>
@@ -552,26 +537,24 @@ fn StepExtension(
     Effect::new(move |_| attempt());
 
     view! {
-        <div data-nostr-step="extension" class=if cfg!(feature = "daisyui") { "flex flex-col items-center gap-4 py-4" } else { "" }>
+        <div data-nostr-step="extension">
             <Show when=move || loading.get() fallback=|| ()>
                 <span
                     aria-label="Waiting for extension…"
                     aria-live="polite"
-                    class=if cfg!(feature = "daisyui") { "loading loading-spinner loading-lg" } else { "" }
+                    data-nostr-spinner=""
                 />
-                <p class=if cfg!(feature = "daisyui") { "text-sm opacity-70" } else { "" }>
+                <p>
                     "Waiting for extension approval…"
                 </p>
             </Show>
             <Show when=move || !loading.get() && !done.get() fallback=|| ()>
                 <button
-                    class=if cfg!(feature = "daisyui") { "btn btn-primary" } else { "" }
                     on:click=move |_| attempt()
                 >
                     "Try again"
                 </button>
                 <button
-                    class=if cfg!(feature = "daisyui") { "btn btn-ghost btn-sm" } else { "" }
                     on:click=move |_| set_step.set(ModalStep::MethodSelect)
                 >
                     "Choose a different method"
@@ -598,8 +581,8 @@ fn StepBunker(
     let _ = (on_auth, timeout);
 
     let connect = move || {
-        let uri_val = uri.get();
-        if uri_val.trim().is_empty() {
+        let uri_val = uri.get().trim().to_string();
+        if uri_val.is_empty() {
             set_error.set(Some("Please paste a bunker:// URI.".into()));
             return;
         }
@@ -623,10 +606,10 @@ fn StepBunker(
     };
 
     view! {
-        <div data-nostr-step="bunker" class=if cfg!(feature = "daisyui") { "flex flex-col gap-3" } else { "" }>
-            <p class=if cfg!(feature = "daisyui") { "text-sm opacity-70" } else { "" }>
+        <div data-nostr-step="bunker">
+            <p>
                 "Paste a "
-                <code class=if cfg!(feature = "daisyui") { "font-mono text-xs" } else { ""}>
+                <code>
                     "bunker://"
                 </code>
                 " URI from nsecBunker, Amber, or any NIP-46 signer."
@@ -636,7 +619,6 @@ fn StepBunker(
             <Show when=move || matches!(platform.get().os, Os::Android) fallback=|| ()>
                 <div
                     data-nostr-tip=""
-                    class=if cfg!(feature = "daisyui") { "alert text-sm py-2" } else { "" }
                 >
                     "Using Amber? Open Amber → Settings → Enable NIP-46 Bunker → copy the URI here."
                 </div>
@@ -646,7 +628,6 @@ fn StepBunker(
                 type="text"
                 placeholder="bunker://..."
                 data-nostr-input="bunker-uri"
-                class=if cfg!(feature = "daisyui") { "input input-bordered w-full font-mono text-sm" } else { "" }
                 aria-label="Bunker URI"
                 on:input=move |e| set_uri.set(event_target_value(&e))
                 prop:value=move || uri.get()
@@ -658,12 +639,11 @@ fn StepBunker(
             />
 
             <button
-                class=if cfg!(feature = "daisyui") { "btn btn-primary w-full" } else { "" }
                 disabled=move || loading.get()
                 on:click=move |_| connect()
             >
                 <Show when=move || loading.get() fallback=|| view! { "Connect" }>
-                    <span class=if cfg!(feature = "daisyui") { "loading loading-spinner loading-sm" } else { "" } />
+                    <span data-nostr-spinner="" />
                     "Connecting…"
                 </Show>
             </button>
@@ -688,26 +668,25 @@ fn StepPasskey(
     let _ = (on_auth, rp_id, rp_name);
 
     view! {
-        <div data-nostr-step="passkey" class=if cfg!(feature = "daisyui") { "flex flex-col gap-3" } else { "" }>
+        <div data-nostr-step="passkey">
             <Show when=move || sub_step.get() == PasskeySubStep::Choose fallback=move || view! {
-                <div class=if cfg!(feature = "daisyui") { "flex flex-col items-center gap-3 py-4" } else { "" }>
+                <div>
                     <span
                         aria-label="Waiting for biometric…"
                         aria-live="polite"
-                        class=if cfg!(feature = "daisyui") { "loading loading-spinner loading-lg" } else { "" }
+                        data-nostr-spinner=""
                     />
-                    <p class=if cfg!(feature = "daisyui") { "text-sm opacity-70" } else { "" }>
+                    <p>
                         "Complete the biometric prompt…"
                     </p>
                 </div>
             }>
-                <p class=if cfg!(feature = "daisyui") { "text-sm opacity-70" } else { "" }>
+                <p>
                     "Your Nostr identity is derived from your passkey using a deterministic algorithm.
                     The same passkey always produces the same Nostr key on any device."
                 </p>
 
                 <button
-                    class=if cfg!(feature = "daisyui") { "btn btn-primary w-full" } else { "" }
                     on:click=move |_| {
                         set_sub_step.set(PasskeySubStep::Loading);
                         set_error.set(None);
@@ -739,7 +718,6 @@ fn StepPasskey(
                 </button>
 
                 <button
-                    class=if cfg!(feature = "daisyui") { "btn btn-ghost btn-sm w-full" } else { "" }
                     on:click=move |_| {
                         set_sub_step.set(PasskeySubStep::Loading);
                         set_error.set(None);
@@ -788,10 +766,9 @@ fn StepReadOnly(
     };
 
     view! {
-        <div data-nostr-step="readonly" class=if cfg!(feature = "daisyui") { "flex flex-col gap-3" } else { "" }>
+        <div data-nostr-step="readonly">
             <div
                 data-nostr-info=""
-                class=if cfg!(feature = "daisyui") { "alert text-sm py-2" } else { "" }
             >
                 "Read-only mode — you can browse but cannot post or send messages."
             </div>
@@ -800,7 +777,6 @@ fn StepReadOnly(
                 type="text"
                 placeholder="npub1... or nprofile1... or 64-char hex"
                 data-nostr-input="pubkey"
-                class=if cfg!(feature = "daisyui") { "input input-bordered w-full font-mono text-sm" } else { "" }
                 aria-label="Public key (npub, nprofile, or hex)"
                 on:input=move |e| set_input.set(event_target_value(&e))
                 prop:value=move || input.get()
@@ -810,7 +786,6 @@ fn StepReadOnly(
             />
 
             <button
-                class=if cfg!(feature = "daisyui") { "btn btn-primary w-full" } else { "" }
                 on:click=move |_| submit()
             >
                 "Browse read-only"
@@ -834,9 +809,9 @@ fn StepNcryptsec(
     let _ = on_auth;
 
     let decrypt = move || {
-        let nc = ncryptsec.get();
+        let nc = ncryptsec.get().trim().to_string();
         let pw = password.get();
-        if nc.trim().is_empty() {
+        if nc.is_empty() {
             set_error.set(Some("Please paste your ncryptsec1... key.".into()));
             return;
         }
@@ -873,10 +848,10 @@ fn StepNcryptsec(
     };
 
     view! {
-        <div data-nostr-step="ncryptsec" class=if cfg!(feature = "daisyui") { "flex flex-col gap-3" } else { "" }>
-            <p class=if cfg!(feature = "daisyui") { "text-sm opacity-70" } else { "" }>
+        <div data-nostr-step="ncryptsec">
+            <p>
                 "Paste your "
-                <code class=if cfg!(feature = "daisyui") { "font-mono text-xs" } else { "" }>
+                <code>
                     "ncryptsec1..."
                 </code>
                 " encrypted key and enter your password to decrypt it."
@@ -886,7 +861,6 @@ fn StepNcryptsec(
                 type="text"
                 placeholder="ncryptsec1..."
                 data-nostr-input="ncryptsec"
-                class=if cfg!(feature = "daisyui") { "input input-bordered w-full font-mono text-sm" } else { "" }
                 aria-label="ncryptsec encrypted key"
                 on:input=move |e| set_ncryptsec.set(event_target_value(&e))
                 prop:value=move || ncryptsec.get()
@@ -896,7 +870,6 @@ fn StepNcryptsec(
                 type="password"
                 placeholder="Password"
                 data-nostr-input="ncryptsec-password"
-                class=if cfg!(feature = "daisyui") { "input input-bordered w-full" } else { "" }
                 aria-label="ncryptsec decryption password"
                 on:input=move |e| set_password.set(event_target_value(&e))
                 prop:value=move || password.get()
@@ -906,12 +879,11 @@ fn StepNcryptsec(
             />
 
             <button
-                class=if cfg!(feature = "daisyui") { "btn btn-primary w-full" } else { "" }
                 disabled=move || loading.get()
                 on:click=move |_| decrypt()
             >
                 <Show when=move || loading.get() fallback=|| view! { "Decrypt and sign in" }>
-                    <span class=if cfg!(feature = "daisyui") { "loading loading-spinner loading-sm" } else { "" } />
+                    <span data-nostr-spinner="" />
                     "Decrypting…"
                 </Show>
             </button>
@@ -925,26 +897,24 @@ fn StepNcryptsec(
 #[component]
 fn StepRawNsecWarn(set_step: WriteSignal<ModalStep>) -> impl IntoView {
     view! {
-        <div data-nostr-step="nsec-warn" class=if cfg!(feature = "daisyui") { "flex flex-col gap-4" } else { "" }>
+        <div data-nostr-step="nsec-warn">
             <div
                 role="alert"
                 data-nostr-warning=""
-                class=if cfg!(feature = "daisyui") { "alert alert-error flex-col items-start" } else { "" }
             >
-                <p class=if cfg!(feature = "daisyui") { "font-bold" } else { "" }>
+                <p>
                     "⚠️ This is not recommended"
                 </p>
-                <ul class=if cfg!(feature = "daisyui") { "list-disc list-inside text-sm mt-2 space-y-1 opacity-90" } else { "" }>
+                <ul>
                     <li>"Any malicious script on this page can steal your key"</li>
                     <li>"Your clipboard may be monitored"</li>
                     <li>"Use a browser extension or passkey instead"</li>
                 </ul>
             </div>
-            <p class=if cfg!(feature = "daisyui") { "text-sm opacity-70" } else { "" }>
+            <p>
                 "If you understand the risks and still want to proceed, tap below."
             </p>
             <button
-                class=if cfg!(feature = "daisyui") { "btn btn-error w-full" } else { "" }
                 on:click=move |_| set_step.set(ModalStep::RawNsec)
             >
                 "I understand the risks — continue"
@@ -975,13 +945,12 @@ fn StepRawNsec(
     };
 
     view! {
-        <div data-nostr-step="nsec" class=if cfg!(feature = "daisyui") { "flex flex-col gap-3" } else { "" }>
+        <div data-nostr-step="nsec">
             <input
                 type="password"
                 autocomplete="off"
                 placeholder="nsec1... or 64-char hex"
                 data-nostr-input="nsec"
-                class=if cfg!(feature = "daisyui") { "input input-bordered w-full font-mono text-sm" } else { "" }
                 aria-label="Secret key (nsec or hex)"
                 on:input=move |e| set_nsec.set(event_target_value(&e))
                 prop:value=move || nsec.get()
@@ -990,7 +959,6 @@ fn StepRawNsec(
                 }
             />
             <button
-                class=if cfg!(feature = "daisyui") { "btn btn-error w-full" } else { "" }
                 on:click=move |_| import()
             >
                 "Import secret key"

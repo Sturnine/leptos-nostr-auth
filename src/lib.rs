@@ -20,7 +20,6 @@
 //!
 //! # Feature flags
 //!
-//! - `daisyui` — enables daisyUI 5 + Tailwind v4 styling with dark theme
 //! - `insecure_nsec_input` — enables raw nsec/hex key paste (XSS risk; opt-in only)
 
 /// Context provider and reactive auth state.

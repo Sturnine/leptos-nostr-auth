@@ -12,14 +12,6 @@
       pkgs = import nixpkgs {
         system = "aarch64-darwin";
       };
-
-      # daisyUI v5 pre-built CSS — fetched hermetically, no npm required.
-      # Tailwind v4 processes utility classes separately; daisyUI component
-      # classes come from this pre-built file (no @plugin needed).
-      daisyuiCss = pkgs.fetchurl {
-        url = "https://cdn.jsdelivr.net/npm/daisyui@5/daisyui.css";
-        hash = "sha256-KRRl1N+YT1jUrmlJJQJQYZnTJTCWtMdTgT5PUJkYWlg=";
-      };
     in
     {
       devShells.aarch64-darwin.default = pkgs.mkShell {
@@ -36,7 +28,6 @@
           llvmPackages.libclang
           llvmPackages.clang-unwrapped
           lld
-          tailwindcss_4
           (pkgs.callPackage buildWasmBindgenCli rec {
             src = fetchCrate {
               pname = "wasm-bindgen-cli";
@@ -58,8 +49,6 @@
           export PATH="/opt/homebrew/opt/llvm/bin/:$PATH"
           export CC=${llvmPackages.clang}/bin/clang
           export AR=${llvmPackages.bintools-unwrapped}/bin/llvm-ar
-          install -m 644 ${daisyuiCss} "$PWD/examples/with-daisyui/style/daisyui.css"
-          install -m 644 ${daisyuiCss} "$PWD/examples/with-axum-daisyui/style/daisyui.css"
         '';
       };
     };

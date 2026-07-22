@@ -1,7 +1,0 @@
-@import "tailwindcss";
-@source "../src/**/*.rs";
-@source inline("block cursor-pointer flex flex-1 flex-col font-medium font-mono font-semibold gap-2 gap-3 gap-4 h-auto items-center items-start justify-between justify-start list-disc list-inside max-w-sm mb-4 min-w-0 ml-2 mt-1 mt-2 mt-3 my-1 opacity-40 opacity-50 opacity-60 opacity-70 opacity-90 p-3 py-2 py-3 py-4 relative shrink-0 space-y-1 text-left text-lg text-sm text-xs truncate w-full");
-
-[data-nostr-icon-amber] {
-    color: #f97316;
-}
