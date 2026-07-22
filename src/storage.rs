@@ -47,6 +47,11 @@ pub async fn restore_session(
                     .ok_or_else(|| NostrAuthError::InvalidBunkerUri("no URI stored".into()))?;
                 let session =
                     crate::signers::BunkerSession::connect(uri, bunker_timeout_secs).await?;
+                if session.public_key != stored_pk {
+                    return Err(NostrAuthError::BunkerConnectionFailed(
+                        "Bunker returned a different public key than the stored session".into(),
+                    ));
+                }
                 Ok(crate::signers::AuthResult::Bunker(Box::new(session)))
             }
             PersistedMethod::Passkey => {
@@ -58,7 +63,7 @@ pub async fn restore_session(
                     cred_id_b64,
                 )
                 .map_err(|e| NostrAuthError::PasskeyFailed(e.to_string()))?;
-                let ps = crate::signers::PasskeySession::authenticate(cred_id).await?;
+                let ps = crate::signers::PasskeySession::authenticate(Some(cred_id)).await?;
                 if ps.public_key != stored_pk {
                     return Err(NostrAuthError::PasskeyFailed(
                         "Passkey derived a different public key than the stored session".into(),

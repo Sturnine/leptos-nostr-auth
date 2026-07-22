@@ -692,11 +692,14 @@ fn StepPasskey(
                         set_error.set(None);
                         #[cfg(not(feature = "ssr"))]
                         {
-                            let rp = rp_id.get_value().clone().unwrap_or_else(|| {
-                                web_sys::window()
-                                    .and_then(|w| w.location().hostname().ok())
-                                    .unwrap_or_else(|| "localhost".into())
-                            });
+                            let rp = rp_id
+                                .get_value()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| {
+                                    web_sys::window()
+                                        .and_then(|w| w.location().hostname().ok())
+                                        .unwrap_or_else(|| "localhost".into())
+                                });
                             let rp_name_val = rp_name.get_value();
                             spawn_local(async move {
                                 match PasskeySession::create(&rp, &rp_name_val).await {
@@ -723,8 +726,8 @@ fn StepPasskey(
                         set_error.set(None);
                         #[cfg(not(feature = "ssr"))]
                         spawn_local(async move {
-                            // Empty credential ID → browser presents all stored passkeys
-                            match PasskeySession::authenticate(vec![]).await {
+                            // None → discoverable login: browser presents all stored passkeys
+                            match PasskeySession::authenticate(None).await {
                                 Ok(session) => {
                                     on_auth.run(AuthResult::Passkey(session));
                                 }

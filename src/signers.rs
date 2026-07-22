@@ -180,15 +180,17 @@ struct BunkerUri {
 
 #[cfg(not(feature = "ssr"))]
 fn parse_bunker_uri(uri: &str) -> Result<BunkerUri, NostrAuthError> {
-    // Accept both bunker:// and nostrconnect:// schemes
-    let stripped = uri
-        .strip_prefix("bunker://")
-        .or_else(|| uri.strip_prefix("nostrconnect://"))
-        .ok_or_else(|| {
-            NostrAuthError::InvalidBunkerUri(
-                "URI must start with bunker:// or nostrconnect://".into(),
-            )
-        })?;
+    if uri.starts_with("nostrconnect://") {
+        return Err(NostrAuthError::InvalidBunkerUri(
+            "nostrconnect:// (client-initiated pairing) is not yet supported — \
+             paste the bunker:// URI shown by your remote signer instead"
+                .into(),
+        ));
+    }
+
+    let stripped = uri.strip_prefix("bunker://").ok_or_else(|| {
+        NostrAuthError::InvalidBunkerUri("URI must start with bunker://".into())
+    })?;
 
     let (pubkey_part, query) = stripped.split_once('?').unwrap_or((stripped, ""));
     let remote_pubkey_hex = pubkey_part.to_lowercase();
@@ -246,6 +248,12 @@ type MessageHandlerSlot = Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MessageEv
 ///
 /// Maintains a persistent WebSocket to the relay — reused across `sign_event` calls
 /// so each signing request does not pay the full connection setup cost.
+///
+/// `Clone` is shallow: every clone shares the same underlying WebSocket, message
+/// handler, and pending-request map via `Rc<RefCell<_>>`. This is intentional —
+/// all clones (e.g. from repeated reads of a reactive `Signal<AuthResult>`) refer
+/// to one physical connection, not independent snapshots. Concurrent reconnects
+/// across clones are serialized by `connect_lock` in `ensure_ws`.
 #[derive(Clone)]
 #[allow(dead_code)] // fields used only in non-ssr code paths
 pub struct BunkerSession {
@@ -271,14 +279,21 @@ pub struct BunkerSession {
     /// Pending RPC callbacks keyed by request ID.
     #[cfg(not(feature = "ssr"))]
     pending: SendWrapper<PendingMap>,
+    /// Set while a reconnect is in flight; a concurrent caller awaits this
+    /// promise instead of racing a second WebSocket into existence, then
+    /// reads the winner's result off `ws`. See `ensure_ws`.
+    #[cfg(not(feature = "ssr"))]
+    connect_lock: SendWrapper<Rc<RefCell<Option<Promise>>>>,
 }
 
 impl BunkerSession {
-    /// Establish a NIP-46 connection from a `bunker://` or `nostrconnect://` URI.
+    /// Establish a NIP-46 connection from a `bunker://` URI.
     ///
     /// # Errors
     ///
-    /// Returns an error when called with SSR features or when connection fails.
+    /// Returns an error when called with SSR features, when connection fails,
+    /// or when given a `nostrconnect://` URI (client-initiated pairing is not
+    /// yet supported).
     pub async fn connect(uri: &str, timeout_secs: u32) -> Result<Self, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -359,6 +374,7 @@ impl BunkerSession {
                 ws: SendWrapper::new(Rc::new(RefCell::new(None))),
                 message_handler: SendWrapper::new(Rc::new(RefCell::new(None))),
                 pending: SendWrapper::new(Rc::new(RefCell::new(HashMap::new()))),
+                connect_lock: SendWrapper::new(Rc::new(RefCell::new(None))),
             })
         }
     }
@@ -484,15 +500,66 @@ impl BunkerSession {
 
     /// Ensure the persistent WebSocket is open, reconnecting if necessary.
     /// Returns the WebSocket ready to send messages.
+    ///
+    /// Concurrent callers serialize on `connect_lock`: only the first caller
+    /// actually reconnects; subsequent callers await that attempt's result
+    /// instead of each opening their own socket (which would orphan all but
+    /// one in-flight RPC until timeout).
     #[cfg(not(feature = "ssr"))]
     async fn ensure_ws(&self) -> Result<web_sys::WebSocket, NostrAuthError> {
-        // Check if we have an open WS already
         if let Some(ws) = self.ws.borrow().as_ref()
             && ws.ready_state() == web_sys::WebSocket::OPEN
         {
             return Ok(ws.clone());
         }
 
+        // Someone else is already (re)connecting — await their result.
+        let in_flight = self.connect_lock.borrow().clone();
+        if let Some(promise) = in_flight {
+            JsFuture::from(promise).await.map_err(|e| {
+                let msg = e.as_string().unwrap_or_else(|| "connect failed".into());
+                if msg == "timeout" {
+                    NostrAuthError::BunkerTimeout
+                } else {
+                    NostrAuthError::BunkerConnectionFailed(msg)
+                }
+            })?;
+            return self
+                .ws
+                .borrow()
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| NostrAuthError::BunkerConnectionFailed("reconnect failed".into()));
+        }
+
+        // We're the leader: publish a shared promise so concurrent callers
+        // can await this attempt instead of starting their own.
+        let (lock_promise, lock_resolve, lock_reject) = make_rpc_promise();
+        *self.connect_lock.borrow_mut() = Some(lock_promise);
+
+        let result = self.do_reconnect().await;
+
+        *self.connect_lock.borrow_mut() = None;
+        match &result {
+            Ok(_) => {
+                if let Some(f) = &lock_resolve {
+                    let _ = f.call1(&JsValue::UNDEFINED, &JsValue::UNDEFINED);
+                }
+            }
+            Err(e) => {
+                if let Some(f) = &lock_reject {
+                    let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&e.to_string()));
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Actually tears down any stale socket and opens + waits for a new one.
+    /// Only ever called from `ensure_ws`, which serializes concurrent callers.
+    #[cfg(not(feature = "ssr"))]
+    async fn do_reconnect(&self) -> Result<web_sys::WebSocket, NostrAuthError> {
         // Tear down any stale socket before reconnecting so its handlers can't
         // fire against the new connection and its closure is dropped cleanly.
         if let Some(old_ws) = self.ws.borrow_mut().take() {
@@ -644,6 +711,45 @@ impl BunkerSession {
     }
 }
 
+/// Decode a raw relay message as a NIP-46 response event addressed to us.
+///
+/// Returns `Some((request_id, Ok(result_json) | Err(error_message)))` if `data`
+/// is a well-formed `["EVENT", sub_id, event]` message whose event is kind
+/// 24133, from `remote_pubkey_hex`, and NIP-44-decrypts to a JSON-RPC-shaped
+/// response. Returns `None` for anything else (malformed, wrong kind, wrong
+/// sender, undecryptable, or unparseable plaintext) — callers should silently
+/// ignore such messages rather than error, since relays may deliver unrelated
+/// events on the same subscription.
+#[cfg(not(feature = "ssr"))]
+fn decode_nip46_response(
+    data: &str,
+    client_keys: &Keys,
+    remote_pubkey: &PublicKey,
+    remote_pubkey_hex: &str,
+) -> Option<(String, Result<String, String>)> {
+    let msg: serde_json::Value = serde_json::from_str(data).ok()?;
+    if msg[0].as_str() != Some("EVENT") {
+        return None;
+    }
+    let event_obj = &msg[2];
+    if event_obj["kind"].as_u64() != Some(24133) {
+        return None;
+    }
+    if event_obj["pubkey"].as_str()? != remote_pubkey_hex {
+        return None;
+    }
+    let ciphertext = event_obj["content"].as_str()?;
+    let plaintext =
+        nostr::nips::nip44::decrypt(client_keys.secret_key(), remote_pubkey, ciphertext).ok()?;
+    let resp: serde_json::Value = serde_json::from_str(&plaintext).ok()?;
+    let req_id = resp["id"].as_str()?.to_string();
+    let result = match resp["error"].as_str().filter(|s| !s.is_empty()) {
+        Some(err) => Err(err.to_string()),
+        None => Ok(resp["result"].to_string()),
+    };
+    Some((req_id, result))
+}
+
 /// Install a persistent `onmessage` handler that decrypts NIP-46 responses and
 /// dispatches them to the pending map. The closure is stored in `handler_slot`,
 /// which drops (and zeroizes) any previous handler's captured client_keys clone
@@ -665,45 +771,13 @@ fn setup_persistent_message_handler(
         let Some(data) = e.data().as_string() else {
             return;
         };
-        let msg: serde_json::Value = match serde_json::from_str(&data) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        if msg[0].as_str() != Some("EVENT") {
-            return;
-        }
-        let event_obj = &msg[2];
-        if event_obj["kind"].as_u64() != Some(24133) {
-            return;
-        }
-        match event_obj["pubkey"].as_str() {
-            Some(pk) if pk == remote_hex => {}
-            _ => return,
-        }
-        let ciphertext = match event_obj["content"].as_str() {
-            Some(s) => s.to_string(),
-            None => return,
-        };
-        let Ok(plaintext) =
-            nostr::nips::nip44::decrypt(keys_clone.secret_key(), &remote_pk_clone, &ciphertext)
+        let Some((req_id, result)) =
+            decode_nip46_response(&data, &keys_clone, &remote_pk_clone, &remote_hex)
         else {
             return;
         };
-        let resp: serde_json::Value = match serde_json::from_str(&plaintext) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        let Some(req_id) = resp["id"].as_str() else {
-            return;
-        };
-
-        let cb = pending_clone.borrow_mut().remove(req_id);
-        if let Some(cb) = cb {
-            if let Some(err) = resp["error"].as_str().filter(|s| !s.is_empty()) {
-                cb(Err(err.to_string()));
-            } else {
-                cb(Ok(resp["result"].to_string()));
-            }
+        if let Some(cb) = pending_clone.borrow_mut().remove(&req_id) {
+            cb(result);
         }
     });
 
@@ -896,48 +970,31 @@ async fn websocket_one_shot_rpc(
         let Some(data) = e.data().as_string() else {
             return;
         };
-        let msg: serde_json::Value = match serde_json::from_str(&data) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        if msg[0].as_str() != Some("EVENT") {
-            return;
-        }
-        let event_obj = &msg[2];
-        if event_obj["kind"].as_u64() != Some(24133) {
-            return;
-        }
-        if event_obj["pubkey"].as_str().unwrap_or_default() != remote_pubkey_hex_owned {
-            return;
-        }
-        let ciphertext = match event_obj["content"].as_str() {
-            Some(s) => s.to_string(),
-            None => return,
-        };
         let Ok(remote_pk) = PublicKey::from_hex(&remote_pubkey_hex_owned) else {
             return;
         };
-        let Ok(plaintext) =
-            nostr::nips::nip44::decrypt(client_keys_clone.secret_key(), &remote_pk, &ciphertext)
-        else {
+        let Some((req_id, result)) = decode_nip46_response(
+            &data,
+            &client_keys_clone,
+            &remote_pk,
+            &remote_pubkey_hex_owned,
+        ) else {
             return;
         };
-        let resp: serde_json::Value = match serde_json::from_str(&plaintext) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        if resp["id"].as_str() != Some(&req_id_owned) {
+        if req_id != req_id_owned {
             return;
         }
-        if let Some(err) = resp["error"].as_str().filter(|s| !s.is_empty()) {
-            if let Some(f) = &reject_for_msg {
-                let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(err));
+        match result {
+            Ok(result_str) => {
+                if let Some(f) = &resolve_for_msg {
+                    let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&result_str));
+                }
             }
-            return;
-        }
-        let result = resp["result"].to_string();
-        if let Some(f) = &resolve_for_msg {
-            let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&result));
+            Err(err) => {
+                if let Some(f) = &reject_for_msg {
+                    let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&err));
+                }
+            }
         }
     });
 
@@ -1013,7 +1070,10 @@ pub struct PasskeySession {
     pub public_key: PublicKey,
     /// In-memory-only secp256k1 secret key derived from the WebAuthn PRF output.
     secret_key: SecretKey,
-    /// base64url-encoded credential ID — stored in `PersistedSession` for restore
+    /// Raw credential ID bytes, as returned by the browser's WebAuthn API
+    /// (`credential.rawId`). Not encoded — callers that persist this (see
+    /// `PersistedSession::passkey_credential_id`) base64url-encode it themselves;
+    /// `authenticate` takes raw bytes back, not an encoded string.
     pub credential_id: Vec<u8>,
 }
 
@@ -1104,15 +1164,21 @@ impl PasskeySession {
         }
     }
 
-    /// Authenticate with an existing passkey using its credential ID.
+    /// Authenticate with an existing passkey.
     ///
     /// On macOS/iOS: triggers Touch ID / Face ID sheet.
     /// The same passkey + same PRF salt always produces the same Nostr key (deterministic).
     ///
+    /// Pass `Some(credential_id)` to restrict the browser prompt to one specific
+    /// stored credential (used when restoring a persisted session). Pass `None`
+    /// for discoverable login, where the browser presents all stored passkeys
+    /// for this origin and the user picks one (used for "I already have a
+    /// passkey" with no prior session).
+    ///
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when passkey authentication fails.
-    pub async fn authenticate(credential_id: Vec<u8>) -> Result<Self, NostrAuthError> {
+    pub async fn authenticate(credential_id: Option<Vec<u8>>) -> Result<Self, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
             let _ = credential_id;
@@ -1144,7 +1210,7 @@ impl PasskeySession {
             Reflect::set(&prf_eval, &"first".into(), &salt_u8).unwrap();
             set(&prf, "eval", &prf_eval);
 
-            if !credential_id.is_empty() {
+            if let Some(credential_id) = &credential_id {
                 // Restrict assertion to the stored credential
                 let cred_descriptor = Object::new();
                 set_str(&cred_descriptor, "type", "public-key");
@@ -1155,7 +1221,7 @@ impl PasskeySession {
 
                 // evalByCredential for spec-compliant browsers that prefer it over eval
                 let cred_id_b64 =
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_id);
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id);
                 let eval_by_cred = Object::new();
                 let prf_eval_ebc = Object::new();
                 let salt_u8_ebc = Uint8Array::from(PRF_SALT);
