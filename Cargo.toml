@@ -20,7 +20,7 @@ insecure_nsec_input = []
 
 # Rendering modes — consumer enables exactly one per build target
 ssr = ["leptos/ssr", "leptos-use/ssr"]
-hydrate = ["leptos/hydrate", "leptos-use/ssr"]
+hydrate = ["leptos/hydrate"]
 csr = ["leptos/csr"]
 
 [dependencies]
