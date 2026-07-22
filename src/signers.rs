@@ -307,8 +307,8 @@ impl BunkerSession {
     /// Establish a NIP-46 connection from a `bunker://` URI (fresh login).
     ///
     /// Generates a new ephemeral local pairing keypair for this session. To restore a
-    /// previously-authorized session without the bunker's one-time secret, use
-    /// [`BunkerSession::reconnect`] instead.
+    /// previously-authorized session without the bunker's one-time secret, the crate-internal
+    /// `BunkerSession::reconnect` (used by session restore) is used instead.
     ///
     /// # Errors
     ///

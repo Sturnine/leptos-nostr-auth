@@ -9,9 +9,7 @@ repository = "https://github.com/Magilis/leptos-nostr-auth"
 readme = "README.md"
 keywords = ["nostr", "leptos", "wasm", "authentication", "login"]
 categories = ["wasm", "web-programming", "authentication"]
-
-[lib]
-crate-type = ["cdylib", "rlib"]
+exclude = ["examples"]
 
 [features]
 default = []

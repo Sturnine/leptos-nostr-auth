@@ -264,7 +264,7 @@ mod types {
         }
     }
 
-    /// Configuration for [`NostrAuthModal`] and [`NostrAuthProvider`].
+    /// Configuration for [`crate::modal::NostrAuthModal`] and [`crate::context::NostrAuthProvider`].
     ///
     /// Construct with struct update syntax from [`Default`]:
     /// ```rust,ignore
