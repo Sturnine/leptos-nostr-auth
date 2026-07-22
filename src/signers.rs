@@ -17,7 +17,7 @@ use nostr::JsonUtil;
 #[cfg(not(feature = "ssr"))]
 use send_wrapper::SendWrapper;
 #[cfg(not(feature = "ssr"))]
-use std::cell::RefCell;
+use core::cell::RefCell;
 #[cfg(not(feature = "ssr"))]
 use std::collections::HashMap;
 #[cfg(not(feature = "ssr"))]
@@ -96,15 +96,19 @@ impl Nip07Handle {
 
         #[cfg(not(feature = "ssr"))]
         {
-            let event_val = js_sys::JSON::parse(event_json)
-                .map_err(|_| NostrAuthError::SigningFailed("invalid event JSON".into()))?;
+            let event_val = js_sys::JSON::parse(event_json).map_err(|e| {
+                NostrAuthError::SigningFailed(format!("invalid event JSON: {}", js_err_msg(&e)))
+            })?;
             let signed = nostr_sign_event(event_val)
                 .await
                 .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?;
             js_sys::JSON::stringify(&signed)
                 .map(|s| s.as_string().unwrap_or_default())
-                .map_err(|_| {
-                    NostrAuthError::SigningFailed("could not stringify signed event".into())
+                .map_err(|e| {
+                    NostrAuthError::SigningFailed(format!(
+                        "could not stringify signed event: {}",
+                        js_err_msg(&e)
+                    ))
                 })
         }
     }
@@ -173,11 +177,15 @@ impl Nip07Handle {
 /// Parsed bunker:// URI components — only needed in WASM (all callers are gated).
 #[cfg(not(feature = "ssr"))]
 struct BunkerUri {
+    /// Remote signer's public key, lowercase hex.
     remote_pubkey_hex: String,
+    /// Relay URL to connect through.
     relay_url: String,
+    /// Optional one-time pairing secret (never persisted — see `BunkerSession::reconnect`).
     secret: Option<String>,
 }
 
+/// Parse a `bunker://<remote-pubkey>?relay=<url>&secret=<secret>` URI.
 #[cfg(not(feature = "ssr"))]
 fn parse_bunker_uri(uri: &str) -> Result<BunkerUri, NostrAuthError> {
     if uri.starts_with("nostrconnect://") {
@@ -225,12 +233,21 @@ fn parse_bunker_uri(uri: &str) -> Result<BunkerUri, NostrAuthError> {
     })
 }
 
+/// Percent-decode a `bunker://` URI query value.
 #[cfg(not(feature = "ssr"))]
 fn urlencoding_decode(s: &str) -> String {
     js_sys::decode_uri_component(s).map_or_else(
-        |_| s.to_string(),
-        |v| v.as_string().unwrap_or_else(|| s.to_string()),
+        |_| s.to_owned(),
+        |v| v.as_string().unwrap_or_else(|| s.to_owned()),
     )
+}
+
+/// Percent-encode a string for use as a `bunker://` URI query value.
+#[cfg(not(feature = "ssr"))]
+fn urlencoding_encode(s: &str) -> String {
+    js_sys::encode_uri_component(s)
+        .as_string()
+        .unwrap_or_else(|| s.to_owned())
 }
 
 /// Pending RPC callbacks: maps request ID → `Box<dyn Fn(Result<String, String>)>`.
@@ -273,7 +290,7 @@ pub struct BunkerSession {
     #[cfg(not(feature = "ssr"))]
     ws: SendWrapper<Rc<RefCell<Option<web_sys::WebSocket>>>>,
     /// Current onmessage handler for `ws` — replaced (not leaked) on reconnect,
-    /// so reconnects don't accumulate closures holding client_keys clones.
+    /// so reconnects don't accumulate closures holding `client_keys` clones.
     #[cfg(not(feature = "ssr"))]
     message_handler: SendWrapper<MessageHandlerSlot>,
     /// Pending RPC callbacks keyed by request ID.
@@ -287,7 +304,11 @@ pub struct BunkerSession {
 }
 
 impl BunkerSession {
-    /// Establish a NIP-46 connection from a `bunker://` URI.
+    /// Establish a NIP-46 connection from a `bunker://` URI (fresh login).
+    ///
+    /// Generates a new ephemeral local pairing keypair for this session. To restore a
+    /// previously-authorized session without the bunker's one-time secret, use
+    /// [`BunkerSession::reconnect`] instead.
     ///
     /// # Errors
     ///
@@ -305,78 +326,136 @@ impl BunkerSession {
 
         #[cfg(not(feature = "ssr"))]
         {
-            let parsed = parse_bunker_uri(uri)?;
+            Self::connect_with_keys(uri, timeout_secs, Keys::generate()).await
+        }
+    }
 
-            let remote_pubkey = PublicKey::from_hex(&parsed.remote_pubkey_hex)
-                .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
+    /// Reconnect a previously-authorized session without the bunker's original pairing secret.
+    ///
+    /// `client_secret_hex` is the hex secret of the *local* NIP-46 pairing keypair generated
+    /// by the original [`BunkerSession::connect`] call — never the user's Nostr identity key,
+    /// never the bunker's one-time secret. Per NIP-46, that secret is single-use and the remote
+    /// signer is expected to already recognize this client's public key from the original
+    /// pairing, so no secret needs to be resent. If the remote signer has forgotten this client
+    /// (access revoked, or a non-compliant bunker that doesn't retain authorization), this call
+    /// fails and the caller should fall back to prompting the user to reconnect from scratch.
+    ///
+    /// Only called from `storage::restore_session`, which is itself client-only — no SSR stub
+    /// is needed here (unlike `connect`, which is public API called directly from the modal).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `client_secret_hex` is not a valid secret key, or when
+    /// reconnection fails.
+    #[cfg(not(feature = "ssr"))]
+    pub(crate) async fn reconnect(
+        uri_without_secret: &str,
+        timeout_secs: u32,
+        client_secret_hex: &str,
+    ) -> Result<Self, NostrAuthError> {
+        let secret_key = SecretKey::from_hex(client_secret_hex)
+            .map_err(|e| NostrAuthError::BunkerConnectionFailed(e.to_string()))?;
+        Self::connect_with_keys(uri_without_secret, timeout_secs, Keys::new(secret_key)).await
+    }
 
-            // Generate an ephemeral keypair for this client session
-            let client_keys = Keys::generate();
-            let client_pubkey_hex = client_keys.public_key().to_hex();
+    /// Shared implementation behind [`BunkerSession::connect`] and [`BunkerSession::reconnect`].
+    #[cfg(not(feature = "ssr"))]
+    async fn connect_with_keys(
+        uri: &str,
+        timeout_secs: u32,
+        client_keys: Keys,
+    ) -> Result<Self, NostrAuthError> {
+        let parsed = parse_bunker_uri(uri)?;
 
-            // NIP-46 connect request payload
-            let req_id = generate_request_id();
-            let params = match &parsed.secret {
-                Some(s) => serde_json::json!({
-                    "id": req_id,
-                    "method": "connect",
-                    "params": [client_pubkey_hex, s, "sign_event,get_public_key,nip44_encrypt,nip44_decrypt"]
-                }),
-                None => serde_json::json!({
+        let remote_pubkey = PublicKey::from_hex(&parsed.remote_pubkey_hex)
+            .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
+
+        let client_pubkey_hex = client_keys.public_key().to_hex();
+
+        // NIP-46 connect request payload
+        let req_id = generate_request_id();
+        let params = parsed.secret.as_deref().map_or_else(
+            || {
+                serde_json::json!({
                     "id": req_id,
                     "method": "connect",
                     "params": [client_pubkey_hex, "", "sign_event,get_public_key,nip44_encrypt,nip44_decrypt"]
-                }),
-            };
+                })
+            },
+            |s| {
+                serde_json::json!({
+                    "id": req_id,
+                    "method": "connect",
+                    "params": [client_pubkey_hex, s, "sign_event,get_public_key,nip44_encrypt,nip44_decrypt"]
+                })
+            },
+        );
 
-            let req_json = serde_json::to_string(&params)
-                .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
+        let req_json = serde_json::to_string(&params)
+            .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
 
-            // Encrypt request with NIP-44 using client secret key
-            let encrypted = nostr::nips::nip44::encrypt(
-                client_keys.secret_key(),
-                &remote_pubkey,
-                &req_json,
-                nostr::nips::nip44::Version::V2,
-            )
+        // Encrypt request with NIP-44 using client secret key
+        let encrypted = nostr::nips::nip44::encrypt(
+            client_keys.secret_key(),
+            &remote_pubkey,
+            &req_json,
+            nostr::nips::nip44::Version::V2,
+        )
+        .map_err(|e| NostrAuthError::BunkerConnectionFailed(e.to_string()))?;
+
+        // Build a kind:24133 event signed by client ephemeral key
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(24133), encrypted)
+            .tag(nostr::Tag::public_key(remote_pubkey))
+            .sign_with_keys(&client_keys)
             .map_err(|e| NostrAuthError::BunkerConnectionFailed(e.to_string()))?;
 
-            // Build a kind:24133 event signed by client ephemeral key
-            let event = nostr::EventBuilder::new(nostr::Kind::Custom(24133), encrypted)
-                .tag(nostr::Tag::public_key(remote_pubkey))
-                .sign_with_keys(&client_keys)
-                .map_err(|e| NostrAuthError::BunkerConnectionFailed(e.to_string()))?;
+        let event_json = event.as_json();
 
-            let event_json = event.as_json();
+        // Do the one-shot connect handshake (opens + closes a WS)
+        let remote_pubkey_hex = parsed.remote_pubkey_hex.clone();
+        let relay_url = parsed.relay_url.clone();
 
-            // Do the one-shot connect handshake (opens + closes a WS)
-            let remote_pubkey_hex = parsed.remote_pubkey_hex.clone();
-            let relay_url = parsed.relay_url.clone();
+        let result_pubkey = websocket_connect_handshake(
+            &relay_url,
+            &event_json,
+            &client_pubkey_hex,
+            &remote_pubkey_hex,
+            &client_keys,
+            &req_id,
+            timeout_secs,
+        )
+        .await?;
 
-            let result_pubkey = websocket_connect_handshake(
-                &relay_url,
-                &event_json,
-                &client_pubkey_hex,
-                &remote_pubkey_hex,
-                &client_keys,
-                &req_id,
-                timeout_secs,
-            )
-            .await?;
+        // Secret-stripped reconstruction: the bunker's one-time pairing secret (if any)
+        // is intentionally dropped here so it never lives in `bunker_uri` beyond this
+        // function — see `PersistedSession::bunker_client_secret_hex` for what gets
+        // persisted instead.
+        let bunker_uri = format!(
+            "bunker://{remote_pubkey_hex}?relay={}",
+            urlencoding_encode(&relay_url)
+        );
 
-            Ok(Self {
-                public_key: result_pubkey,
-                bunker_uri: uri.to_string(),
-                timeout_secs,
-                client_keys,
-                remote_pubkey,
-                relay_url: parsed.relay_url,
-                ws: SendWrapper::new(Rc::new(RefCell::new(None))),
-                message_handler: SendWrapper::new(Rc::new(RefCell::new(None))),
-                pending: SendWrapper::new(Rc::new(RefCell::new(HashMap::new()))),
-                connect_lock: SendWrapper::new(Rc::new(RefCell::new(None))),
-            })
-        }
+        Ok(Self {
+            public_key: result_pubkey,
+            bunker_uri,
+            timeout_secs,
+            client_keys,
+            remote_pubkey,
+            relay_url,
+            ws: SendWrapper::new(Rc::new(RefCell::new(None))),
+            message_handler: SendWrapper::new(Rc::new(RefCell::new(None))),
+            pending: SendWrapper::new(Rc::new(RefCell::new(HashMap::new()))),
+            connect_lock: SendWrapper::new(Rc::new(RefCell::new(None))),
+        })
+    }
+
+    /// Hex-encoded secret of this session's local NIP-46 pairing keypair.
+    ///
+    /// Persisted so [`BunkerSession::reconnect`] can restore the same client identity the
+    /// bunker already authorized. This is **not** the user's Nostr secret key — see
+    /// [`BunkerSession::reconnect`] docs for the exact risk model.
+    pub(crate) fn client_secret_hex(&self) -> String {
+        self.client_keys.secret_key().to_secret_hex()
     }
 
     /// Send a NIP-46 `sign_event` request to the remote signer.
@@ -662,7 +741,7 @@ impl BunkerSession {
 
         // Register a promise in the pending map before sending
         let (response_promise, resolve_fn, reject_fn) = make_rpc_promise();
-        let req_id_owned = req_id.to_string();
+        let req_id_owned = req_id.to_owned();
         let pending_clone = self.pending.clone();
         let req_id_for_cleanup = req_id_owned.clone();
 
@@ -720,6 +799,9 @@ impl BunkerSession {
 /// sender, undecryptable, or unparseable plaintext) — callers should silently
 /// ignore such messages rather than error, since relays may deliver unrelated
 /// events on the same subscription.
+// `serde_json::Value`'s `Index` impl returns `Value::Null` on a missing key or wrong
+// variant — it never panics — so `indexing_slicing` has no real signal on `Value` accesses.
+#[allow(clippy::indexing_slicing)]
 #[cfg(not(feature = "ssr"))]
 fn decode_nip46_response(
     data: &str,
@@ -742,17 +824,17 @@ fn decode_nip46_response(
     let plaintext =
         nostr::nips::nip44::decrypt(client_keys.secret_key(), remote_pubkey, ciphertext).ok()?;
     let resp: serde_json::Value = serde_json::from_str(&plaintext).ok()?;
-    let req_id = resp["id"].as_str()?.to_string();
-    let result = match resp["error"].as_str().filter(|s| !s.is_empty()) {
-        Some(err) => Err(err.to_string()),
-        None => Ok(resp["result"].to_string()),
-    };
+    let req_id = resp["id"].as_str()?.to_owned();
+    let result = resp["error"].as_str().filter(|s| !s.is_empty()).map_or_else(
+        || Ok(resp["result"].to_string()),
+        |err| Err(err.to_owned()),
+    );
     Some((req_id, result))
 }
 
 /// Install a persistent `onmessage` handler that decrypts NIP-46 responses and
 /// dispatches them to the pending map. The closure is stored in `handler_slot`,
-/// which drops (and zeroizes) any previous handler's captured client_keys clone
+/// which drops (and zeroizes) any previous handler's captured `client_keys` clone
 /// instead of leaking it — important since this runs on every reconnect.
 #[cfg(not(feature = "ssr"))]
 fn setup_persistent_message_handler(
@@ -762,7 +844,7 @@ fn setup_persistent_message_handler(
     remote_pubkey: &PublicKey,
     handler_slot: &MessageHandlerSlot,
 ) {
-    let pending_clone = pending.clone();
+    let pending_clone = Rc::clone(pending);
     let keys_clone = client_keys.clone();
     let remote_pk_clone = *remote_pubkey;
     let remote_hex = remote_pubkey.to_hex();
@@ -792,8 +874,8 @@ fn setup_persistent_message_handler(
 fn make_rpc_promise() -> (Promise, Option<js_sys::Function>, Option<js_sys::Function>) {
     let resolve_cell: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
     let reject_cell: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
-    let rc = resolve_cell.clone();
-    let rj = reject_cell.clone();
+    let rc = Rc::clone(&resolve_cell);
+    let rj = Rc::clone(&reject_cell);
     let promise = Promise::new(&mut |resolve, reject| {
         *rc.borrow_mut() = Some(resolve);
         *rj.borrow_mut() = Some(reject);
@@ -804,6 +886,9 @@ fn make_rpc_promise() -> (Promise, Option<js_sys::Function>, Option<js_sys::Func
 }
 
 /// Create a Promise that rejects with `"timeout"` after `timeout_secs` seconds.
+// `timeout_secs` is a small config value (seconds, default 30) — `* 1000.0` cannot
+// approach `i32::MAX`, so the `f64 -> i32` cast never truncates in practice.
+#[allow(clippy::cast_possible_truncation)]
 #[cfg(not(feature = "ssr"))]
 fn make_timeout_promise(timeout_secs: u32) -> Promise {
     let timeout_ms = f64::from(timeout_secs) * 1000.0;
@@ -811,6 +896,9 @@ fn make_timeout_promise(timeout_secs: u32) -> Promise {
         let cb = Closure::once(move || {
             let _ = reject.call1(&JsValue::UNDEFINED, &JsValue::from_str("timeout"));
         });
+        // Promise executor can't return a `Result`; `window()` and `set_timeout` are
+        // always available once this WASM module is running in a browser tab.
+        #[allow(clippy::unwrap_used)]
         web_sys::window()
             .unwrap()
             .set_timeout_with_callback_and_timeout_and_arguments_0(
@@ -939,10 +1027,10 @@ async fn websocket_one_shot_rpc(
     let reject_for_msg = reject_fn.clone();
 
     let client_keys_clone = client_keys.clone();
-    let remote_pubkey_hex_owned = remote_pubkey_hex.to_string();
-    let req_id_owned = req_id.to_string();
-    let event_json_owned = event_json.to_string();
-    let client_pubkey_hex_owned = client_pubkey_hex.to_string();
+    let remote_pubkey_hex_owned = remote_pubkey_hex.to_owned();
+    let req_id_owned = req_id.to_owned();
+    let event_json_owned = event_json.to_owned();
+    let client_pubkey_hex_owned = client_pubkey_hex.to_owned();
 
     let ws = web_sys::WebSocket::new(relay_url)
         .map_err(|e| NostrAuthError::BunkerConnectionFailed(format!("WebSocket: {e:?}")))?;
@@ -1116,7 +1204,8 @@ impl PasskeySession {
 
             // user
             let user = Object::new();
-            Reflect::set(&user, &"id".into(), &user_id_u8).unwrap();
+            Reflect::set(&user, &"id".into(), &user_id_u8)
+                .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
             set_str(&user, "name", "nostr");
             set_str(&user, "displayName", "Nostr Identity");
             set(&pk_opts, "user", &user);
@@ -1128,7 +1217,8 @@ impl PasskeySession {
             // pubKeyCredParams: ES256 (-7)
             let param = Object::new();
             set_str(&param, "type", "public-key");
-            Reflect::set(&param, &"alg".into(), &(-7_i32).into()).unwrap();
+            Reflect::set(&param, &"alg".into(), &(-7_i32).into())
+                .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
             let params = Array::of1(&param);
             set(&pk_opts, "pubKeyCredParams", &params);
 
@@ -1144,7 +1234,8 @@ impl PasskeySession {
             let prf = Object::new();
             let prf_eval = Object::new();
             let salt_u8 = Uint8Array::from(PRF_SALT);
-            Reflect::set(&prf_eval, &"first".into(), &salt_u8).unwrap();
+            Reflect::set(&prf_eval, &"first".into(), &salt_u8)
+                .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
             set(&prf, "eval", &prf_eval);
             set(&extensions, "prf", &prf);
             set(&pk_opts, "extensions", &extensions);
@@ -1207,7 +1298,8 @@ impl PasskeySession {
             // (Safari ≤16.x, older Firefox). Same salt → same PRF output as evalByCredential.
             let prf_eval = Object::new();
             let salt_u8 = Uint8Array::from(PRF_SALT);
-            Reflect::set(&prf_eval, &"first".into(), &salt_u8).unwrap();
+            Reflect::set(&prf_eval, &"first".into(), &salt_u8)
+                .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
             set(&prf, "eval", &prf_eval);
 
             if let Some(credential_id) = &credential_id {
@@ -1225,8 +1317,10 @@ impl PasskeySession {
                 let eval_by_cred = Object::new();
                 let prf_eval_ebc = Object::new();
                 let salt_u8_ebc = Uint8Array::from(PRF_SALT);
-                Reflect::set(&prf_eval_ebc, &"first".into(), &salt_u8_ebc).unwrap();
-                Reflect::set(&eval_by_cred, &cred_id_b64.into(), &prf_eval_ebc).unwrap();
+                Reflect::set(&prf_eval_ebc, &"first".into(), &salt_u8_ebc)
+                    .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
+                Reflect::set(&eval_by_cred, &cred_id_b64.into(), &prf_eval_ebc)
+                    .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
                 set(&prf, "evalByCredential", &eval_by_cred);
             }
 
@@ -1256,7 +1350,7 @@ impl PasskeySession {
     fn derive_from_credential(credential: &JsValue) -> Result<Self, NostrAuthError> {
         // Extract credential ID
         let raw_id = Reflect::get(credential, &"rawId".into())
-            .map_err(|_| NostrAuthError::PasskeyFailed("no rawId".into()))?;
+            .map_err(|e| NostrAuthError::PasskeyFailed(format!("no rawId: {}", js_err_msg(&e))))?;
         let cred_id_u8 = Uint8Array::new(&raw_id);
         let credential_id = cred_id_u8.to_vec();
 
@@ -1267,10 +1361,17 @@ impl PasskeySession {
                     .ok_or(JsValue::UNDEFINED)?
                     .call0(credential)
             })
-            .map_err(|_| {
-                NostrAuthError::PasskeyFailed("getClientExtensionResults failed".into())
+            .map_err(|e| {
+                NostrAuthError::PasskeyFailed(format!(
+                    "getClientExtensionResults failed: {}",
+                    js_err_msg(&e)
+                ))
             })?;
 
+        // No JS error value carries useful information here — an absent/mismatched-shape
+        // `prf.results` on the extension results object just means the browser/authenticator
+        // doesn't support the PRF extension, which `PasskeyNotSupported` already conveys.
+        #[allow(clippy::map_err_ignore)]
         let prf_results = Reflect::get(&get_exts, &"prf".into())
             .and_then(|p| Reflect::get(&p, &"results".into()))
             .map_err(|_| NostrAuthError::PasskeyNotSupported)?;
@@ -1279,8 +1380,9 @@ impl PasskeySession {
             return Err(NostrAuthError::PasskeyNotSupported);
         }
 
-        let first = Reflect::get(&prf_results, &"first".into())
-            .map_err(|_| NostrAuthError::PasskeyFailed("no PRF first output".into()))?;
+        let first = Reflect::get(&prf_results, &"first".into()).map_err(|e| {
+            NostrAuthError::PasskeyFailed(format!("no PRF first output: {}", js_err_msg(&e)))
+        })?;
 
         let prf_bytes = Uint8Array::new(&first).to_vec();
 
@@ -1333,6 +1435,12 @@ fn sha256_bytes(input: &[u8]) -> [u8; 32] {
     hash.to_byte_array()
 }
 
+/// Fill a `Vec<u8>` of the given length with cryptographically random bytes via
+/// `window.crypto.getRandomValues`.
+// `window()`/`crypto()` are always present once this WASM module is running in a browser
+// tab, and `get_random_values_with_array_buffer_view` only errors for buffers over 64KiB
+// (the Web Crypto quota) — every caller here passes a small, fixed length (8-32 bytes).
+#[allow(clippy::unwrap_used)]
 #[cfg(not(feature = "ssr"))]
 #[allow(clippy::cast_possible_truncation)]
 fn random_bytes(len: usize) -> Vec<u8> {
@@ -1359,11 +1467,17 @@ fn js_err_msg(e: &JsValue) -> String {
         .unwrap_or_else(|| format!("{e:?}"))
 }
 
+/// Set a property on a freshly-constructed, non-frozen JS object.
+// `Reflect::set` only fails on frozen/sealed targets or proxy invariant violations —
+// neither applies to the plain `Object::new()` targets this is always called with.
+#[allow(clippy::unwrap_used)]
 #[cfg(not(feature = "ssr"))]
 fn set(obj: &Object, key: &str, val: &JsValue) {
     Reflect::set(obj, &key.into(), val).unwrap();
 }
 
+/// Set a string property on a freshly-constructed, non-frozen JS object.
+#[allow(clippy::unwrap_used)]
 #[cfg(not(feature = "ssr"))]
 fn set_str(obj: &Object, key: &str, val: &str) {
     Reflect::set(obj, &key.into(), &JsValue::from_str(val)).unwrap();

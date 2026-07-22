@@ -581,7 +581,7 @@ fn StepBunker(
     let _ = (on_auth, timeout);
 
     let connect = move || {
-        let uri_val = uri.get().trim().to_string();
+        let uri_val = uri.get().trim().to_owned();
         if uri_val.is_empty() {
             set_error.set(Some("Please paste a bunker:// URI.".into()));
             return;
@@ -812,7 +812,7 @@ fn StepNcryptsec(
     let _ = on_auth;
 
     let decrypt = move || {
-        let nc = ncryptsec.get().trim().to_string();
+        let nc = ncryptsec.get().trim().to_owned();
         let pw = password.get();
         if nc.is_empty() {
             set_error.set(Some("Please paste your ncryptsec1... key.".into()));
@@ -828,6 +828,9 @@ fn StepNcryptsec(
         #[cfg(not(feature = "ssr"))]
         spawn_local(async move {
             // Yield one frame so the spinner renders before scrypt blocks the thread.
+            // The Promise executor callback can't return a `Result`, and `window()` is
+            // always present once this WASM module is running in a browser tab.
+            #[allow(clippy::unwrap_used)]
             let promise = js_sys::Promise::new(&mut |resolve, _| {
                 let _ = web_sys::window()
                     .unwrap()

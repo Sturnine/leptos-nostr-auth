@@ -22,6 +22,12 @@
 //!
 //! - `insecure_nsec_input` — enables raw nsec/hex key paste (XSS risk; opt-in only)
 
+// WASM is single-threaded, so none of our async fns need to be `Send`. The non-Send types
+// (Rc, RefCell, web-sys objects) that trigger this pedantic lint are wrapped in `send_wrapper`
+// where they cross an actual thread boundary API (see the `send_wrapper` dependency note in
+// Cargo.toml) — this lint has no remaining signal for this crate.
+#![allow(clippy::future_not_send)]
+
 /// Context provider and reactive auth state.
 pub mod context;
 /// Login modal UI component.
@@ -131,25 +137,29 @@ mod types {
             }
         }
 
-        /// Build a `PersistedSession` for localStorage (never stores private key bytes).
+        /// Build a `PersistedSession` for localStorage (never stores the user's identity key).
         pub fn to_persisted_session(&self) -> Option<PersistedSession> {
             match self {
                 Self::Extension(h) => Some(PersistedSession {
                     public_key_hex: h.public_key.to_hex(),
                     method: PersistedMethod::Extension,
                     bunker_uri: None,
+                    bunker_client_secret_hex: None,
                     passkey_credential_id: None,
                 }),
                 Self::Bunker(s) => Some(PersistedSession {
                     public_key_hex: s.public_key.to_hex(),
                     method: PersistedMethod::Bunker,
+                    // Already secret-free — see `BunkerSession::connect_with_keys`.
                     bunker_uri: Some(s.bunker_uri.clone()),
+                    bunker_client_secret_hex: Some(s.client_secret_hex()),
                     passkey_credential_id: None,
                 }),
                 Self::Passkey(s) => Some(PersistedSession {
                     public_key_hex: s.public_key.to_hex(),
                     method: PersistedMethod::Passkey,
                     bunker_uri: None,
+                    bunker_client_secret_hex: None,
                     passkey_credential_id: Some(base64::Engine::encode(
                         &base64::engine::general_purpose::URL_SAFE_NO_PAD,
                         &s.credential_id,
@@ -159,6 +169,7 @@ mod types {
                     public_key_hex: h.public_key.to_hex(),
                     method: PersistedMethod::ReadOnly,
                     bunker_uri: None,
+                    bunker_client_secret_hex: None,
                     passkey_credential_id: None,
                 }),
                 // ncryptsec and raw nsec: key is not persisted (no safe way to store it)
@@ -169,7 +180,12 @@ mod types {
         }
     }
 
-    /// What gets written to localStorage — never contains private key material.
+    /// What gets written to localStorage.
+    ///
+    /// Never contains the user's Nostr identity secret key. **Does** contain a disposable,
+    /// revocable NIP-46 pairing key (`bunker_client_secret_hex`) when the active session is
+    /// a bunker connection — see the "Session Restore" section in the README for the exact
+    /// risk model.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[non_exhaustive]
     pub struct PersistedSession {
@@ -177,8 +193,12 @@ mod types {
         pub public_key_hex: String,
         /// Which login method was used.
         pub method: PersistedMethod,
-        /// NIP-46: stored bunker URI for re-connection on restore
+        /// NIP-46: secret-stripped `bunker://` URI (remote pubkey + relay only) for reconnection.
         pub bunker_uri: Option<String>,
+        /// NIP-46: hex secret of the local pairing keypair used to reconnect without the
+        /// bunker's one-time secret. Sensitive (bearer-token-equivalent) but is never the
+        /// user's Nostr identity key — see `BunkerSession::reconnect` docs.
+        pub bunker_client_secret_hex: Option<String>,
         /// Passkey: base64url credential ID — used to call `credentials.get()`
         pub passkey_credential_id: Option<String>,
     }

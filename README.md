@@ -91,6 +91,8 @@ See the `with-axum-ssr` example for a complete cargo-leptos project layout.
 
 ## Feature Flags
 
+Requires Rust 1.85+ (edition 2024).
+
 You must select exactly one rendering mode feature:
 
 | Feature | Use when |
@@ -284,6 +286,16 @@ When `persist_session: true` (default), successful logins are cached in localSto
 | Read-Only | Restores directly from stored hex pubkey |
 | ncryptsec | **Not persisted** — user must decrypt again (password not stored) |
 | Raw nsec | **Not persisted** — user must paste again |
+
+**Bunker sessions**: restoring a bunker session does **not** replay your bunker's original
+pairing secret (which per [NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) is
+single-use and should already be considered spent). Instead, the library persists the small
+local "pairing keypair" generated the first time you connected — the same key your bunker
+already recognizes and has authorized. This key is disposable and unrelated to your Nostr
+identity key, but it is still a live credential: anyone who can read your app's localStorage
+(e.g. via an XSS bug elsewhere on your page) can use it to request signatures until you revoke
+that client from your bunker/signer app. This is the same exposure class as a browser session
+cookie, not a leaked private key.
 
 The `is_restoring` signal on `NostrAuthContext` is `true` while restore is in progress.
 Use it to suppress the login button flash:
