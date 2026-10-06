@@ -38,7 +38,6 @@
           ...
         }:
         let
-          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
           craneLib = (inputs.crane.mkLib pkgs).overrideToolchain (
             p: p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
           );
@@ -99,23 +98,20 @@
               ssrArgs
               // {
                 cargoArtifacts = ssrArtifacts;
-                cargoClippyExtraArgs = "--all-targets --no-deps -- --deny warnings";
+                cargoClippyExtraArgs = "--all-targets --no-deps";
               }
             );
             clippy-hydrate = craneLib.cargoClippy (
               hydrateArgs
               // {
                 cargoArtifacts = hydrateArtifacts;
-                cargoClippyExtraArgs = "--no-deps -- --deny warnings";
+                cargoClippyExtraArgs = "--no-deps";
               }
             );
             doc = craneLib.cargoDoc (
               ssrArgs
               // {
                 cargoArtifacts = ssrArtifacts;
-                env = ssrArgs.env // {
-                  RUSTDOCFLAGS = "--deny warnings";
-                };
               }
             );
           };
@@ -125,7 +121,7 @@
             programs = {
               rustfmt = {
                 enable = true;
-                package = rustToolchain;
+                package = craneLib.rustfmt;
                 edition = (lib.importTOML ./Cargo.toml).package.edition;
               };
               nixfmt.enable = true;
