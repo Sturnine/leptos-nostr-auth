@@ -405,3 +405,9 @@ All elements emit `data-nostr-*` attributes for styling:
 [data-nostr-back]            { /* back button */ }
 [data-nostr-close]           { /* close button */ }
 ```
+
+## Development
+
+`nix develop` (or `direnv allow` once) enters a shell with the toolchain pinned by
+`rust-toolchain.toml`. `nix flake check` runs clippy, docs and formatting checks; `nix fmt`
+formats Rust, Nix and TOML.
