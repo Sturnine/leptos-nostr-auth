@@ -99,14 +99,14 @@
               ssrArgs
               // {
                 cargoArtifacts = ssrArtifacts;
-                cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+                cargoClippyExtraArgs = "--all-targets --no-deps -- --deny warnings";
               }
             );
             clippy-hydrate = craneLib.cargoClippy (
               hydrateArgs
               // {
                 cargoArtifacts = hydrateArtifacts;
-                cargoClippyExtraArgs = "-- --deny warnings";
+                cargoClippyExtraArgs = "--no-deps -- --deny warnings";
               }
             );
             doc = craneLib.cargoDoc (
