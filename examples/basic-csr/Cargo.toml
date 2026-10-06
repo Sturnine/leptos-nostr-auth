@@ -1,5 +1,5 @@
 [package]
-name = "basic-csr"
+name    = "basic-csr"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,8 +8,8 @@ name = "basic-csr"
 path = "src/main.rs"
 
 [dependencies]
-leptos = { version = "0.8", features = ["csr"] }
-leptos-nostr-auth = { path = "../..", features = ["csr"] }
-nostr = { version = "0.44", default-features = false, features = ["std"] }
-wasm-bindgen-futures = "0.4"
+leptos                   = { version = "0.8", features = ["csr"] }
+leptos-nostr-auth        = { path = "../..", features = ["csr"] }
+nostr                    = { version = "0.44", default-features = false, features = ["std"] }
+wasm-bindgen-futures     = "0.4"
 console_error_panic_hook = "0.1"
