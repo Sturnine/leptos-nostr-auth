@@ -97,37 +97,36 @@ missing_docs = "warn"
 [lints.clippy]
 # Lint groups
 pedantic = { level = "warn", priority = -1 }
-nursery  = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
 
 # Restriction lints
-unwrap_used                   = "warn"
-expect_used                   = "warn"
-panic                         = "warn"
-dbg_macro                     = "warn"
-todo                          = "warn"
-unimplemented                 = "warn"
-indexing_slicing              = "warn"
-str_to_string                 = "warn"
-implicit_clone                = "warn"
-arithmetic_side_effects       = "warn"
-use_debug                     = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+indexing_slicing = "warn"
+str_to_string = "warn"
+implicit_clone = "warn"
+arithmetic_side_effects = "warn"
+use_debug = "warn"
 missing_docs_in_private_items = "warn"
-std_instead_of_core           = "warn"
-exhaustive_structs            = "warn"
-exhaustive_enums              = "warn"
-clone_on_ref_ptr              = "warn"
-mem_forget                    = "warn"
-print_stdout                  = "warn"
-print_stderr                  = "warn"
-map_err_ignore                = "warn"
-try_err                       = "warn"
-undocumented_unsafe_blocks    = "warn"
-exit                          = "warn"
-tests_outside_test_module     = "warn"
+std_instead_of_core = "warn"
+exhaustive_structs = "warn"
+exhaustive_enums = "warn"
+clone_on_ref_ptr = "warn"
+mem_forget = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+map_err_ignore = "warn"
+try_err = "warn"
+undocumented_unsafe_blocks = "warn"
+exit = "warn"
+tests_outside_test_module = "warn"
 
 # Allow pedantic lints that don't fit this codebase
 module_name_repetitions = "allow" # intentional: NostrAuth* prefix throughout public API
-must_use_candidate      = "allow" # Leptos components return impl IntoView
-wildcard_imports        = "allow" # use leptos::prelude::* is idiomatic Leptos
-unused_async            = "allow" # SSR stubs are async to match the WASM API signature
-
+must_use_candidate = "allow"      # Leptos components return impl IntoView
+wildcard_imports = "allow"        # use leptos::prelude::* is idiomatic Leptos
+unused_async = "allow"            # SSR stubs are async to match the WASM API signature

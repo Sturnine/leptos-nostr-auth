@@ -1,7 +1,7 @@
 // #[component] generates exhaustive props structs we cannot control.
 #![allow(clippy::exhaustive_structs)]
 use leptos::prelude::*;
-use leptos_nostr_auth::{use_nostr_auth, NostrAuthConfig, NostrAuthProvider};
+use leptos_nostr_auth::{NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
 
 // Hydrate entry — browser calls this after loading the WASM bundle.
 // wasm_bindgen exports it so the JS glue code can invoke it on startup.

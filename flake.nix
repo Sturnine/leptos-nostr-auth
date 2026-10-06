@@ -50,20 +50,21 @@
           lockedWasmBindgen =
             (lib.findFirst (p: p.name == "wasm-bindgen") null (lib.importTOML ./Cargo.lock).package).version;
           wasmBindgenCli =
-            assert lib.assertMsg (wasmBindgenVersion == lockedWasmBindgen)
-              "wasm-bindgen-cli ${wasmBindgenVersion} != wasm-bindgen ${lockedWasmBindgen} in Cargo.lock";
+            assert lib.assertMsg (
+              wasmBindgenVersion == lockedWasmBindgen
+            ) "wasm-bindgen-cli ${wasmBindgenVersion} != wasm-bindgen ${lockedWasmBindgen} in Cargo.lock";
             pkgs.buildWasmBindgenCli rec {
-            src = pkgs.fetchCrate {
-              pname = "wasm-bindgen-cli";
-              version = wasmBindgenVersion;
-              hash = "sha256-ZOMgFNOcGkO66Jz/Z83eoIu+DIzo3Z/vq6Z5g6BDY/w=";
+              src = pkgs.fetchCrate {
+                pname = "wasm-bindgen-cli";
+                version = wasmBindgenVersion;
+                hash = "sha256-ZOMgFNOcGkO66Jz/Z83eoIu+DIzo3Z/vq6Z5g6BDY/w=";
+              };
+              cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+                inherit src;
+                inherit (src) pname version;
+                hash = "sha256-DPdCDPTAPBrbqLUqnCwQu1dePs9lGg85JCJOCIr9qjU=";
+              };
             };
-            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
-              inherit src;
-              inherit (src) pname version;
-              hash = "sha256-DPdCDPTAPBrbqLUqnCwQu1dePs9lGg85JCJOCIr9qjU=";
-            };
-          };
 
           commonArgs = {
             src = craneLib.cleanCargoSource ./.;

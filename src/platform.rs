@@ -94,8 +94,7 @@ impl Platform {
 
             let navigator = window.navigator();
 
-            let os = os_from_ua_data(&navigator)
-                .unwrap_or_else(|| os_from_ua_string(&navigator));
+            let os = os_from_ua_data(&navigator).unwrap_or_else(|| os_from_ua_string(&navigator));
 
             // WebAuthn availability: navigator.credentials must exist.
             // Actual PRF support is confirmed when credentials.create() returns PRF results.

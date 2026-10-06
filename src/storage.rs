@@ -45,9 +45,10 @@ pub async fn restore_session(
                     .bunker_uri
                     .as_deref()
                     .ok_or_else(|| NostrAuthError::InvalidBunkerUri("no URI stored".into()))?;
-                let client_secret_hex = session.bunker_client_secret_hex.as_deref().ok_or_else(
-                    || NostrAuthError::InvalidBunkerUri("no session key stored".into()),
-                )?;
+                let client_secret_hex =
+                    session.bunker_client_secret_hex.as_deref().ok_or_else(|| {
+                        NostrAuthError::InvalidBunkerUri("no session key stored".into())
+                    })?;
                 let session = crate::signers::BunkerSession::reconnect(
                     uri,
                     bunker_timeout_secs,

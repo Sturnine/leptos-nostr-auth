@@ -1,6 +1,6 @@
-use nostr::{FromBech32, Keys, PublicKey, SecretKey};
 #[cfg(not(feature = "ssr"))]
 use core::fmt::Write;
+use nostr::{FromBech32, Keys, PublicKey, SecretKey};
 
 use crate::types::NostrAuthError;
 
@@ -11,13 +11,13 @@ pub use crate::types::AuthResult;
 #[cfg(not(feature = "ssr"))]
 use base64::Engine as _;
 #[cfg(not(feature = "ssr"))]
+use core::cell::RefCell;
+#[cfg(not(feature = "ssr"))]
 use js_sys::{Array, Object, Promise, Reflect, Uint8Array};
 #[cfg(not(feature = "ssr"))]
 use nostr::JsonUtil;
 #[cfg(not(feature = "ssr"))]
 use send_wrapper::SendWrapper;
-#[cfg(not(feature = "ssr"))]
-use core::cell::RefCell;
 #[cfg(not(feature = "ssr"))]
 use std::collections::HashMap;
 #[cfg(not(feature = "ssr"))]
@@ -85,7 +85,13 @@ impl Nip07Handle {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when signing fails.
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -119,7 +125,13 @@ impl Nip07Handle {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when nip44 encryption fails.
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn nip44_encrypt(
         &self,
         recipient_hex: &str,
@@ -148,7 +160,13 @@ impl Nip07Handle {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when nip44 decryption fails.
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn nip44_decrypt(
         &self,
         sender_hex: &str,
@@ -199,9 +217,9 @@ fn parse_bunker_uri(uri: &str) -> Result<BunkerUri, NostrAuthError> {
         ));
     }
 
-    let stripped = uri.strip_prefix("bunker://").ok_or_else(|| {
-        NostrAuthError::InvalidBunkerUri("URI must start with bunker://".into())
-    })?;
+    let stripped = uri
+        .strip_prefix("bunker://")
+        .ok_or_else(|| NostrAuthError::InvalidBunkerUri("URI must start with bunker://".into()))?;
 
     let (pubkey_part, query) = stripped.split_once('?').unwrap_or((stripped, ""));
     let remote_pubkey_hex = pubkey_part.to_lowercase();
@@ -318,7 +336,13 @@ impl BunkerSession {
     /// Returns an error when called with SSR features, when connection fails,
     /// or when given a `nostrconnect://` URI (client-initiated pairing is not
     /// yet supported).
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn connect(uri: &str, timeout_secs: u32) -> Result<Self, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -469,7 +493,13 @@ impl BunkerSession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when signing fails..
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -507,7 +537,13 @@ impl BunkerSession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when nip44 decryption fails.
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn nip44_encrypt(
         &self,
         recipient_hex: &str,
@@ -535,11 +571,9 @@ impl BunkerSession {
             let result_json = self.send_rpc(&req_id, &req_json).await?;
             let v: serde_json::Value = serde_json::from_str(&result_json)
                 .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
-            v.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    NostrAuthError::SigningFailed("invalid nip44_encrypt response".into())
-                })
+            v.as_str().map(str::to_owned).ok_or_else(|| {
+                NostrAuthError::SigningFailed("invalid nip44_encrypt response".into())
+            })
         }
     }
 
@@ -548,7 +582,13 @@ impl BunkerSession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when nip44 decryption fails.
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn nip44_decrypt(
         &self,
         sender_hex: &str,
@@ -576,11 +616,9 @@ impl BunkerSession {
             let result_json = self.send_rpc(&req_id, &req_json).await?;
             let v: serde_json::Value = serde_json::from_str(&result_json)
                 .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
-            v.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    NostrAuthError::SigningFailed("invalid nip44_decrypt response".into())
-                })
+            v.as_str().map(str::to_owned).ok_or_else(|| {
+                NostrAuthError::SigningFailed("invalid nip44_decrypt response".into())
+            })
         }
     }
 
@@ -832,10 +870,10 @@ fn decode_nip46_response(
         nostr::nips::nip44::decrypt(client_keys.secret_key(), remote_pubkey, ciphertext).ok()?;
     let resp: serde_json::Value = serde_json::from_str(&plaintext).ok()?;
     let req_id = resp["id"].as_str()?.to_owned();
-    let result = resp["error"].as_str().filter(|s| !s.is_empty()).map_or_else(
-        || Ok(resp["result"].to_string()),
-        |err| Err(err.to_owned()),
-    );
+    let result = resp["error"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| Ok(resp["result"].to_string()), |err| Err(err.to_owned()));
     Some((req_id, result))
 }
 
@@ -1180,7 +1218,13 @@ impl PasskeySession {
     /// # Errors
     ///
     /// Returns an error if the passkey creation fails.
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn create(rp_id: &str, rp_name: &str) -> Result<Self, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -1277,7 +1321,13 @@ impl PasskeySession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when passkey authentication fails.
-    #[cfg_attr(feature = "ssr", expect(clippy::unused_async_trait_impl, reason = "async signature is the shared API; only the browser build awaits"))]
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::unused_async_trait_impl,
+            reason = "async signature is the shared API; only the browser build awaits"
+        )
+    )]
     pub async fn authenticate(credential_id: Option<Vec<u8>>) -> Result<Self, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {

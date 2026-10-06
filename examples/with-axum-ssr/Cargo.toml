@@ -2,14 +2,14 @@
 members = ["."]
 
 [[workspace.metadata.leptos]]
-name         = "with-axum-ssr"
-bin-package  = "with-axum-ssr"
-lib-package  = "with-axum-ssr"
-site-root    = "target/site"
+name = "with-axum-ssr"
+bin-package = "with-axum-ssr"
+lib-package = "with-axum-ssr"
+site-root = "target/site"
 site-pkg-dir = "pkg"
-style-file   = "style/main.css"
-site-addr    = "127.0.0.1:3000"
-reload-port  = 3001
+style-file = "style/main.css"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
 bin-features = ["ssr"]
 lib-features = ["hydrate"]
 
@@ -28,31 +28,31 @@ required-features = ["ssr"]
 
 [features]
 hydrate = [
-    "leptos/hydrate",
-    "leptos-nostr-auth/hydrate",
-    "dep:console_error_panic_hook",
-    "dep:wasm-bindgen",
+  "leptos/hydrate",
+  "leptos-nostr-auth/hydrate",
+  "dep:console_error_panic_hook",
+  "dep:wasm-bindgen",
 ]
 ssr = [
-    "leptos/ssr",
-    "leptos-nostr-auth/ssr",
-    "dep:leptos_axum",
-    "dep:axum",
-    "dep:tokio",
-    "dep:tower-http",
+  "leptos/ssr",
+  "leptos-nostr-auth/ssr",
+  "dep:leptos_axum",
+  "dep:axum",
+  "dep:tokio",
+  "dep:tower-http",
 ]
 
 [dependencies]
-leptos            = { version = "0.8", default-features = false }
+leptos = { version = "0.8", default-features = false }
 leptos-nostr-auth = { path = "../..", default-features = false }
-nostr             = { version = "0.44", default-features = false, features = ["std"] }
+nostr = { version = "0.44", default-features = false, features = ["std"] }
 
 # SSR-only
 leptos_axum = { version = "0.8", optional = true }
-axum        = { version = "0.8", optional = true }
-tokio       = { version = "1", features = ["rt-multi-thread"], optional = true }
-tower-http  = { version = "0.6", features = ["fs"], optional = true }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
 
 # Hydrate-only (WASM)
 console_error_panic_hook = { version = "0.1", optional = true }
-wasm-bindgen             = { version = "0.2", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }

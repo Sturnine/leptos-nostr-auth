@@ -2,12 +2,11 @@
 #[tokio::main]
 async fn main() {
     use axum::Router;
-    use leptos_axum::{generate_route_list, LeptosRoutes};
+    use leptos_axum::{LeptosRoutes, generate_route_list};
     use tower_http::services::ServeDir;
-    use with_axum_ssr::{shell, App};
+    use with_axum_ssr::{App, shell};
 
-    let conf = leptos::config::get_configuration(None)
-        .expect("Failed to read Leptos.toml");
+    let conf = leptos::config::get_configuration(None).expect("Failed to read Leptos.toml");
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
     let routes = generate_route_list(App);

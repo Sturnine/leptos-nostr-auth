@@ -96,9 +96,7 @@ pub fn NostrAuthProvider(
     // PersistedSession requires PartialEq (derived in lib.rs) for the equality check
     // that prevents spurious reactive updates.
     let (stored_session, set_stored_session, delete_stored_session) =
-        use_local_storage::<Option<PersistedSession>, JsonSerdeCodec>(
-            cfg.get_value().storage_key,
-        );
+        use_local_storage::<Option<PersistedSession>, JsonSerdeCodec>(cfg.get_value().storage_key);
 
     // Clone before Effect consumes delete_stored_session
     let delete_for_logout = delete_stored_session.clone();

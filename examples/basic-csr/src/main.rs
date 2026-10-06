@@ -2,7 +2,7 @@
 //! Style via `data-nostr-*` attributes in your own CSS.
 
 use leptos::prelude::*;
-use leptos_nostr_auth::{use_nostr_auth, NostrAuthConfig, NostrAuthProvider};
+use leptos_nostr_auth::{NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
 use nostr::JsonUtil;
 
 fn main() {
