@@ -129,7 +129,13 @@
                 edition = (lib.importTOML ./Cargo.toml).package.edition;
               };
               nixfmt.enable = true;
-              taplo.enable = true;
+              taplo = {
+                enable = true;
+                settings.formatting = {
+                  align_entries = true;
+                  column_width = 100;
+                };
+              };
             };
           };
 
