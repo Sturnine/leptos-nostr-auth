@@ -4,7 +4,7 @@
 use codee::string::JsonSerdeCodec;
 use leptos::prelude::*;
 use leptos_use::storage::use_local_storage;
-use nostr::ToBech32;
+use nostr::nips::nip19::ToBech32;
 
 use crate::modal::NostrAuthModal;
 use crate::signers::AuthResult;
@@ -22,7 +22,7 @@ pub struct NostrAuthContext {
     /// Current auth result; `None` when not logged in.
     pub auth: Signal<Option<AuthResult>>,
     /// Convenience: the authenticated user's public key (bech32 npub and hex).
-    pub public_key: Signal<Option<nostr::PublicKey>>,
+    pub public_key: Signal<Option<nostr::key::PublicKey>>,
     /// Convenience: the authenticated user's npub (bech32) or hex pubkey as a `String`.
     ///
     /// Avoids the common `.to_bech32().unwrap_or_else(|_| .to_hex())` boilerplate.

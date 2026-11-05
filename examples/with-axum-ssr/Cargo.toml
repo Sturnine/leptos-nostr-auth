@@ -45,7 +45,7 @@ ssr = [
 [dependencies]
 leptos            = { version = "0.8", default-features = false }
 leptos-nostr-auth = { path = "../..", default-features = false }
-nostr             = { version = "0.44", default-features = false, features = ["std"] }
+nostr             = { version = "0.45.7", default-features = false, features = ["std"] }
 
 # SSR-only
 leptos_axum = { version = "0.8", optional = true }

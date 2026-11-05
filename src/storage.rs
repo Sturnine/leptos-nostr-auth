@@ -25,7 +25,7 @@ pub async fn restore_session(
     #[cfg(not(feature = "ssr"))]
     {
         use crate::types::PersistedMethod;
-        use nostr::PublicKey;
+        use nostr::key::PublicKey;
 
         let stored_pk = PublicKey::from_hex(&session.public_key_hex)
             .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;

@@ -42,6 +42,7 @@ pub(crate) mod storage;
 // Public re-exports
 pub use context::{NostrAuthContext, NostrAuthProvider, try_use_nostr_auth, use_nostr_auth};
 pub use modal::NostrAuthModal;
+pub use nostr;
 
 // Core types
 pub use signers::{BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle};
@@ -51,7 +52,7 @@ pub use types::{
 
 /// Core types: auth results, login methods, configuration, and errors.
 mod types {
-    use nostr::PublicKey;
+    use nostr::key::PublicKey;
     use serde::{Deserialize, Serialize};
     use thiserror::Error;
 
@@ -60,7 +61,6 @@ mod types {
     };
 
     /// Result of a successful authentication attempt.
-    /// Owned by this library — not coupled to any specific rust-nostr version.
     #[derive(Clone)]
     #[non_exhaustive]
     pub enum AuthResult {

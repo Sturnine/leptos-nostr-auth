@@ -1,6 +1,8 @@
 #[cfg(not(feature = "ssr"))]
 use core::fmt::Write;
-use nostr::{FromBech32, Keys, PublicKey, SecretKey};
+use nostr::event::{FinalizeEvent, UnsignedEvent};
+use nostr::key::{Keys, PublicKey, SecretKey};
+use nostr::nips::nip19::FromBech32;
 
 use crate::types::NostrAuthError;
 
@@ -15,7 +17,9 @@ use core::cell::RefCell;
 #[cfg(not(feature = "ssr"))]
 use js_sys::{Array, Object, Promise, Reflect, Uint8Array};
 #[cfg(not(feature = "ssr"))]
-use nostr::JsonUtil;
+use nostr::event::{Event, Kind, Tag};
+#[cfg(not(feature = "ssr"))]
+use nostr::types::Timestamp;
 #[cfg(not(feature = "ssr"))]
 use send_wrapper::SendWrapper;
 #[cfg(not(feature = "ssr"))]
@@ -432,9 +436,7 @@ impl BunkerSession {
         .map_err(|e| NostrAuthError::BunkerConnectionFailed(e.to_string()))?;
 
         // Build a kind:24133 event signed by client ephemeral key
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(24133), encrypted)
-            .tag(nostr::Tag::public_key(remote_pubkey))
-            .sign_with_keys(&client_keys)
+        let event = nip46_event(&client_keys, remote_pubkey, encrypted, now_timestamp())
             .map_err(|e| NostrAuthError::BunkerConnectionFailed(e.to_string()))?;
 
         let event_json = event.as_json();
@@ -779,10 +781,13 @@ impl BunkerSession {
         .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
 
         // Build and sign the kind:24133 event
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(24133), encrypted)
-            .tag(nostr::Tag::public_key(self.remote_pubkey))
-            .sign_with_keys(&self.client_keys)
-            .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
+        let event = nip46_event(
+            &self.client_keys,
+            self.remote_pubkey,
+            encrypted,
+            now_timestamp(),
+        )
+        .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
 
         // Register a promise in the pending map before sending
         let (response_promise, resolve_fn, reject_fn) = make_rpc_promise();
@@ -1024,9 +1029,7 @@ async fn get_bunker_public_key(
     )
     .map_err(|e| NostrAuthError::BunkerConnectionFailed(e.to_string()))?;
 
-    let event = nostr::EventBuilder::new(nostr::Kind::Custom(24133), encrypted)
-        .tag(nostr::Tag::public_key(remote_pk))
-        .sign_with_keys(client_keys)
+    let event = nip46_event(client_keys, remote_pk, encrypted, now_timestamp())
         .map_err(|e| NostrAuthError::BunkerConnectionFailed(e.to_string()))?;
 
     let result_str = websocket_one_shot_rpc(
@@ -1474,24 +1477,51 @@ impl PasskeySession {
     ///
     /// Returns an error if signing fails.
     pub fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
-        let unsigned: nostr::UnsignedEvent = serde_json::from_str(event_json)
+        let unsigned: UnsignedEvent = serde_json::from_str(event_json)
             .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
         let keys = Keys::new(self.secret_key.clone());
         let signed = unsigned
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
         serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))
     }
 }
 
-/// Compute SHA-256 synchronously (using the `nostr` crate's transitive dep).
+/// Compute SHA-256 synchronously.
 #[cfg(not(feature = "ssr"))]
 fn sha256_bytes(input: &[u8]) -> [u8; 32] {
-    use nostr::hashes::{Hash, sha256};
-    let mut engine = sha256::Hash::engine();
-    nostr::hashes::HashEngine::input(&mut engine, input);
-    let hash = sha256::Hash::from_engine(engine);
-    hash.to_byte_array()
+    use bitcoin_hashes::sha256;
+    sha256::Hash::hash(input).to_byte_array()
+}
+
+// `EventBuilder` reads time through universal-time's provider symbol, which this crate must not
+// require of wasm consumers.
+#[cfg(not(feature = "ssr"))]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Date::now() is a non-negative millisecond count that fits u64"
+)]
+fn now_timestamp() -> Timestamp {
+    Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64)
+}
+
+/// Build and sign a kind 24133 NIP-46 event addressed to `remote`.
+#[cfg(not(feature = "ssr"))]
+fn nip46_event(
+    client_keys: &Keys,
+    remote: PublicKey,
+    encrypted_content: String,
+    created_at: Timestamp,
+) -> Result<Event, nostr::error::Error> {
+    UnsignedEvent::new(
+        client_keys.public_key(),
+        created_at,
+        Kind::Custom(24133),
+        [Tag::public_key(remote)],
+        encrypted_content,
+    )
+    .finalize(client_keys)
 }
 
 /// Fill a `Vec<u8>` of the given length with cryptographically random bytes via
@@ -1565,13 +1595,6 @@ impl core::str::FromStr for ReadOnlyHandle {
         if let Ok(pk) = PublicKey::from_bech32(input) {
             return Ok(Self { public_key: pk });
         }
-        if input.starts_with("nprofile")
-            && let Ok(profile) = nostr::nips::nip19::Nip19Profile::from_bech32(input)
-        {
-            return Ok(Self {
-                public_key: profile.public_key,
-            });
-        }
         Err(NostrAuthError::InvalidPublicKey(
             "Expected npub1..., nprofile1..., or 64-char hex public key".into(),
         ))
@@ -1609,7 +1632,7 @@ impl RawKeySession {
             .map_err(|e| NostrAuthError::InvalidNcryptsec(e.to_string()))?;
 
         let secret_key = encrypted.decrypt(password).map_err(|e| {
-            if matches!(e, nostr::nips::nip49::Error::ChaCha20Poly1305(_)) {
+            if e.kind() == nostr::error::ErrorKind::Crypto {
                 NostrAuthError::WrongPassword
             } else {
                 NostrAuthError::InvalidNcryptsec(e.to_string())
@@ -1655,12 +1678,124 @@ impl RawKeySession {
     ///
     /// Returns an error if signing fails.
     pub fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
-        let unsigned: nostr::UnsignedEvent = serde_json::from_str(event_json)
+        let unsigned: UnsignedEvent = serde_json::from_str(event_json)
             .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
         let keys = Keys::new(self.secret_key.clone());
         let signed = unsigned
-            .sign_with_keys(&keys)
+            .finalize(&keys)
             .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
         serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod tests {
+    use super::*;
+    use nostr::event::Event;
+    use nostr::nips::nip19::ToBech32;
+    use nostr::nips::nip49::EncryptedSecretKey;
+
+    const CRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+    const CRYPTSEC_PUBKEY: &str =
+        "672a31bfc59d3f04548ec9b7daeeba2f61814e8ccc40448045007f5479f693a3";
+
+    // Expected values were computed outside the crate (shasum, Python hashlib and a pure-Python secp256k1 multiply).
+
+    #[test]
+    fn ncryptsec_correct_password() {
+        let s = RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap();
+        assert_eq!(s.public_key.to_hex(), CRYPTSEC_PUBKEY);
+    }
+
+    #[test]
+    fn ncryptsec_wrong_password() {
+        let r = RawKeySession::from_ncryptsec(CRYPTSEC, "wrong");
+        assert!(matches!(r, Err(NostrAuthError::WrongPassword)));
+    }
+
+    #[test]
+    fn ncryptsec_over_cost_cap() {
+        let mut bytes = EncryptedSecretKey::from_bech32(CRYPTSEC).unwrap().as_vec();
+        *bytes.get_mut(1).unwrap() = EncryptedSecretKey::MAX_LOG_N + 1;
+        let over = EncryptedSecretKey::from_slice(&bytes)
+            .unwrap()
+            .to_bech32()
+            .unwrap();
+        let r = RawKeySession::from_ncryptsec(&over, "nostr");
+        assert!(matches!(r, Err(NostrAuthError::InvalidNcryptsec(_))));
+    }
+
+    #[test]
+    fn ncryptsec_malformed() {
+        let r = RawKeySession::from_ncryptsec("not-an-ncryptsec", "nostr");
+        assert!(matches!(r, Err(NostrAuthError::InvalidNcryptsec(_))));
+    }
+
+    #[test]
+    fn raw_key_signing_verifies() {
+        let s = RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap();
+        let unsigned = format!(
+            r#"{{"pubkey":"{CRYPTSEC_PUBKEY}","created_at":1700000000,"kind":1,"tags":[],"content":"hi"}}"#
+        );
+        let signed = s.sign_event(&unsigned).unwrap();
+        Event::from_json(signed).unwrap().verify().unwrap();
+    }
+
+    #[test]
+    fn readonly_parses_nprofile() {
+        let nprofile = "nprofile1qqsrhuxx8l9ex335q7he0f09aej04zpazpl0ne2cgukyawd24mayt8gppemhxue69uhhytnc9e3k7mf0qyt8wumn8ghj7er2vfshxtnnv9jxkc3wvdhk6tclr7lsh";
+        let h: ReadOnlyHandle = nprofile.parse().unwrap();
+        assert_eq!(
+            h.public_key.to_hex(),
+            "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+        );
+    }
+
+    #[cfg(not(feature = "ssr"))]
+    #[test]
+    fn sha256_abc_vector() {
+        let d = sha256_bytes(b"abc");
+        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[cfg(not(feature = "ssr"))]
+    #[test]
+    fn prf_derivation_vector() {
+        let input: Vec<u8> = (0..32).collect();
+        let digest = sha256_bytes(&input);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd"
+        );
+        let sk = SecretKey::from_slice(&digest).unwrap();
+        assert_eq!(
+            Keys::new(sk).public_key().to_hex(),
+            "f8d6557dfcca8c44b8b9d16d33e3faa77e05286f992067a5453441f8b13d582e"
+        );
+    }
+
+    #[cfg(not(feature = "ssr"))]
+    #[test]
+    fn nip46_event_shape() {
+        let client = Keys::generate();
+        let remote = Keys::generate().public_key();
+        let at = Timestamp::from_secs(1_700_000_000);
+        let ev = nip46_event(&client, remote, "ct".into(), at).unwrap();
+        assert_eq!(ev.kind, Kind::Custom(24133));
+        assert_eq!(ev.pubkey, client.public_key());
+        assert_eq!(ev.created_at, at);
+        let tags: Vec<_> = ev.tags.iter().collect();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(
+            tags.first().unwrap().as_slice(),
+            ["p".to_owned(), remote.to_hex()]
+        );
+        ev.verify().unwrap();
     }
 }
