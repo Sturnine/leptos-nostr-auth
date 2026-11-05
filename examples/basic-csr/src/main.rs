@@ -2,8 +2,9 @@
 //! Style via `data-nostr-*` attributes in your own CSS.
 
 use leptos::prelude::*;
+use leptos_nostr_auth::nostr::event::{Kind, UnsignedEvent};
+use leptos_nostr_auth::nostr::types::Timestamp;
 use leptos_nostr_auth::{NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
-use nostr::JsonUtil;
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -77,11 +78,13 @@ fn HomePage() -> impl IntoView {
                         on:click=move |_| {
                             if let Some(auth_result) = auth.auth.get() {
                                 let pubkey = auth_result.public_key();
-                                let unsigned = nostr::EventBuilder::new(
-                                    nostr::Kind::TextNote,
+                                let unsigned = UnsignedEvent::new(
+                                    pubkey,
+                                    Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64),
+                                    Kind::TextNote,
+                                    [],
                                     "Hello from leptos-nostr-auth!",
-                                )
-                                .build(pubkey);
+                                );
                                 let event_json = unsigned.as_json();
                                 set_sign_output.set("Signing…".into());
                                 wasm_bindgen_futures::spawn_local(async move {

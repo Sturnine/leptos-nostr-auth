@@ -1,6 +1,6 @@
 [package]
 name        = "leptos-nostr-auth"
-version     = "0.1.0"
+version     = "0.2.0"
 edition     = "2024"
 description = "Headless Nostr authentication modal widget for Leptos"
 license     = "Apache-2.0"
@@ -37,7 +37,16 @@ leptos-use = { version = "0.18", default-features = false, features = [
 codee = { version = "0.3", features = ["json_serde"] }
 
 # Nostr protocol: keys, events, NIP-19 bech32, NIP-49 ncryptsec (pure Rust)
-nostr = { version = "0.44", default-features = false, features = ["std", "nip44", "nip49"] }
+nostr = { version = "0.45.7", default-features = false, features = [
+  "std",
+  "nip44",
+  "nip49",
+  "rand",
+  "os-rng",
+] }
+
+# SHA-256 for passkey key derivation; nostr 0.45 no longer re-exports `hashes`
+bitcoin_hashes = { version = "1.2", default-features = false }
 
 # WASM bridge — compiles on all targets; browser-specific imports are cfg-gated
 wasm-bindgen         = "0.2"
@@ -71,6 +80,10 @@ thiserror = "2"
 # Makes non-Send types (Rc, web-sys objects) usable in Leptos signals on WASM.
 # Safe because WASM is single-threaded; SendWrapper panics on cross-thread access.
 send_wrapper = "0.6"
+
+# nostr 0.45 randomness (rand 0.10 -> getrandom 0.4) needs the browser backend explicitly
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 console_error_panic_hook = "0.1"

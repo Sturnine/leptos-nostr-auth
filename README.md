@@ -23,7 +23,7 @@ Passkeys use the WebAuthn PRF extension with a fixed salt (`"nostr-key-v1"`) to 
 ```toml
 # Cargo.toml
 [dependencies]
-leptos-nostr-auth = { version = "0.1", features = ["csr"] }
+leptos-nostr-auth = { version = "0.2", features = ["csr"] }
 ```
 
 ```rust
@@ -78,7 +78,7 @@ For server-side rendering with Axum and cargo-leptos, select rendering features 
 ```toml
 # Cargo.toml (cargo-leptos workspace member)
 [dependencies]
-leptos-nostr-auth = { version = "0.1", optional = true }
+leptos-nostr-auth = { version = "0.2", optional = true }
 
 [features]
 hydrate = ["leptos-nostr-auth/hydrate", ...]
@@ -104,7 +104,7 @@ You must select exactly one rendering mode feature:
 ### `insecure_nsec_input` — raw secret key paste (opt-in only)
 
 ```toml
-leptos-nostr-auth = { version = "0.1", features = ["csr", "insecure_nsec_input"] }
+leptos-nostr-auth = { version = "0.2", features = ["csr", "insecure_nsec_input"] }
 ```
 
 Shows a raw `nsec1...` / hex private key input behind a two-click security warning. **Not recommended** for production — any XSS on the page can steal the key. Use a browser extension, passkey, or ncryptsec instead.
@@ -244,8 +244,9 @@ use leptos_nostr_auth::AuthResult;
 if auth.auth.get().map(|a| a.can_sign()).unwrap_or(false) {
     if let Some(auth_result) = auth.auth.get() {
         let pubkey = auth_result.public_key();
-        let unsigned = nostr::EventBuilder::new(nostr::Kind::TextNote, "Hello Nostr!")
-            .build(pubkey);
+        use leptos_nostr_auth::nostr::{event::{Kind, UnsignedEvent}, types::Timestamp};
+        let now = Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64);
+        let unsigned = UnsignedEvent::new(pubkey, now, Kind::TextNote, [], "Hello Nostr!");
         let event_json = unsigned.as_json();
 
         // Unified async API — works for all signing methods
@@ -320,7 +321,7 @@ pub struct NostrAuthContext {
     /// Current auth result; `None` when not logged in.
     pub auth: Signal<Option<AuthResult>>,
     /// Authenticated user's public key.
-    pub public_key: Signal<Option<nostr::PublicKey>>,
+    pub public_key: Signal<Option<nostr::key::PublicKey>>,
     /// Authenticated user's npub (bech32) or hex pubkey as a `String`.
     pub npub: Signal<Option<String>>,
     /// `true` when logged in.
@@ -405,6 +406,20 @@ All elements emit `data-nostr-*` attributes for styling:
 [data-nostr-back]            { /* back button */ }
 [data-nostr-close]           { /* close button */ }
 ```
+
+## Upgrading to 0.2
+
+- Public key types are now nostr 0.45 (`nostr::key::PublicKey`). The crate re-exports `nostr`
+  as `leptos_nostr_auth::nostr`, so consumers can use the matching version.
+- An `ncryptsec` with `log_n` above 18 is now rejected as `InvalidNcryptsec`, because nostr 0.45
+  caps scrypt cost. Re-encrypt the key at a lower cost or use another login method.
+- On `wasm32-unknown-unknown`, `EventBuilder` and every other caller of `Timestamp::now` need
+  `universal_time::define_time_provider!` in the consumer's binary. This crate defines no time
+  provider, so it cannot collide with yours, and it builds events with `UnsignedEvent::new` and
+  `js_sys::Date::now()` instead. With rustc 1.99.0, a wasm binary that reaches `Timestamp::now`
+  without a provider fails at link time (`a time provider is required`). Other toolchains may
+  behave the other way: a missing provider could link and then trap at runtime with no build
+  warning. Do not assume `EventBuilder` works on wasm without a provider.
 
 ## Development
 
