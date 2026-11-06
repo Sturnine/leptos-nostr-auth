@@ -1033,7 +1033,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::use_debug, reason = "the test pins the Debug output")]
     fn debug_redacts_bunker() {
         let mut s = session();
         s.bunker_uri = "bunker://abc?relay=wss%3A%2F%2Frelay.example&secret=TOPSECRET".to_owned();
@@ -1122,8 +1121,10 @@ pub(super) mod server_tests {
         let pk = s.public_key;
         s.close();
         let auth = crate::types::AuthResult::Bunker(Box::new(s));
-        let err = ready(auth.sign_event_async(unsigned(pk))).unwrap_err();
-        assert_eq!(err.to_string(), "Signing failed: not available on server");
+        assert_eq!(
+            text(ready(auth.sign_event_async(unsigned(pk)))),
+            "Signing failed: not available on server"
+        );
     }
 
     #[test]

@@ -370,7 +370,6 @@ mod tests {
 
     #[test]
     #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
-    #[expect(clippy::use_debug, reason = "the test pins the Debug output")]
     fn debug_prints_variant_and_public_key_only() {
         use crate::signers::{PasskeySession, RawKeySession};
         let keys = Keys::new(
@@ -414,7 +413,7 @@ mod tests {
             ),
             (
                 "Passkey",
-                AuthResult::Passkey(PasskeySession::for_tests(keys.clone(), vec![7, 8, 9])),
+                AuthResult::Passkey(PasskeySession::for_tests(keys, vec![7, 8, 9])),
             ),
         ];
         for (name, auth) in &cases {
