@@ -91,7 +91,7 @@ See the `with-axum-ssr` example for a complete cargo-leptos project layout.
 
 ## Feature Flags
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.89+ (edition 2024).
 
 You must select exactly one rendering mode feature:
 
@@ -108,6 +108,34 @@ leptos-nostr-auth = { version = "0.2", features = ["csr", "insecure_nsec_input"]
 ```
 
 Shows a raw `nsec1...` / hex private key input behind a two-click security warning. **Not recommended** for production — any XSS on the page can steal the key. Use a browser extension, passkey, or ncryptsec instead.
+
+## Release Profile
+
+Cargo applies `[profile.*]` only at the workspace root, so this crate cannot set them for your build. For a small CSR wasm bundle, add this to your app's `Cargo.toml` (as in `examples/basic-csr`):
+
+```toml
+[profile.release]
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+panic         = "abort"
+```
+
+With cargo-leptos, keep `panic = "abort"` out of `[profile.release]` so it does not reach the server binary. Put it in a wasm-only profile and select that profile:
+
+```toml
+[[workspace.metadata.leptos]]
+lib-profile-release = "wasm-release"
+
+[profile.wasm-release]
+inherits      = "release"
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+panic         = "abort"
+```
+
+Do not set `strip = "symbols"`: it removes the `target_features` section, and the wasm-opt pass that Trunk runs then fails on bulk-memory instructions. In `basic-csr`, `opt-level = "z"` shrank the wasm from 2669143 to 1979248 bytes and roughly doubled the ncryptsec decrypt time in Chromium, from about 190-255 ms to about 455 ms, because scrypt runs on the main thread.
 
 ## Configuration
 
@@ -409,6 +437,7 @@ All elements emit `data-nostr-*` attributes for styling:
 
 ## Upgrading to 0.2
 
+- The crate now declares `rust-version = "1.89"`; Rust 1.88 fails with a "requires rustc" error.
 - Public key types are now nostr 0.45 (`nostr::key::PublicKey`). The crate re-exports `nostr`
   as `leptos_nostr_auth::nostr`, so consumers can use the matching version.
 - An `ncryptsec` with `log_n` above 18 is now rejected as `InvalidNcryptsec`, because nostr 0.45

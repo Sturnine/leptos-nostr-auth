@@ -1,15 +1,16 @@
 [package]
-name        = "leptos-nostr-auth"
-version     = "0.2.0"
-edition     = "2024"
-description = "Headless Nostr authentication modal widget for Leptos"
-license     = "Apache-2.0"
-authors     = ["Devan Looches <devan.looches@gmail.com>"]
-repository  = "https://github.com/Magilis/leptos-nostr-auth"
-readme      = "README.md"
-keywords    = ["nostr", "leptos", "wasm", "authentication", "login"]
-categories  = ["wasm", "web-programming", "authentication"]
-exclude     = ["examples"]
+name         = "leptos-nostr-auth"
+version      = "0.2.0"
+edition      = "2024"
+rust-version = "1.89"
+description  = "Headless Nostr authentication modal widget for Leptos"
+license      = "Apache-2.0"
+authors      = ["Devan Looches <devan.looches@gmail.com>"]
+repository   = "https://github.com/Sturnine/leptos-nostr-auth"
+readme       = "README.md"
+keywords     = ["nostr", "leptos", "wasm", "authentication", "login"]
+categories   = ["wasm", "web-programming", "authentication"]
+include      = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE"]
 
 [features]
 default = []
@@ -91,15 +92,8 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test = "0.3.80"
 
-[profile.release]
-opt-level     = "z"       # minimize binary size (WASM priority)
-lto           = true      # link-time optimization, reduces size + improves speed
-codegen-units = 1         # max optimization (slower compile, better output)
-panic         = "abort"   # no unwinding — shrinks WASM significantly
-strip         = "symbols" # strip debug symbols from release
-
 [profile.dev]
-opt-level = 1 # faster incremental builds, avoids WASM slowness in dev
+opt-level = 1 # scrypt test vectors are slow at opt-level 0
 
 [lints.rust]
 unsafe_code  = "forbid"

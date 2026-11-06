@@ -2,16 +2,17 @@
 members = ["."]
 
 [[workspace.metadata.leptos]]
-name         = "with-axum-ssr"
-bin-package  = "with-axum-ssr"
-lib-package  = "with-axum-ssr"
-site-root    = "target/site"
-site-pkg-dir = "pkg"
-style-file   = "style/main.css"
-site-addr    = "127.0.0.1:3000"
-reload-port  = 3001
-bin-features = ["ssr"]
-lib-features = ["hydrate"]
+name                = "with-axum-ssr"
+bin-package         = "with-axum-ssr"
+lib-package         = "with-axum-ssr"
+site-root           = "target/site"
+site-pkg-dir        = "pkg"
+style-file          = "style/main.css"
+site-addr           = "127.0.0.1:3000"
+reload-port         = 3001
+bin-features        = ["ssr"]
+lib-features        = ["hydrate"]
+lib-profile-release = "wasm-release"
 
 [package]
 name    = "with-axum-ssr"
@@ -55,3 +56,14 @@ tower-http  = { version = "0.7", features = ["fs"], optional = true }
 # Hydrate-only (WASM)
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen             = { version = "0.2", optional = true }
+
+# Not [profile.release]: panic = "abort" would also reach the server binary.
+[profile.wasm-release]
+inherits      = "release"
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+panic         = "abort"
+
+[profile.dev]
+opt-level = 1
