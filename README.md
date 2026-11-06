@@ -47,7 +47,7 @@ fn App() -> impl IntoView {
 fn HomePage() -> impl IntoView {
     let auth = use_nostr_auth();
     view! {
-        // Show loading state while session restores on mount
+        // A restore can wait a long time, so the login button stays available beside this
         <Show when=move || auth.is_restoring.get() fallback=|| ()>
             <p>"Restoring session…"</p>
         </Show>
@@ -55,10 +55,13 @@ fn HomePage() -> impl IntoView {
         <Show
             when=move || auth.is_authenticated.get()
             fallback=move || view! {
-                // Hide login button while restoring to avoid a flash of unauthenticated content
-                <Show when=move || !auth.is_restoring.get() fallback=|| ()>
-                    <button on:click=move |_| auth.show_login.run(())>
-                        "Login with Nostr"
+                <button on:click=move |_| auth.show_login.run(())>
+                    "Login with Nostr"
+                </button>
+                // Without this, a kept session that cannot restore leaves users no way out
+                <Show when=move || auth.has_saved_session.get() fallback=|| ()>
+                    <button on:click=move |_| auth.logout.run(())>
+                        "Forget saved session"
                     </button>
                 </Show>
             }
@@ -313,7 +316,8 @@ texts may change.
 `SignerKeyMismatch`, whose text is "Signer is using a different account than this session. Log in
 again to switch." The crate does not log out, so a signer cannot end a session by returning a bad
 event, and switching the extension back makes the same session work again. On reload the mismatch
-fails restore and the session stays stored, logged out, and is retried on next load. Extension
+fails restore with `SignerKeyMismatch` in `restore_error`, for every method. The session stays stored,
+logged out, and is retried on next load, so switching back restores it. Extension
 `nip44_encrypt` and `nip44_decrypt` call `getPublicKey` first and fail the same way, which costs one
 extra extension call each, and a switch between the two calls is not detected.
 
@@ -396,9 +400,31 @@ if let AuthResult::Bunker(session) = &auth_result {
 
 When `persist_session: true` (default), successful logins are cached in localStorage. **Private keys are never persisted.**
 
+A failed or cancelled prompt never clears the session. Only a logout or a successful login as a different identity does:
+
+| Case | Stored session | Result |
+|---|---|---|
+| `logout` | Deleted | Logged out; also works while logged out |
+| Failed or cancelled restore, any method | Kept | Logged out; retried on next load, once per page load, with no timers |
+| Another key on restore, any method | Kept | The other key is never adopted. `restore_error` is `SignerKeyMismatch`. Switching the signer back restores it |
+| Stored data can never restore (bad hex, missing fields, bad base64) | Kept | Logged out, with no prompt or network call |
+| Stored method removed from `allowed_methods` | Kept | Logged out, with no prompt or network call. `restore_error` is `RestoreMethodNotAllowed` |
+| Stored JSON cannot be decoded | Kept | Reads as nothing stored. `logout` removes it |
+| New login, persistable method | Overwritten | Replaced by the new login |
+| New login, not persistable, same public key | Kept | A reload restores the stored login |
+| New login, not persistable, different public key | Cleared after that login succeeds | A reload is logged out rather than returning the old identity |
+| New login whose write fails, different public key (quota, for example) | Cleared | A reload is logged out rather than returning the old identity |
+| New login whose write fails, same public key | Kept | A reload restores the same identity |
+| Login or logout during a restore | Per the rows above | The restore is cancelled, its result is discarded and `is_restoring` ends at once |
+| Failed or cancelled login in the modal | Untouched | A restore in flight continues |
+
+With `persist_session: false` the crate writes nothing on login, starts no restore and ignores removal in other tabs. `logout` still deletes the stored session.
+
+**Forget control.** A kept session that cannot restore has no other visible way out, so show one when `has_saved_session` is true and `is_authenticated` is false, and call `logout`. `restore_error` says why it did not restore. Treat its text as untrusted display text: it can carry words from an extension or a relay. After a login whose write failed, with nothing restorable stored, `has_saved_session` reads true with nothing saved until logout, reload or a refetch from another tab's change. Undecodable bytes read as no saved session, so no forget control shows, though `logout` removes them.
+
 | Method | Restore behavior |
 |---|---|
-| Extension | Re-calls `window.nostr.getPublicKey()`, verifies pubkey matches. If restore fails, the session stays stored and is retried on next load. |
+| Extension | Re-calls `window.nostr.getPublicKey()`, verifies pubkey matches |
 | Bunker | Opens a socket to the stored relays, in order, and sends `get_public_key` with the stored client key; verifies pubkey matches |
 | Passkey | Calls `navigator.credentials.get()` → biometric → re-derives same key |
 | Read-Only | Restores directly from stored hex pubkey |
@@ -437,15 +463,42 @@ relays, at most 5, the longest a call can take is:
 | Login | (2n+1)T + 600 s | | 930 s with link |
 | Restore | 2nT + 300 s | | 600 s with link |
 
-The `is_restoring` signal on `NostrAuthContext` is `true` while restore is in progress.
-Use it to suppress the login button flash:
+The `is_restoring` signal on `NostrAuthContext` is `true` while restore is in progress. Do not hide
+the login button behind it. With a relay down, each load can wait for the bounds above, and an
+extension that never answers `getPublicKey` keeps it true with no bound, since NIP-07 calls have no
+timeout. A login, a logout, a logout in another tab or an unmount ends it at once.
 
 ```rust
-// Don't show the login button during session restore
-<Show when=move || !auth.is_restoring.get() && !auth.is_authenticated.get()>
+// Beside the button, not instead of it
+<Show when=move || auth.is_restoring.get()>
+    <p>"Restoring session…"</p>
+</Show>
+<Show when=move || !auth.is_authenticated.get()>
     <button on:click=...>"Login"</button>
 </Show>
 ```
+
+`is_restoring` is false on the first hydrated render, because server HTML cannot know storage, and
+turns true after hydration before any of your Effects read it. A provider mounted later on the
+client, and any CSR app, sees it true on its first render when a restorable session is stored.
+
+An extension that asks on every call prompts on every load until the user forgets the session.
+
+A cancelled restore clears a bunker approval link at once and closes its socket. A browser or
+extension prompt stays on screen until it is answered, because the crate cannot dismiss it.
+
+If a restore finishes while the login modal is open, the modal stays open over the logged-in page. Closing it keeps the restored session. Finishing a login there replaces it, by the same rules as any new login.
+
+### Other tabs
+
+Any removal of the stored session logs out other tabs, through the browser's `storage` event, and drops their in-memory keys. There is no reason signal. A bunker session there closes for good. This covers another tab's `logout`, its login as a different identity with a method that cannot persist, and its quota-failure clear. Limits:
+
+- A persistable login elsewhere leaves this tab logged in, but a non-persistable one logs it out. This tab also logs out if that login is the identity it already holds.
+- Removing a key that is not there fires no `storage` event. If nothing is stored, a logout in another tab does not reach this one, and this tab keeps its in-memory keys.
+- `localStorage.clear()` in another tab logs this tab out if the browser fires a `storage` event for it, even if no session of ours was stored, because the event does not say what was removed. An in-memory ncryptsec or nsec login ends too, and a bunker session closes for good. Use `removeItem` for your own keys. Chromium fires no event when the origin's storage was already empty.
+- Undecodable bytes under our key count the same: `removeItem` or `clear()` of them logs this tab out, though nothing was restorable.
+- A page restored from the back/forward cache gets no `storage` event for a logout that happened meanwhile.
+- A `restore_error` here can go stale if another tab logs in persistably while this tab stays logged out.
 
 To disable persistence:
 
@@ -465,8 +518,13 @@ pub struct NostrAuthContext {
     pub npub: Signal<Option<String>>,
     /// `true` when logged in.
     pub is_authenticated: Signal<bool>,
-    /// `true` while a persisted session is being restored from localStorage on mount.
+    /// `true` while a persisted session is being restored from localStorage on mount. False on the
+    /// first hydrated render. Do not hide the login button behind it.
     pub is_restoring: Signal<bool>,
+    /// `true` when localStorage holds a decodable session, restored or not.
+    pub has_saved_session: Signal<bool>,
+    /// Why the stored session did not restore on this load. Untrusted display text.
+    pub restore_error: Signal<Option<NostrAuthError>>,
     /// Open the login modal programmatically.
     pub show_login: Callback<()>,
     /// Log out, clear the stored session and close a bunker session for good.
@@ -521,7 +579,11 @@ pub enum NostrAuthError {
 
     // Signing
     SigningFailed(String),
+    // Another key than the session's. As `restore_error`, the session is kept and retried
     SignerKeyMismatch,
+
+    // Session restore: the stored method is no longer in `allowed_methods`
+    RestoreMethodNotAllowed,
 
     // Internal serialization
     Serialization(String),
@@ -627,9 +689,26 @@ All elements emit `data-nostr-*` attributes for styling:
 - A present extension method that throws synchronously is now a rejection, the same as an asynchronous
   one: `SigningFailed(msg)` for `signEvent` and `nip44_*`, `ExtensionRejected(msg)` for `getPublicKey`.
   Before, it raised an uncaught `TypeError` and the future never finished.
-- A stored extension session is now kept when restore fails for any reason. The user is logged out,
-  `is_restoring` ends false, and restore is retried on next load. Before, a rejection or another key
-  deleted it, and an absent or throwing extension left `is_restoring` stuck true.
+- A stored session of any method is now kept when restore fails for any reason, including another
+  key and data that can never restore. The user is logged out, `is_restoring` ends false, and restore
+  is retried on next load. Before, most failures deleted it, and an absent or throwing extension left
+  `is_restoring` stuck true. An extension that asks on every call now prompts on every load until the
+  user forgets the session.
+- New `NostrAuthContext::has_saved_session` and `restore_error`, and new
+  `NostrAuthError::RestoreMethodNotAllowed`. A stored session whose method left `allowed_methods` no
+  longer restores or prompts. A mismatch on restore reports `SignerKeyMismatch` for every method.
+- A login or logout now cancels a restore in flight, and its result is discarded. Before, a late
+  result could log a user back in or delete a session a login had just saved.
+- A login with a method that cannot persist, as a different identity, now clears the stored session,
+  so a reload no longer returns the old identity. So does a login whose write fails.
+- Any removal of the stored session now logs out other tabs, including a different-identity
+  non-persistable login, the quota-failure clear and `localStorage.clear()` when nothing of ours was
+  stored. A bunker session there closes for good. A persistable login elsewhere does not log them out,
+  and a logout with nothing stored does not reach them.
+- `is_restoring` is now true on the first render with a restorable session, except on the first
+  hydrated render. Stop hiding the login button behind it: it can stay true for a long time, or without
+  bound with an extension that never answers.
+- A restore landing while the login modal is open leaves the modal open.
 - Extension `nip44_encrypt` and `nip44_decrypt` now call `getPublicKey` first and return
   `SignerKeyMismatch` on a switch. A missing `nip44` is `ExtensionNotFound`. A throwing or rejecting
   `getPublicKey` here is `ExtensionRejected(msg)`, and a malformed key from it is `InvalidPublicKey`;

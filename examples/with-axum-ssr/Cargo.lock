@@ -1391,6 +1391,7 @@ dependencies = [
  "base64 0.23.1",
  "bitcoin_hashes 1.2.0",
  "codee",
+ "futures",
  "getrandom 0.4.3",
  "js-sys",
  "leptos",

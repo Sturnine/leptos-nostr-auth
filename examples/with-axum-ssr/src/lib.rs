@@ -57,7 +57,7 @@ fn HomePage() -> impl IntoView {
                 "the login modal narrows to your real platform capabilities."
             </p>
 
-            // Restoring indicator — avoids login button flash on page load
+            // A restore can wait a long time, so the login button below stays available beside it
             <Show when=move || auth.is_restoring.get() fallback=|| ()>
                 <p class="restoring">"Restoring session…"</p>
             </Show>
@@ -65,13 +65,26 @@ fn HomePage() -> impl IntoView {
             <Show
                 when=move || auth.is_authenticated.get()
                 fallback=move || view! {
-                    <Show when=move || !auth.is_restoring.get() fallback=|| ()>
-                        <p>"Not logged in."</p>
+                    <p>"Not logged in."</p>
+                    <button
+                        class="btn"
+                        on:click=move |_| auth.show_login.run(())
+                    >
+                        "Login with Nostr"
+                    </button>
+                    <Show when=move || auth.has_saved_session.get() fallback=|| ()>
+                        <p class="meta">
+                            {move || {
+                                auth.restore_error
+                                    .get()
+                                    .map(|e| format!("Saved session did not restore: {e}"))
+                            }}
+                        </p>
                         <button
-                            class="btn"
-                            on:click=move |_| auth.show_login.run(())
+                            class="btn btn-ghost"
+                            on:click=move |_| auth.logout.run(())
                         >
-                            "Login with Nostr"
+                            "Forget saved session"
                         </button>
                     </Show>
                 }

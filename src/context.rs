@@ -3,13 +3,20 @@
     reason = "#[component] generates the exported props struct, which cannot take attributes"
 )]
 use codee::string::JsonSerdeCodec;
+use futures::future::{AbortHandle, Abortable};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_use_storage::use_local_storage;
+use leptos_use_event_listener::use_event_listener;
+use leptos_use_storage::{UseStorageError, UseStorageOptions, use_local_storage_with_options};
+use leptos_use_window::use_window;
 use nostr::nips::nip19::ToBech32;
 
 use crate::modal::NostrAuthModal;
-use crate::types::{AuthResult, NostrAuthConfig, PersistedMethod, PersistedSession};
+use crate::storage::{
+    LoginStorageAction, RestorePlan, initial_restoring, is_logout_storage_event,
+    login_storage_action, restore_plan, restore_session,
+};
+use crate::types::{AuthResult, NostrAuthConfig, NostrAuthError, PersistedSession};
 
 /// Reactive auth context — available anywhere inside [`NostrAuthProvider`].
 ///
@@ -29,8 +36,23 @@ pub struct NostrAuthContext {
     pub is_authenticated: Signal<bool>,
     /// `true` while a persisted session is being restored from localStorage on mount.
     ///
-    /// Use this to avoid showing a flash of the login button before restore completes.
+    /// False on the first hydrated render, because server HTML cannot know storage. It can stay
+    /// true for a long time, or without bound with an extension that never answers, so do not hide
+    /// the login button behind it. A login, a logout or a logout in another tab ends it at once.
     pub is_restoring: Signal<bool>,
+    /// `true` when localStorage holds a decodable session, restored or not, whether or not
+    /// `persist_session` is on. Use it with `is_authenticated` to offer a "forget saved session"
+    /// control that calls `logout`.
+    ///
+    /// False on the first hydrated render. After a login whose write failed, with nothing
+    /// restorable stored, it reads true with nothing saved until logout, reload or a refetch from
+    /// another tab's change.
+    pub has_saved_session: Signal<bool>,
+    /// Why the stored session did not restore on this load. It is kept and retried on the next
+    /// load. Cleared by a login, a logout or a logout in another tab.
+    ///
+    /// Treat the text as untrusted display text: it can carry words from an extension or a relay.
+    pub restore_error: Signal<Option<NostrAuthError>>,
     /// Open the login modal programmatically.
     pub show_login: Callback<()>,
     /// Log out: clears auth state, removes the localStorage session and closes a bunker session
@@ -38,8 +60,7 @@ pub struct NostrAuthContext {
     pub logout: Callback<()>,
 }
 
-/// Replace the current session, closing the old one for good. Must tolerate a disposed provider:
-/// a restore can finish after unmount.
+/// Replace the current session, closing the old one for good.
 fn replace_auth(
     auth: ReadSignal<Option<AuthResult>>,
     set_auth: WriteSignal<Option<AuthResult>>,
@@ -89,6 +110,10 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 ///     }
 /// }
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "one reactive setup; splitting it would only pass its signals around"
+)]
 #[component]
 pub fn NostrAuthProvider(
     /// Optional configuration (default: all methods enabled, persistence on).
@@ -101,47 +126,130 @@ pub fn NostrAuthProvider(
 
     let (auth, set_auth) = signal(None::<AuthResult>);
     let (show_modal, set_show_modal) = signal(false);
-    let (restoring, set_restoring) = signal(false);
+    let (write_failures, set_write_failures) = signal(0_u32);
 
-    // use_local_storage is SSR-safe:
-    //   server  → stored_session.get() == None; set/delete are no-ops
-    //   client  → reads/writes real localStorage at storage_key
-    // PersistedSession requires PartialEq (derived in types.rs) for the equality check
-    // that prevents spurious reactive updates.
     let (stored_session, set_stored_session, delete_stored_session) =
-        use_local_storage::<Option<PersistedSession>, JsonSerdeCodec>(cfg.get_value().storage_key);
-
-    // Clone before Effect consumes delete_stored_session
-    let delete_for_logout = delete_stored_session.clone();
-
-    // On mount: one-time session restore from localStorage.
-    // get_untracked() avoids re-running this Effect when the session is saved
-    // after a fresh login.
-    Effect::new(move |_| {
-        if cfg.get_value().persist_session
-            && let Some(session) = stored_session.get_untracked()
-        {
-            set_restoring.set(true);
-            let delete = delete_stored_session.clone();
-            spawn_local(async move {
-                match crate::storage::restore_session(&session, cfg.get_value().bunker_timeout_secs)
-                    .await
-                {
-                    Ok(result) => {
-                        replace_auth(auth, set_auth, Some(result));
-                    }
-                    Err(e) => {
-                        web_sys::console::info_1(
-                            &format!("leptos-nostr-auth: session restore failed: {e}").into(),
-                        );
-                        // A stored extension session survives any failed restore: the extension may inject late.
-                        if !matches!(session.method, PersistedMethod::Extension) {
-                            delete();
-                        }
-                    }
+        use_local_storage_with_options::<Option<PersistedSession>, JsonSerdeCodec>(
+            cfg.with_value(|c| c.storage_key.clone()),
+            UseStorageOptions::default().on_error(move |e| {
+                if matches!(e, UseStorageError::SetItemFailed(_)) {
+                    set_write_failures.update(|n| *n = n.wrapping_add(1));
                 }
-                set_restoring.set(false);
-            });
+            }),
+        );
+
+    let hydrating = Owner::current_shared_context().is_some_and(|sc| sc.during_hydration());
+    let setup_plan = cfg.with_value(|c| {
+        restore_plan(
+            c.persist_session,
+            stored_session.get_untracked().as_ref(),
+            &c.allowed_methods,
+        )
+    });
+    let (restoring, set_restoring) = signal(initial_restoring(hydrating, setup_plan));
+    let (settled, set_settled) = signal(!hydrating);
+    let (restore_error, set_restore_error) = signal(None::<NostrAuthError>);
+
+    let restore_handle = StoredValue::new(None::<AbortHandle>);
+    // The pubkey of a login whose failed write must delete what it could not replace.
+    let clear_on_write_failure = StoredValue::new(None::<String>);
+
+    on_cleanup(move || {
+        restore_handle.with_value(|handle| {
+            if let Some(handle) = handle {
+                handle.abort();
+            }
+        });
+    });
+
+    let cancel_restore = move || {
+        restore_handle.with_value(|handle| {
+            if let Some(handle) = handle {
+                handle.abort();
+            }
+        });
+        set_restoring.set(false);
+        set_restore_error.set(None);
+        clear_on_write_failure.set_value(None);
+    };
+
+    let _ = use_event_listener(use_window(), leptos::ev::storage, move |ev| {
+        let local = web_sys::window().and_then(|w| w.local_storage().ok().flatten());
+        let is_local_area = local.is_some() && ev.storage_area() == local;
+        let logged_out = cfg.with_value(|c| {
+            is_logout_storage_event(
+                c.persist_session,
+                is_local_area,
+                ev.key().as_deref(),
+                ev.new_value().as_deref(),
+                &c.storage_key,
+            )
+        });
+        if logged_out {
+            cancel_restore();
+            replace_auth(auth, set_auth, None);
+        }
+    });
+
+    // `immediate = false`: a load's own rewrite can fail before this subscribes, and must not count.
+    Effect::watch(
+        move || write_failures.get(),
+        {
+            let delete = delete_stored_session.clone();
+            move |_, _, _| {
+                let armed = clear_on_write_failure
+                    .try_update_value(Option::take)
+                    .flatten();
+                if let Some(pubkey) = armed
+                    && stored_session
+                        .get_untracked()
+                        .is_some_and(|s| s.public_key_hex == pubkey)
+                {
+                    delete();
+                }
+            }
+        },
+        false,
+    );
+
+    // Reads storage afresh, because a logout during the consumer's first render runs before this.
+    // get_untracked() avoids re-running when a login saves the session.
+    Effect::new(move |_| {
+        set_settled.set(true);
+        let session = stored_session.get_untracked();
+        let (plan, timeout) = cfg.with_value(|c| {
+            (
+                restore_plan(c.persist_session, session.as_ref(), &c.allowed_methods),
+                c.bunker_timeout_secs,
+            )
+        });
+        match (plan, session) {
+            (RestorePlan::Restore, Some(session)) => {
+                let (handle, registration) = AbortHandle::new_pair();
+                restore_handle.set_value(Some(handle));
+                set_restoring.set(true);
+                spawn_local(async move {
+                    match Abortable::new(restore_session(&session, timeout), registration).await {
+                        Ok(Ok(result)) => {
+                            replace_auth(auth, set_auth, Some(result));
+                            set_restore_error.set(None);
+                            set_restoring.set(false);
+                        }
+                        Ok(Err(e)) => {
+                            web_sys::console::info_1(
+                                &format!("leptos-nostr-auth: session restore failed: {e}").into(),
+                            );
+                            set_restore_error.set(Some(e));
+                            set_restoring.set(false);
+                        }
+                        Err(_aborted) => {}
+                    }
+                });
+            }
+            (RestorePlan::NotAllowed, _) => {
+                set_restore_error.set(Some(NostrAuthError::RestoreMethodNotAllowed));
+            }
+            _ => {}
         }
     });
 
@@ -158,9 +266,15 @@ pub fn NostrAuthProvider(
 
     let show_login = Callback::new(move |(): ()| set_show_modal.set(true));
 
-    let logout = Callback::new(move |(): ()| {
-        delete_for_logout(); // SSR-safe no-op on server
-        replace_auth(auth, set_auth, None);
+    let has_saved_session = Signal::derive(move || settled.get() && stored_session.get().is_some());
+
+    let logout = Callback::new({
+        let delete = delete_stored_session.clone();
+        move |(): ()| {
+            cancel_restore();
+            delete();
+            replace_auth(auth, set_auth, None);
+        }
     });
 
     provide_context(NostrAuthContext {
@@ -169,17 +283,32 @@ pub fn NostrAuthProvider(
         npub,
         is_authenticated,
         is_restoring: restoring.into(),
+        has_saved_session,
+        restore_error: restore_error.into(),
         show_login,
         logout,
     });
 
     let on_auth_callback = Callback::new(move |result: AuthResult| {
-        // Persist session to localStorage (if configured).
-        // set_stored_session is a SSR-safe no-op on server.
-        if cfg.get_value().persist_session
-            && let Some(session) = result.to_persisted_session()
-        {
-            set_stored_session.set(Some(session));
+        cancel_restore();
+        let action = login_storage_action(
+            cfg.with_value(|c| c.persist_session),
+            stored_session.get_untracked().as_ref(),
+            &result.public_key(),
+            result.to_persisted_session(),
+        );
+        match action {
+            LoginStorageAction::Keep => {}
+            LoginStorageAction::Overwrite {
+                session,
+                clear_on_failure,
+            } => {
+                if clear_on_failure {
+                    clear_on_write_failure.set_value(Some(session.public_key_hex.clone()));
+                }
+                set_stored_session.set(Some(session));
+            }
+            LoginStorageAction::Clear => delete_stored_session(),
         }
         replace_auth(auth, set_auth, Some(result));
         set_show_modal.set(false);
@@ -218,6 +347,7 @@ pub fn NostrAuthProvider(
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
+    use crate::types::PersistedMethod;
     use codee::{Decoder, Encoder};
 
     const READ_ONLY_JSON: &str = r#"{"public_key_hex":"82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2","method":"ReadOnly","bunker_uri":null,"bunker_client_secret_hex":null,"passkey_credential_id":null}"#;
@@ -249,6 +379,33 @@ mod tests {
         let enc = |s| JsonSerdeCodec::encode(&Some(s)).unwrap();
         assert_eq!(enc(read_only()), READ_ONLY_JSON);
         assert_eq!(enc(bunker()), BUNKER_JSON);
+    }
+
+    #[test]
+    fn baseline_session_restores() {
+        const BASELINE: &str = r#"{"public_key_hex":"82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2","method":"ReadOnly","bunker_uri":null,"bunker_client_secret_hex":null,"passkey_credential_id":null}"#;
+        let dec = <JsonSerdeCodec as Decoder<Option<PersistedSession>>>::decode(BASELINE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(BASELINE, READ_ONLY_JSON);
+        let restored = crate::storage::tests::first_poll(restore_session(&dec, 1));
+        assert!(matches!(restored, Some(Ok(AuthResult::ReadOnly(_)))));
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn provider_renders_no_restoring_marker() {
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            view! {
+                <NostrAuthProvider>
+                    <p>"inside"</p>
+                </NostrAuthProvider>
+            }
+            .to_html()
+        });
+        assert!(html.contains("inside"));
+        assert!(!html.contains("data-nostr-restoring"));
     }
 
     #[test]

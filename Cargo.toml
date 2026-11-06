@@ -39,6 +39,9 @@ leptos-use-window         = { version = "0.20", default-features = false }
 # Codec for use_local_storage — JsonCodec encodes PersistedSession as JSON
 codee = { version = "0.3", features = ["json_serde"] }
 
+# AbortHandle for cancelling a restore on login, logout and unmount
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+
 # Nostr protocol: keys, events, NIP-19 bech32, NIP-49 ncryptsec (pure Rust)
 nostr = { version = "0.45.7", default-features = false, features = [
   "std",
@@ -72,6 +75,8 @@ web-sys = { version = "0.3", features = [
   "BinaryType",
   "Location",
   "KeyboardEvent",
+  "Storage",
+  "StorageEvent",
 ] }
 
 # Serialization (pure Rust)
