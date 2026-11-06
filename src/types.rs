@@ -203,6 +203,17 @@ pub enum PersistedMethod {
     ReadOnly,
 }
 
+impl PersistedMethod {
+    pub(crate) const fn login_method(&self) -> LoginMethod {
+        match self {
+            Self::Extension => LoginMethod::Extension,
+            Self::Bunker => LoginMethod::Bunker,
+            Self::Passkey => LoginMethod::Passkey,
+            Self::ReadOnly => LoginMethod::ReadOnly,
+        }
+    }
+}
+
 /// Which login methods to show in the modal.
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -336,9 +347,12 @@ pub enum NostrAuthError {
     /// This session was closed for good. Retrying cannot succeed; read the current session from `NostrAuthContext::auth`.
     #[error("Bunker session closed by logout or replacement")]
     BunkerSessionClosed,
-    /// The signer used a different key than this session, usually after an account switch in the extension. Log in again to switch.
+    /// The signer used a different key than this session, usually after an account switch in the extension. Log in again to switch. As `NostrAuthContext::restore_error`, the stored session is kept and retried next time, so switching the signer back to its key restores it.
     #[error("Signer is using a different account than this session. Log in again to switch.")]
     SignerKeyMismatch,
+    /// The stored session's login method is no longer in `NostrAuthConfig::allowed_methods`. The session is kept, and restores if the method is allowed again.
+    #[error("This session's login method is no longer allowed")]
+    RestoreMethodNotAllowed,
     /// A WebAuthn / passkey operation failed.
     #[error("Passkey operation failed: {0}")]
     PasskeyFailed(String),
