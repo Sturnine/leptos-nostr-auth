@@ -33,7 +33,8 @@ pub struct NostrAuthContext {
     pub is_restoring: Signal<bool>,
     /// Open the login modal programmatically.
     pub show_login: Callback<()>,
-    /// Log out: clears auth state and removes the localStorage session.
+    /// Log out: clears auth state, removes the localStorage session and closes a bunker session
+    /// for good, including for clones kept elsewhere.
     pub logout: Callback<()>,
 }
 

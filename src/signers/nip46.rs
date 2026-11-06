@@ -10,11 +10,13 @@ use crate::types::NostrAuthError;
 /// [`BunkerSession::bunker_uri`]. There is no failover while a socket stays open, because retrying
 /// a `sign_event` elsewhere risks signing twice.
 ///
-/// `Clone` is shallow: every clone shares the same underlying WebSocket, message
-/// handler, and in-flight request table via `Rc<RefCell<_>>`. This is intentional —
-/// all clones (e.g. from repeated reads of a reactive `Signal<AuthResult>`) refer
-/// to one physical connection, not independent snapshots. Concurrent reconnects
-/// across clones are serialized by `connect_lock` in `ensure_ws`.
+/// `Clone` is shallow: every clone shares one connection, so clones from repeated reads of a
+/// reactive `Signal<AuthResult>` refer to one physical socket, not independent snapshots.
+/// Concurrent reconnects across clones share one attempt.
+///
+/// The connection closes when the last clone drops, and when a [`crate::context::NostrAuthProvider`]
+/// logs out or replaces this session. Closing by the provider is final for every clone: see
+/// [`NostrAuthError::BunkerSessionClosed`].
 #[derive(Clone)]
 #[cfg_attr(
     feature = "ssr",
@@ -109,7 +111,8 @@ impl BunkerSession {
 
     /// Send a NIP-46 `sign_event` request to the remote signer.
     ///
-    /// Reuses the persistent WebSocket if it is open; reconnects automatically if not.
+    /// Reuses the persistent WebSocket if it is open; reconnects automatically if not, unless the
+    /// session was closed.
     ///
     /// A lost socket ends the request at once with [`NostrAuthError::BunkerConnectionFailed`],
     /// including one waiting for approval, which then needs a retry. A pending request with no
@@ -120,7 +123,8 @@ impl BunkerSession {
     ///
     /// Returns an error when called with SSR features or when signing fails. Returns
     /// [`NostrAuthError::BunkerAuthRequired`] when the signer asks for approval and no modal is
-    /// mounted to show the link.
+    /// mounted to show the link, and [`NostrAuthError::BunkerSessionClosed`] once the session was
+    /// closed.
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         imp::sign_event(self, event_json).await
     }
@@ -131,7 +135,8 @@ impl BunkerSession {
     ///
     /// Returns an error when called with SSR features, when `recipient_hex` is not a public key,
     /// or when nip44 encryption fails. Returns [`NostrAuthError::BunkerAuthRequired`] when the
-    /// signer asks for approval and no modal is mounted to show the link.
+    /// signer asks for approval and no modal is mounted to show the link, and
+    /// [`NostrAuthError::BunkerSessionClosed`] once the session was closed.
     pub async fn nip44_encrypt(
         &self,
         recipient_hex: &str,
@@ -146,7 +151,8 @@ impl BunkerSession {
     ///
     /// Returns an error when called with SSR features, when `sender_hex` is not a public key, or
     /// when nip44 decryption fails. Returns [`NostrAuthError::BunkerAuthRequired`] when the signer
-    /// asks for approval and no modal is mounted to show the link.
+    /// asks for approval and no modal is mounted to show the link, and
+    /// [`NostrAuthError::BunkerSessionClosed`] once the session was closed.
     pub async fn nip44_decrypt(
         &self,
         sender_hex: &str,

@@ -44,7 +44,8 @@ impl AuthResult {
     ///
     /// # Errors
     ///
-    /// Read-only sessions return an error. Also, returns an error if signing fails.
+    /// Read-only sessions return an error. Also, returns an error if signing fails. A closed
+    /// bunker session returns [`NostrAuthError::BunkerSessionClosed`].
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         match self {
             Self::Extension(h) => h.sign_event(event_json).await,
