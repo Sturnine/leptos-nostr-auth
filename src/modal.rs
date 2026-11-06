@@ -630,7 +630,9 @@ fn StepBunker(
             match BunkerSession::connect(&uri_val, timeout).await {
                 Ok(session) => {
                     set_loading.set(false);
-                    on_auth.run(AuthResult::Bunker(Box::new(session)));
+                    // `run` panics on a disposed callback, and a wasm panic would abort with this
+                    // socket open. Dropping the value closes it.
+                    let _ = on_auth.try_run(AuthResult::Bunker(Box::new(session)));
                 }
                 Err(e) => {
                     set_error.set(Some(e.to_string()));

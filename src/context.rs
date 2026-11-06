@@ -37,6 +37,21 @@ pub struct NostrAuthContext {
     pub logout: Callback<()>,
 }
 
+/// Replace the current session, closing the old one for good. Must tolerate a disposed provider:
+/// a restore can finish after unmount.
+fn replace_auth(
+    auth: ReadSignal<Option<AuthResult>>,
+    set_auth: WriteSignal<Option<AuthResult>>,
+    next: Option<AuthResult>,
+) {
+    let _ = auth.try_with_untracked(|old| {
+        if let Some(old) = old {
+            old.close_session();
+        }
+    });
+    set_auth.set(next);
+}
+
 /// Retrieve the Nostr auth context.
 ///
 /// # Panics
@@ -112,7 +127,7 @@ pub fn NostrAuthProvider(
                     .await
                 {
                     Ok(result) => {
-                        set_auth.set(Some(result));
+                        replace_auth(auth, set_auth, Some(result));
                     }
                     Err(e) => {
                         web_sys::console::info_1(
@@ -141,7 +156,7 @@ pub fn NostrAuthProvider(
 
     let logout = Callback::new(move |(): ()| {
         delete_for_logout(); // SSR-safe no-op on server
-        set_auth.set(None);
+        replace_auth(auth, set_auth, None);
     });
 
     provide_context(NostrAuthContext {
@@ -162,7 +177,7 @@ pub fn NostrAuthProvider(
         {
             set_stored_session.set(Some(session));
         }
-        set_auth.set(Some(result));
+        replace_auth(auth, set_auth, Some(result));
         set_show_modal.set(false);
     });
 

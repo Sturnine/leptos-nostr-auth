@@ -59,6 +59,13 @@ impl AuthResult {
         }
     }
 
+    /// Close a bunker session for good, for every clone. Other variants hold no connection.
+    pub(crate) fn close_session(&self) {
+        if let Self::Bunker(s) = self {
+            s.close();
+        }
+    }
+
     /// Returns `true` if this session can sign events.
     ///
     /// `false` only for `ReadOnly` sessions.

@@ -98,6 +98,15 @@ impl BunkerSession {
         self.client_keys.secret_key().to_secret_hex()
     }
 
+    /// Close this session for good, for every clone. See [`NostrAuthError::BunkerSessionClosed`].
+    #[cfg_attr(
+        feature = "ssr",
+        expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
+    )]
+    pub(crate) fn close(&self) {
+        imp::close(self);
+    }
+
     /// Send a NIP-46 `sign_event` request to the remote signer.
     ///
     /// Reuses the persistent WebSocket if it is open; reconnects automatically if not.
@@ -482,6 +491,11 @@ mod imp {
             secret: target.secret.clone(),
         };
         BunkerSession::connect_with_keys(target, timeout_secs, Keys::generate(), handshake).await
+    }
+
+    /// See the facade.
+    pub(super) fn close(session: &BunkerSession) {
+        session.conn.close();
     }
 
     /// Restore with the persisted local pairing keypair.
@@ -902,6 +916,9 @@ mod imp {
         Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
     }
 
+    /// Server stub for `close`.
+    pub(super) const fn close(_session: &BunkerSession) {}
+
     /// Server stub for `current_auth_url`. No state may cross requests.
     pub(super) const fn current_auth_url() -> Option<String> {
         None
@@ -1017,6 +1034,18 @@ pub(super) mod server_tests {
         assert_eq!(text(ready(s.sign_event("{}"))), want);
         assert_eq!(text(ready(s.nip44_encrypt("a", "b"))), want);
         assert_eq!(text(ready(s.nip44_decrypt("a", "b"))), want);
+    }
+
+    #[test]
+    fn close_does_nothing_on_server() {
+        let s = bunker();
+        s.close();
+        let auth = crate::types::AuthResult::Bunker(Box::new(s));
+        auth.close_session();
+        assert_eq!(
+            text(ready(auth.sign_event("{}"))),
+            "Signing failed: not available on server"
+        );
     }
 
     #[test]
