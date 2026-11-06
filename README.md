@@ -380,7 +380,7 @@ pub struct NostrAuthContext {
     pub is_restoring: Signal<bool>,
     /// Open the login modal programmatically.
     pub show_login: Callback<()>,
-    /// Log out and clear the stored session.
+    /// Log out, clear the stored session and close a bunker session for good.
     pub logout: Callback<()>,
 }
 ```
@@ -417,6 +417,7 @@ pub enum NostrAuthError {
     BunkerConnectionFailed(String),
     BunkerTimeout,
     BunkerAuthRequired,
+    BunkerSessionClosed,
 
     // WebAuthn passkey
     PasskeyFailed(String),
@@ -490,6 +491,12 @@ All elements emit `data-nostr-*` attributes for styling:
 - A signer's refusal of `sign_event`, `nip44_encrypt` or `nip44_decrypt` is now
   `SigningFailed(text)`, not `BunkerConnectionFailed(text)`. A refusal at login stays
   `BunkerConnectionFailed`.
+- Logging out, or a login or restore replacing a session, closes that bunker session for good, even
+  when the new login is the same identity. Pending requests and later calls on any clone, including
+  one kept in your own state, fail with the new `NostrAuthError::BunkerSessionClosed` and never
+  reconnect; before, a kept clone reconnected. Retrying cannot succeed. Read the current session from
+  `NostrAuthContext::auth` instead of keeping a signer across login changes. A failed login closes
+  nothing. `to_persisted_session` and the public fields still read.
 - A lost relay socket now fails pending requests at once with
   `BunkerConnectionFailed("relay connection lost")`, including requests waiting for approval, which
   need a retry.

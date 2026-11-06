@@ -44,7 +44,8 @@ impl AuthResult {
     ///
     /// # Errors
     ///
-    /// Read-only sessions return an error. Also, returns an error if signing fails.
+    /// Read-only sessions return an error. Also, returns an error if signing fails. A closed
+    /// bunker session returns [`NostrAuthError::BunkerSessionClosed`].
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         match self {
             Self::Extension(h) => h.sign_event(event_json).await,
@@ -56,6 +57,13 @@ impl AuthResult {
             Self::Ncryptsec(s) => s.sign_event(event_json),
             #[cfg(feature = "insecure_nsec_input")]
             Self::RawNsec(s) => s.sign_event(event_json),
+        }
+    }
+
+    /// Close a bunker session for good, for every clone. Other variants hold no connection.
+    pub(crate) fn close_session(&self) {
+        if let Self::Bunker(s) = self {
+            s.close();
         }
     }
 
@@ -296,6 +304,9 @@ pub enum NostrAuthError {
         "Remote signer requires link approval, but no NostrAuthModal is mounted to show the link"
     )]
     BunkerAuthRequired,
+    /// This session was closed for good. Retrying cannot succeed; read the current session from `NostrAuthContext::auth`.
+    #[error("Bunker session closed by logout or replacement")]
+    BunkerSessionClosed,
     /// A WebAuthn / passkey operation failed.
     #[error("Passkey operation failed: {0}")]
     PasskeyFailed(String),
