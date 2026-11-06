@@ -373,11 +373,29 @@ mod tests {
     #[expect(clippy::use_debug, reason = "the test pins the Debug output")]
     fn debug_prints_variant_and_public_key_only() {
         use crate::signers::{PasskeySession, RawKeySession};
-        let keys = Keys::new(nostr::key::SecretKey::from_hex(
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        ).unwrap());
+        let keys = Keys::new(
+            nostr::key::SecretKey::from_hex(
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap(),
+        );
         let hex = keys.public_key().to_hex();
-        let mut cases = vec![
+        let check = |name: &str, auth: &AuthResult| {
+            assert_eq!(
+                format!("{auth:?}"),
+                format!("{name} {{ public_key: PublicKey({hex}) }}")
+            );
+            assert_eq!(
+                format!("{auth:#?}"),
+                format!("{name} {{\n    public_key: PublicKey({hex}),\n}}")
+            );
+        };
+        #[cfg(feature = "insecure_nsec_input")]
+        check(
+            "RawNsec",
+            &AuthResult::RawNsec(RawKeySession::for_tests(keys.clone())),
+        );
+        let cases = [
             (
                 "Extension",
                 AuthResult::Extension(Nip07Handle {
@@ -399,20 +417,8 @@ mod tests {
                 AuthResult::Passkey(PasskeySession::for_tests(keys.clone(), vec![7, 8, 9])),
             ),
         ];
-        #[cfg(feature = "insecure_nsec_input")]
-        cases.push((
-            "RawNsec",
-            AuthResult::RawNsec(RawKeySession::for_tests(keys.clone())),
-        ));
-        for (name, auth) in cases {
-            assert_eq!(
-                format!("{auth:?}"),
-                format!("{name} {{ public_key: PublicKey({hex}) }}")
-            );
-            assert_eq!(
-                format!("{auth:#?}"),
-                format!("{name} {{\n    public_key: PublicKey({hex}),\n}}")
-            );
+        for (name, auth) in &cases {
+            check(name, auth);
         }
     }
 }

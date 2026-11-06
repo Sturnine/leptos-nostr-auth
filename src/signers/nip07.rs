@@ -226,4 +226,65 @@ mod wasm_tests {
         assert_eq!(h.nip44_encrypt("pk", "hi").await.unwrap(), "enc:pk:hi");
         assert_eq!(h.nip44_decrypt("pk", "ct").await.unwrap(), "dec:pk:ct");
     }
+
+    fn extension() -> (nostr::key::Keys, crate::types::AuthResult) {
+        let keys = nostr::key::Keys::generate();
+        let auth = crate::types::AuthResult::Extension(Nip07Handle {
+            public_key: keys.public_key(),
+        });
+        (keys, auth)
+    }
+
+    #[wasm_bindgen_test]
+    async fn trait_signs_through_extension() {
+        use crate::signers::signer_traits::tests::{assert_fields_equal, unsigned};
+        use nostr::event::{AsyncSignEvent, FinalizeEvent};
+        let (keys, auth) = extension();
+        let input = unsigned(keys.public_key());
+        let signed = input.clone().finalize(&keys).unwrap();
+        js_sys::eval(&format!(
+            "globalThis.window = {{ nostr: {{ signEvent: async () => ({}) }} }};",
+            signed.as_json()
+        ))
+        .unwrap();
+        let out = auth.sign_event_async(input.clone()).await.unwrap();
+        assert_fields_equal(&input, &out);
+        assert_eq!(out.id, signed.id);
+    }
+
+    #[wasm_bindgen_test]
+    async fn null_and_undefined_results_are_typed() {
+        use crate::signers::signer_traits::tests::unsigned;
+        use nostr::event::AsyncSignEvent;
+        let (keys, auth) = extension();
+        for value in ["null", "undefined"] {
+            js_sys::eval(&format!(
+                "globalThis.window = {{ nostr: {{ signEvent: async () => {value} }} }};"
+            ))
+            .unwrap();
+            let r = auth.sign_event_async(unsigned(keys.public_key())).await;
+            assert!(matches!(
+                r,
+                Err(crate::types::NostrAuthError::SigningFailed(_))
+            ));
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn rejection_message_is_kept() {
+        use crate::signers::signer_traits::tests::unsigned;
+        use nostr::event::AsyncSignEvent;
+        let (keys, auth) = extension();
+        js_sys::eval(
+            "globalThis.window = { nostr: { signEvent: async () => { throw new Error('denied by user'); } } };",
+        )
+        .unwrap();
+        let err = auth
+            .sign_event_async(unsigned(keys.public_key()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, crate::types::NostrAuthError::SigningFailed(m) if m.contains("denied by user"))
+        );
+    }
 }

@@ -200,7 +200,11 @@ pub(in crate::signers) mod tests {
         );
         let wrapped = ready(input.finalize_async(&auth)).unwrap_err();
         assert_eq!(wrapped.kind(), ErrorKind::Other);
-        assert!(wrapped.to_string().contains("Read-only session cannot sign events"));
+        assert!(
+            wrapped
+                .to_string()
+                .contains("Read-only session cannot sign events")
+        );
         let source = wrapped
             .source()
             .and_then(|s| s.downcast_ref::<NostrAuthError>());
@@ -235,7 +239,9 @@ pub(in crate::signers) mod tests {
         let auth = read_only();
         let err = ready(EventBuilder::new(Kind::TextNote, "hi").finalize_async(&auth)).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Other);
-        let source = err.source().and_then(|s| s.downcast_ref::<NostrAuthError>());
+        let source = err
+            .source()
+            .and_then(|s| s.downcast_ref::<NostrAuthError>());
         assert!(matches!(source, Some(NostrAuthError::SigningFailed(_))));
     }
 
@@ -279,6 +285,40 @@ pub(in crate::signers) mod tests {
                 .unwrap()
         });
         assert!(second.is_ready());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(feature = "ssr"))]
+    mod wasm_tests {
+        use super::*;
+        use wasm_bindgen_test::wasm_bindgen_test;
+
+        #[wasm_bindgen_test]
+        async fn raw_key_finalizes_and_verifies() {
+            let (keys, nc, _) = keyed();
+            let input = unsigned(keys.public_key());
+            let out = input.clone().finalize_async(&nc).await.unwrap();
+            assert_fields_equal(&input, &out);
+        }
+
+        #[wasm_bindgen_test]
+        async fn read_only_is_typed_with_source() {
+            let auth = read_only();
+            let err = unsigned(auth.public_key())
+                .finalize_async(&auth)
+                .await
+                .unwrap_err();
+            let source = err
+                .source()
+                .and_then(|s| s.downcast_ref::<NostrAuthError>());
+            assert!(matches!(source, Some(NostrAuthError::SigningFailed(_))));
+        }
+
+        #[wasm_bindgen_test]
+        async fn get_public_key_async_returns_session_key() {
+            let (keys, nc, _) = keyed();
+            assert_eq!(nc.get_public_key_async().await.unwrap(), keys.public_key());
+        }
     }
 
     #[cfg(all(not(feature = "ssr"), not(target_arch = "wasm32")))]

@@ -1009,14 +1009,27 @@ mod tests {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use nostr::event::{EventBuilder, Kind};
-            let built = ready(EventBuilder::new(Kind::TextNote, "hi").finalize_async(&auth))
-                .unwrap_err();
+            let built =
+                ready(EventBuilder::new(Kind::TextNote, "hi").finalize_async(&auth)).unwrap_err();
             let source = built
                 .source()
                 .and_then(|e| e.downcast_ref::<NostrAuthError>());
             assert!(matches!(source, Some(NostrAuthError::BunkerSessionClosed)));
         }
         assert_eq!(ready(auth.get_public_key_async()).unwrap(), pk);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn closed_session_through_trait_on_wasm() {
+        use crate::signers::signer_traits::tests::unsigned;
+        use nostr::event::AsyncSignEvent;
+        let s = session();
+        let pk = s.public_key;
+        s.conn.close();
+        let auth = crate::types::AuthResult::Bunker(Box::new(s));
+        let r = auth.sign_event_async(unsigned(pk)).await;
+        assert!(matches!(r, Err(NostrAuthError::BunkerSessionClosed)));
     }
 
     #[test]
