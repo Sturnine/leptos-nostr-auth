@@ -15,12 +15,12 @@ use leptos::task::spawn_local;
 use leptos_use_event_listener::use_event_listener;
 use leptos_use_window::use_window;
 
-use crate::platform::{Os, Platform};
+use crate::platform::{Os, Platform, effective_rp_id, passkey_option_visible, prf_capability};
 use crate::signers::{
-    BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle, current_auth_url,
-    dismiss_auth_prompt, register_auth_presenter, unregister_auth_presenter,
+    BunkerSession, Nip07Handle, PasskeySession, PendingPasskey, RawKeySession, ReadOnlyHandle,
+    current_auth_url, dismiss_auth_prompt, register_auth_presenter, unregister_auth_presenter,
 };
-use crate::types::{AuthResult, LoginMethod, NostrAuthConfig};
+use crate::types::{AuthResult, LoginMethod, NostrAuthConfig, NostrAuthError};
 
 /// Which form is currently shown inside the modal.
 #[derive(Clone, PartialEq)]
@@ -113,7 +113,13 @@ pub fn NostrAuthModal(
     // Effects don't run on the server, so SSR always renders the full method list.
     let (platform, set_platform) = signal(Platform::server_default());
     Effect::new(move |_| {
-        set_platform.set(Platform::detect());
+        let detected = Platform::detect();
+        set_platform.set(detected);
+        spawn_local(async move {
+            if !passkey_option_visible(detected.supports_webauthn, prf_capability().await) {
+                set_platform.update(|platform| platform.supports_webauthn = false);
+            }
+        });
     });
 
     let (step, set_step) = signal(ModalStep::MethodSelect);
@@ -701,6 +707,23 @@ fn StepPasskey(
     let rp_id = StoredValue::new(config.rp_id);
     let rp_name = StoredValue::new(config.rp_name);
 
+    let await_ceremony = move |begun: Result<PendingPasskey, NostrAuthError>| match begun {
+        Ok(pending) => {
+            set_sub_step.set(PasskeySubStep::Loading);
+            set_error.set(None);
+            spawn_local(async move {
+                match pending.finish().await {
+                    Ok(session) => on_auth.run(AuthResult::Passkey(session)),
+                    Err(e) => {
+                        set_error.set(Some(e.to_string()));
+                        set_sub_step.set(PasskeySubStep::Choose);
+                    }
+                }
+            });
+        }
+        Err(e) => set_error.set(Some(e.to_string())),
+    };
+
     view! {
         <div data-nostr-step="passkey">
             <Show when=move || sub_step.get() == PasskeySubStep::Choose fallback=move || view! {
@@ -717,33 +740,15 @@ fn StepPasskey(
             }>
                 <p>
                     "Your Nostr identity is derived from your passkey using a deterministic algorithm.
-                    The same passkey always produces the same Nostr key on any device."
+                    A synced passkey gives the same Nostr key on your devices wherever this library runs with the same RP ID."
                 </p>
 
                 <button
                     on:click=move |_| {
-                        set_sub_step.set(PasskeySubStep::Loading);
-                        set_error.set(None);
-                        let rp = rp_id
-                            .get_value()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| {
-                                web_sys::window()
-                                    .and_then(|w| w.location().hostname().ok())
-                                    .unwrap_or_else(|| "localhost".into())
-                            });
-                        let rp_name_val = rp_name.get_value();
-                        spawn_local(async move {
-                            match PasskeySession::create(&rp, &rp_name_val).await {
-                                Ok(session) => {
-                                    on_auth.run(AuthResult::Passkey(session));
-                                }
-                                Err(e) => {
-                                    set_error.set(Some(e.to_string()));
-                                    set_sub_step.set(PasskeySubStep::Choose);
-                                }
-                            }
-                        });
+                        let rp = rp_id.with_value(|rp_id| effective_rp_id(rp_id.as_deref()));
+                        let begun = rp_name
+                            .with_value(|rp_name| PasskeySession::begin_create(&rp, rp_name));
+                        await_ceremony(begun);
                     }
                 >
                     "Create new Nostr identity"
@@ -751,20 +756,9 @@ fn StepPasskey(
 
                 <button
                     on:click=move |_| {
-                        set_sub_step.set(PasskeySubStep::Loading);
-                        set_error.set(None);
-                        spawn_local(async move {
-                            // None → discoverable login: browser presents all stored passkeys
-                            match PasskeySession::authenticate(None).await {
-                                Ok(session) => {
-                                    on_auth.run(AuthResult::Passkey(session));
-                                }
-                                Err(e) => {
-                                    set_error.set(Some(e.to_string()));
-                                    set_sub_step.set(PasskeySubStep::Choose);
-                                }
-                            }
-                        });
+                        let rp = rp_id.with_value(|rp_id| effective_rp_id(rp_id.as_deref()));
+                        // None → discoverable login: browser presents all stored passkeys
+                        await_ceremony(PasskeySession::begin_authenticate(&rp, None));
                     }
                 >
                     "I already have a Nostr passkey — restore it"

@@ -357,8 +357,8 @@ pub enum NostrAuthError {
     /// A WebAuthn / passkey operation failed.
     #[error("Passkey operation failed: {0}")]
     PasskeyFailed(String),
-    /// The browser does not support the WebAuthn PRF extension.
-    #[error("Browser does not support WebAuthn PRF extension")]
+    /// The browser or authenticator does not support the WebAuthn PRF extension.
+    #[error("This browser or authenticator does not support the WebAuthn PRF extension")]
     PasskeyNotSupported,
     /// The supplied ncryptsec string was malformed.
     #[error("Invalid ncryptsec string: {0}")]
