@@ -39,6 +39,8 @@ const UNEXPECTED_RESULT: &str = "remote signer sent an unexpected result";
 const REFUSED_AUTH_URL: &str = "remote signer sent an approval link that is not a safe https URL";
 /// Fixed text for a request that could not be built.
 pub(super) const REQUEST_BUILD_FAILED: &str = "could not build the request";
+/// Fixed text for a socket that went away. A close carries nothing trusted.
+const SOCKET_LOST: &str = "relay connection lost";
 /// Fixed text for a caller whose reconnect was led by a future that got dropped.
 const RECONNECT_CANCELLED: &str = "reconnect cancelled";
 
@@ -323,6 +325,11 @@ pub(super) enum RpcFailure {
     AuthRequired,
     /// The socket failed before the request was sent.
     Socket(NostrAuthError),
+    /// The socket went away after the request was sent.
+    SocketLost {
+        /// A verified signer had already answered this request.
+        signer_answered: bool,
+    },
     /// The relay refused. Relay frames are unauthenticated, so this may be a hostile relay.
     Relay {
         /// Sanitised relay text.
@@ -350,6 +357,10 @@ impl fmt::Debug for RpcFailure {
                 .finish(),
             Self::AuthRequired => f.write_str("AuthRequired"),
             Self::Socket(e) => f.debug_tuple("Socket").field(e).finish(),
+            Self::SocketLost { signer_answered } => f
+                .debug_struct("SocketLost")
+                .field("signer_answered", signer_answered)
+                .finish(),
             Self::Relay {
                 reason,
                 signer_answered,
@@ -374,6 +385,9 @@ impl RpcFailure {
                 signer_answered: false,
                 ..
             } | Self::Socket(_)
+                | Self::SocketLost {
+                    signer_answered: false,
+                }
                 | Self::Relay {
                     signer_answered: false,
                     ..
@@ -410,6 +424,7 @@ impl RpcFailure {
             Self::Timeout { .. } => NostrAuthError::BunkerTimeout,
             Self::AuthRequired => NostrAuthError::BunkerAuthRequired,
             Self::Socket(e) => e,
+            Self::SocketLost { .. } => NostrAuthError::BunkerConnectionFailed(SOCKET_LOST.into()),
             Self::Relay { reason, .. } => {
                 NostrAuthError::BunkerConnectionFailed(format!("relay refused: {reason}"))
             }
@@ -641,6 +656,8 @@ pub(super) struct Inflight<W> {
     entries: HashMap<String, Pending<W>>,
     /// The relay on the current socket sent a NIP-42 challenge.
     auth_requested: bool,
+    /// A request timed out on the current socket while others were still pending.
+    suspect: bool,
 }
 
 impl<W> Default for Inflight<W> {
@@ -648,6 +665,7 @@ impl<W> Default for Inflight<W> {
         Self {
             entries: HashMap::new(),
             auth_requested: false,
+            suspect: false,
         }
     }
 }
@@ -688,6 +706,32 @@ impl<W> Inflight<W> {
     /// on a later relay's timeout.
     pub(super) const fn reset_socket(&mut self) {
         self.auth_requested = false;
+        self.suspect = false;
+    }
+
+    /// Record how a request on the current socket ended, `None` meaning success. Call after its
+    /// entry is gone. Returns whether to tear the socket down now.
+    pub(super) fn note_settled(&mut self, failure: Option<&RpcFailure>) -> bool {
+        match failure {
+            None | Some(RpcFailure::Signer(_)) => {
+                self.suspect = false;
+                false
+            }
+            Some(RpcFailure::Timeout { .. }) => {
+                if self.entries.is_empty() {
+                    return true;
+                }
+                self.suspect = true;
+                false
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// Whether a new request must reconnect rather than use the current socket. A verified
+    /// approval wait keeps it, because reconnecting would end that wait.
+    pub(super) fn must_reconnect(&self) -> bool {
+        self.suspect && !self.entries.values().any(|entry| entry.auth_seen)
     }
 
     /// Handle one relay frame. A dropped frame yields no effects and the request stays pending.
@@ -827,14 +871,24 @@ impl<W> Inflight<W> {
     /// Fail every request with a relay's reason. Each takes `signer_answered` from its own entry.
     pub(super) fn fail_all(&mut self, reason: &str) -> Vec<Effect<W>> {
         let reason = sanitize_remote_text(reason);
+        self.fail_all_with(|signer_answered| RpcFailure::Relay {
+            reason: reason.clone(),
+            signer_answered,
+        })
+    }
+
+    /// Fail every request because the socket went away.
+    pub(super) fn fail_socket_lost(&mut self) -> Vec<Effect<W>> {
+        self.fail_all_with(|signer_answered| RpcFailure::SocketLost { signer_answered })
+    }
+
+    /// Fail every request, passing each its own `auth_seen`.
+    fn fail_all_with(&mut self, failure: impl Fn(bool) -> RpcFailure) -> Vec<Effect<W>> {
         self.entries
             .drain()
             .map(|(_, entry)| Effect::Settle {
                 waker: entry.waker,
-                outcome: Err(RpcFailure::Relay {
-                    reason: reason.clone(),
-                    signer_answered: entry.auth_seen,
-                }),
+                outcome: Err(failure(entry.auth_seen)),
             })
             .collect()
     }
@@ -1990,6 +2044,18 @@ mod tests {
             (timeout(true, true), false),
             (RpcFailure::AuthRequired, false),
             (socket(), true),
+            (
+                RpcFailure::SocketLost {
+                    signer_answered: false,
+                },
+                true,
+            ),
+            (
+                RpcFailure::SocketLost {
+                    signer_answered: true,
+                },
+                false,
+            ),
             (relay(false), true),
             (relay(true), false),
             (RpcFailure::Signer("s".into()), false),
@@ -2011,6 +2077,171 @@ mod tests {
         ));
         let signer = RpcFailure::Signer("denied".into()).into_signing_error();
         assert_eq!(signer.to_string(), "Bunker connection failed: denied");
+    }
+
+    fn with_sibling() -> Fx {
+        let mut fx = Fx::new(NostrConnectMethod::Connect);
+        fx.inflight.insert(
+            "req-2".to_owned(),
+            NostrConnectMethod::SignEvent,
+            EventId::from_byte_array([8; 32]),
+            (),
+        );
+        fx
+    }
+
+    #[test]
+    fn socket_loss_keeps_signer_answered_per_entry() {
+        let mut fx = with_sibling();
+        seen(&mut fx);
+        let mut flags = Vec::new();
+        for effect in fx.inflight.fail_socket_lost() {
+            let Effect::Settle {
+                outcome: Err(failure),
+                ..
+            } = effect
+            else {
+                unreachable!("expected a failure");
+            };
+            let advances = failure.advances_to_next_relay();
+            let RpcFailure::SocketLost { signer_answered } = failure else {
+                unreachable!("expected a lost socket");
+            };
+            assert_eq!(signer_answered, !advances);
+            flags.push(signer_answered);
+        }
+        flags.sort_unstable();
+        assert_eq!(flags, [false, true]);
+    }
+
+    #[test]
+    fn socket_loss_is_not_a_relay_reason() {
+        for signer_answered in [false, true] {
+            let lost = || RpcFailure::SocketLost { signer_answered };
+            for error in [lost().into_connect_error(), lost().into_signing_error()] {
+                let NostrAuthError::BunkerConnectionFailed(text) = error else {
+                    unreachable!("expected a connection failure");
+                };
+                assert_eq!(text, "relay connection lost");
+            }
+        }
+    }
+
+    #[test]
+    fn socket_loss_yields_only_failures() {
+        let mut fx = with_sibling();
+        seen(&mut fx);
+        let effects = fx.inflight.fail_socket_lost();
+        assert_eq!(effects.len(), 2);
+        assert!(effects.iter().all(|effect| matches!(
+            effect,
+            Effect::Settle {
+                outcome: Err(RpcFailure::SocketLost { .. }),
+                ..
+            }
+        )));
+        assert!(fx.inflight.entries.is_empty());
+    }
+
+    #[test]
+    fn fail_all_still_reports_the_relay() {
+        let mut fx = with_sibling();
+        seen(&mut fx);
+        let mut flags = Vec::new();
+        for effect in fx.inflight.fail_all("blocked: mock") {
+            let Effect::Settle { outcome, .. } = effect else {
+                unreachable!("expected a settle");
+            };
+            let (reason, answered, _) = relay_failure(outcome);
+            assert_eq!(reason, "blocked: mock");
+            flags.push(answered);
+        }
+        flags.sort_unstable();
+        assert_eq!(flags, [false, true]);
+    }
+
+    fn timeout_failure() -> RpcFailure {
+        RpcFailure::Timeout {
+            signer_answered: false,
+            relay_asked_auth: false,
+        }
+    }
+
+    #[test]
+    fn note_settled_table() {
+        let plain = |marked: bool| {
+            let mut fx = Fx::new(NostrConnectMethod::SignEvent);
+            fx.inflight.suspect = marked;
+            fx
+        };
+        let empty = |marked: bool| {
+            let mut fx = plain(marked);
+            fx.inflight.remove(ID);
+            fx
+        };
+        let auth = |marked: bool| {
+            let mut fx = plain(marked);
+            seen(&mut fx);
+            fx
+        };
+        let fixtures: [(&str, &dyn Fn(bool) -> Fx); 3] =
+            [("empty", &empty), ("plain", &plain), ("auth", &auth)];
+        for marked in [false, true] {
+            for (table, fixture) in fixtures {
+                let mut fx = fixture(marked);
+                assert!(!fx.inflight.note_settled(None));
+                assert!(!fx.inflight.suspect, "ok on {table}");
+
+                let mut fx = fixture(marked);
+                assert!(
+                    !fx.inflight
+                        .note_settled(Some(&RpcFailure::Signer("no".into())))
+                );
+                assert!(!fx.inflight.suspect, "signer on {table}");
+
+                let mut fx = fixture(marked);
+                let tears_down = fx.inflight.note_settled(Some(&timeout_failure()));
+                assert_eq!(tears_down, table == "empty");
+                assert_eq!(fx.inflight.suspect, marked || table != "empty");
+
+                for failure in [
+                    RpcFailure::AuthRequired,
+                    RpcFailure::Relay {
+                        reason: "r".into(),
+                        signer_answered: false,
+                    },
+                    RpcFailure::SocketLost {
+                        signer_answered: false,
+                    },
+                    RpcFailure::Socket(NostrAuthError::BunkerTimeout),
+                    RpcFailure::Malformed("m"),
+                ] {
+                    let mut fx = fixture(marked);
+                    assert!(!fx.inflight.note_settled(Some(&failure)));
+                    assert_eq!(fx.inflight.suspect, marked, "{failure:?} on {table}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn must_reconnect_table() {
+        let mut fx = Fx::new(NostrConnectMethod::SignEvent);
+        assert!(!fx.inflight.must_reconnect());
+        fx.inflight.suspect = true;
+        assert!(fx.inflight.must_reconnect());
+        seen(&mut fx);
+        assert!(!fx.inflight.must_reconnect());
+        fx.inflight.remove(ID);
+        assert!(fx.inflight.must_reconnect());
+    }
+
+    #[test]
+    fn reset_socket_clears_suspect() {
+        let mut fx = Fx::new(NostrConnectMethod::SignEvent);
+        fx.inflight.suspect = true;
+        fx.inflight.reset_socket();
+        assert!(!fx.inflight.suspect);
     }
 
     /// Records its outcome, and can rejoin the gate from inside `wake`.
