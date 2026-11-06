@@ -16,7 +16,10 @@ use leptos_use_event_listener::use_event_listener;
 use leptos_use_window::use_window;
 
 use crate::platform::{Os, Platform};
-use crate::signers::{BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle};
+use crate::signers::{
+    BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle, current_auth_url,
+    dismiss_auth_prompt, register_auth_presenter, unregister_auth_presenter,
+};
 use crate::types::{AuthResult, LoginMethod, NostrAuthConfig};
 
 /// Which form is currently shown inside the modal.
@@ -102,6 +105,9 @@ pub fn NostrAuthModal(
 ) -> impl IntoView {
     let config = StoredValue::new(config.unwrap_or_default());
 
+    register_auth_presenter();
+    on_cleanup(unregister_auth_presenter);
+
     // Starts as server_default (all methods visible, no platform bias) → Effect
     // updates to real browser capabilities after hydration so the UI narrows reactively.
     // Effects don't run on the server, so SSR always renders the full method list.
@@ -121,11 +127,15 @@ pub fn NostrAuthModal(
         }
     };
 
-    // Escape key closes the modal
+    // Escape closes the modal; with the modal closed it dismisses the approval link instead.
     let _ = use_event_listener(use_window(), leptos::ev::keydown, {
         move |e| {
             if e.key() == "Escape" && config.get_value().close_on_escape {
-                close();
+                if !open.get_untracked() && untrack(current_auth_url).is_some() {
+                    dismiss_auth_prompt();
+                } else {
+                    close();
+                }
             }
         }
     });
@@ -213,6 +223,8 @@ pub fn NostrAuthModal(
                             }}
                         </div>
 
+                        <AuthUrlPrompt />
+
                         // Error display
                         <Show when=move || error.get().is_some()>
                             <div
@@ -225,7 +237,61 @@ pub fn NostrAuthModal(
                     </div>
                 </div>
             </Show>
+            // Challenges often arrive at signing and at restore, with the modal closed
+            <Show when=move || !open.get() && current_auth_url().is_some()>
+                <div
+                    data-nostr-backdrop=""
+                    on:click=move |_| {
+                        if config.get_value().close_on_backdrop_click {
+                            dismiss_auth_prompt();
+                        }
+                    }
+                >
+                    <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label="Approve a pending request"
+                        data-nostr-modal=""
+                        on:click=|e| e.stop_propagation()
+                    >
+                        <AuthUrlPrompt />
+                        <button
+                            aria-label="Dismiss approval link"
+                            data-nostr-close=""
+                            on:click=move |_| dismiss_auth_prompt()
+                        >
+                            "Dismiss"
+                        </button>
+                    </div>
+                </div>
+            </Show>
         </Portal>
+    }
+}
+
+// ─── Approval link ───────────────────────────────────────────────────────────
+
+/// The signer's approval link. A click link, never a popup, with the full URL as its text, because
+/// a hostile signer can send a phishing link.
+#[component]
+fn AuthUrlPrompt() -> impl IntoView {
+    view! {
+        {move || current_auth_url().map(|url| {
+            let href = url.clone();
+            view! {
+                <div data-nostr-auth-prompt="">
+                    <p>"Your remote signer asks you to approve a pending request"</p>
+                    <a
+                        href=href
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        data-nostr-auth-url=""
+                    >
+                        {url}
+                    </a>
+                </div>
+            }
+        })}
     }
 }
 

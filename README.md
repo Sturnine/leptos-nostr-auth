@@ -310,7 +310,7 @@ When `persist_session: true` (default), successful logins are cached in localSto
 | Method | Restore behavior |
 |---|---|
 | Extension | Re-calls `window.nostr.getPublicKey()`, verifies pubkey matches |
-| Bunker | Re-establishes WebSocket connection using stored `bunker://` URI |
+| Bunker | Opens a socket to the stored relays, in order, and sends `get_public_key` with the stored client key; verifies pubkey matches |
 | Passkey | Calls `navigator.credentials.get()` → biometric → re-derives same key |
 | Read-Only | Restores directly from stored hex pubkey |
 | ncryptsec | **Not persisted** — user must decrypt again (password not stored) |
@@ -325,6 +325,18 @@ identity key, but it is still a live credential: anyone who can read your app's 
 (e.g. via an XSS bug elsewhere on your page) can use it to request signatures until you revoke
 that client from your bunker/signer app. This is the same exposure class as a browser session
 cookie, not a leaked private key.
+
+Restore sends `get_public_key`, not `connect`, so signers that require a secret still restore.
+Behaviour on a revoked client varies by signer: one that answers `get_public_key` to anyone
+restores it as authenticated, and it then fails at the first signature.
+
+**Approval links**: a signer can answer a request with an `auth_url`. The request stays pending
+and any mounted `NostrAuthModal` shows the URL as an https-only link the user clicks, even while
+`open` is false; nothing opens a popup. The request gets `bunker_timeout_secs` plus one 300 s
+extension, and the extension applies only while a mounted modal can show the link. A modal
+unmounted during the extended wait does not shorten it. Mount one modal: each mounted modal renders
+the same link, and one Escape reaches all of them. `NostrAuthProvider` already mounts its own.
+A challenge at page load shows the same link while `is_restoring` stays `true`.
 
 The `is_restoring` signal on `NostrAuthContext` is `true` while restore is in progress.
 Use it to suppress the login button flash:
@@ -394,6 +406,7 @@ pub enum NostrAuthError {
     InvalidBunkerUri(String),
     BunkerConnectionFailed(String),
     BunkerTimeout,
+    BunkerAuthRequired,
 
     // WebAuthn passkey
     PasskeyFailed(String),
@@ -433,6 +446,8 @@ All elements emit `data-nostr-*` attributes for styling:
 [data-nostr-spinner]         { /* loading spinner */ }
 [data-nostr-back]            { /* back button */ }
 [data-nostr-close]           { /* close button */ }
+[data-nostr-auth-prompt]     { /* signer approval prompt */ }
+[data-nostr-auth-url]        { /* signer approval link */ }
 ```
 
 ## Upgrading to 0.2
@@ -449,6 +464,19 @@ All elements emit `data-nostr-*` attributes for styling:
   without a provider fails at link time (`a time provider is required`). Other toolchains may
   behave the other way: a missing provider could link and then trap at runtime with no build
   warning. Do not assume `EventBuilder` works on wasm without a provider.
+- A NIP-46 `auth_url` no longer returns an error containing the URL. The request stays pending and
+  a mounted modal shows the link. Direct `BunkerSession` callers mount one closed modal, for example
+  `<NostrAuthModal open=false on_auth=... />`; a provider already mounts its own. With no modal
+  mounted the request fails at its timeout with the new `NostrAuthError::BunkerAuthRequired`.
+- A bunker `sign_event` result now uses `nostr`'s JSON key order, not the order the signer sent.
+- `bunker://` errors changed: everything `nostr`'s URI parser rejects, including a bad or missing
+  pubkey, is now `InvalidBunkerUri("invalid URI")`. A bad pubkey was `InvalidPublicKey`.
+- A raw `+` in a URI secret now decodes to a space. Hex and UUID secrets are unaffected.
+- A persisted relay URL that `nostr`'s `RelayUrl` rejects (not `ws`/`wss`, or a second `://`) now
+  fails restore, which deletes that session.
+- A `bunker://` URI may list at most five relays after duplicates are removed. More are refused.
+- `BunkerSession::nip44_encrypt` and `nip44_decrypt` now reject a counterparty that is not a hex
+  public key with `InvalidPublicKey`, before anything is sent.
 
 ## Development
 

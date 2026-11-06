@@ -14,6 +14,9 @@ mod browser;
 mod nip07;
 /// NIP-46 remote signer (bunker) backend.
 mod nip46;
+/// JS-free NIP-46 protocol decisions, so that native `cargo test` covers them.
+#[cfg(not(feature = "ssr"))]
+mod nip46_protocol;
 /// Passkey (WebAuthn PRF) backend.
 mod passkey;
 /// In-memory raw key backend (ncryptsec and raw nsec).
@@ -24,6 +27,9 @@ mod read_only;
 pub use crate::types::AuthResult;
 pub use nip07::Nip07Handle;
 pub use nip46::BunkerSession;
+pub(crate) use nip46::{
+    current_auth_url, dismiss_auth_prompt, register_auth_presenter, unregister_auth_presenter,
+};
 pub use passkey::PasskeySession;
 pub use raw_key::RawKeySession;
 pub use read_only::ReadOnlyHandle;
