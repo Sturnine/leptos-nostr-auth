@@ -134,7 +134,7 @@ pub(super) const fn needs_connect(handshake: &Handshake, paired: bool) -> bool {
     matches!(handshake, Handshake::Pair { .. }) && !paired
 }
 
-/// The `connect` request for a handshake, if it has one.
+/// The `connect` request for a handshake.
 pub(super) fn connect_request(handshake: &Handshake, remote: PublicKey) -> NostrConnectRequest {
     NostrConnectRequest::Connect {
         remote_signer_public_key: remote,
@@ -183,8 +183,8 @@ pub(super) fn unsigned_for_signing(
     serde_json::from_value(value).map_err(|e| NostrAuthError::Serialization(e.to_string()))
 }
 
-/// Encrypt and sign a kind 24133 event. Takes the time as an argument because
-/// `NostrConnectEventBuilder` reads `Timestamp::now`, which this crate must not reach on wasm.
+/// Encrypt and sign a kind 24133 event. Takes the time as an argument because upstream's builder
+/// reads the system clock, which this crate must not reach on wasm.
 pub(super) fn request_event(
     keys: &Keys,
     remote: PublicKey,
@@ -1164,8 +1164,6 @@ mod tests {
         assert_dropped(&mut fx, &frame(&event));
     }
 
-    // Wire.
-
     fn decrypted_params(fx: &Fx, event: &Event) -> Vec<String> {
         let plaintext = nip44::decrypt(
             fx.remote.secret_key(),
@@ -1301,8 +1299,6 @@ mod tests {
         );
     }
 
-    // Identity.
-
     #[test]
     fn connect_echoing_hex_secret_is_not_identity() {
         let echo = "ab".repeat(32);
@@ -1358,8 +1354,6 @@ mod tests {
             Err(RpcFailure::Malformed(_))
         ));
     }
-
-    // Results.
 
     #[test]
     fn missing_result_is_error() {
@@ -1447,8 +1441,6 @@ mod tests {
         assert!(only_outcome(fx.feed(&frame(&event))).is_ok());
         assert!(fx.feed(&frame(&event)).is_empty());
     }
-
-    // auth_url.
 
     fn auth_url_event(fx: &Fx, url: &str) -> Event {
         fx.signed(&serde_json::json!({"id": ID, "result": "auth_url", "error": url}).to_string())
@@ -1559,8 +1551,6 @@ mod tests {
         }
         assert!(parse_auth_url(TOKEN_URL).is_some());
     }
-
-    // Deadlines.
 
     fn seen(fx: &mut Fx) {
         let challenge = auth_url_event(fx, TOKEN_URL);
@@ -1719,8 +1709,6 @@ mod tests {
         assert!(only_outcome(fx.feed(&frame(&event))).is_ok());
     }
 
-    // Relay frames.
-
     #[test]
     fn ok_false_needs_matching_event_id() {
         let mut fx = Fx::new(NostrConnectMethod::Connect);
@@ -1778,8 +1766,6 @@ mod tests {
             assert_dropped(&mut fx, garbage);
         }
     }
-
-    // URI.
 
     fn uri(fx_remote: &PublicKey, query: &str) -> String {
         format!("bunker://{}?{query}", fx_remote.to_hex())
@@ -1911,8 +1897,6 @@ mod tests {
             "Invalid bunker URI: missing relay URL"
         );
     }
-
-    // Failover.
 
     #[test]
     fn advances_to_next_relay_table() {
