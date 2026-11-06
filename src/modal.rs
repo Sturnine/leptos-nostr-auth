@@ -1,5 +1,14 @@
-// Suppressed: #[component] generates exhaustive props structs we cannot control.
-#![allow(clippy::exhaustive_structs, clippy::missing_docs_in_private_items)]
+#![expect(
+    clippy::exhaustive_structs,
+    reason = "#[component] generates the props structs, which cannot take attributes"
+)]
+#![cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "#[component] generates the props structs, which cannot take attributes"
+    )
+)]
 use leptos::portal::Portal;
 use leptos::prelude::*;
 use leptos_use_event_listener::use_event_listener;
@@ -80,7 +89,10 @@ enum PasskeySubStep {
 ///     />
 /// }
 /// ```
-#[allow(clippy::exhaustive_structs, clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one component body wires every login step"
+)]
 #[component]
 pub fn NostrAuthModal(
     /// Reactive signal controlling modal visibility.
@@ -829,9 +841,10 @@ fn StepNcryptsec(
         #[cfg(not(feature = "ssr"))]
         spawn_local(async move {
             // Yield one frame so the spinner renders before scrypt blocks the thread.
-            // The Promise executor callback can't return a `Result`, and `window()` is
-            // always present once this WASM module is running in a browser tab.
-            #[allow(clippy::unwrap_used)]
+            #[expect(
+                clippy::unwrap_used,
+                reason = "a Promise executor cannot return a Result, and window exists whenever this module runs in a tab"
+            )]
             let promise = js_sys::Promise::new(&mut |resolve, _| {
                 let _ = web_sys::window()
                     .unwrap()

@@ -89,13 +89,6 @@ impl Nip07Handle {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when signing fails.
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -129,13 +122,6 @@ impl Nip07Handle {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when nip44 encryption fails.
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn nip44_encrypt(
         &self,
         recipient_hex: &str,
@@ -164,13 +150,6 @@ impl Nip07Handle {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when nip44 decryption fails.
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn nip44_decrypt(
         &self,
         sender_hex: &str,
@@ -297,7 +276,10 @@ type MessageHandlerSlot = Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MessageEv
 /// to one physical connection, not independent snapshots. Concurrent reconnects
 /// across clones are serialized by `connect_lock` in `ensure_ws`.
 #[derive(Clone)]
-#[allow(dead_code)] // fields used only in non-ssr code paths
+#[cfg_attr(
+    feature = "ssr",
+    expect(dead_code, reason = "these fields are read only by the browser build")
+)]
 pub struct BunkerSession {
     /// The authenticated user's public key.
     pub public_key: PublicKey,
@@ -340,13 +322,6 @@ impl BunkerSession {
     /// Returns an error when called with SSR features, when connection fails,
     /// or when given a `nostrconnect://` URI (client-initiated pairing is not
     /// yet supported).
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn connect(uri: &str, timeout_secs: u32) -> Result<Self, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -495,13 +470,6 @@ impl BunkerSession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when signing fails..
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -539,13 +507,6 @@ impl BunkerSession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when nip44 decryption fails.
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn nip44_encrypt(
         &self,
         recipient_hex: &str,
@@ -584,13 +545,6 @@ impl BunkerSession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when nip44 decryption fails.
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn nip44_decrypt(
         &self,
         sender_hex: &str,
@@ -849,9 +803,10 @@ impl BunkerSession {
 /// sender, undecryptable, or unparseable plaintext) — callers should silently
 /// ignore such messages rather than error, since relays may deliver unrelated
 /// events on the same subscription.
-// `serde_json::Value`'s `Index` impl returns `Value::Null` on a missing key or wrong
-// variant — it never panics — so `indexing_slicing` has no real signal on `Value` accesses.
-#[allow(clippy::indexing_slicing)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "serde_json::Value indexing returns Null on a miss and never panics"
+)]
 #[cfg(not(feature = "ssr"))]
 fn decode_nip46_response(
     data: &str,
@@ -936,9 +891,10 @@ fn make_rpc_promise() -> (Promise, Option<js_sys::Function>, Option<js_sys::Func
 }
 
 /// Create a Promise that rejects with `"timeout"` after `timeout_secs` seconds.
-// `timeout_secs` is a small config value (seconds, default 30) — `* 1000.0` cannot
-// approach `i32::MAX`, so the `f64 -> i32` cast never truncates in practice.
-#[allow(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "timeout_secs is a small config value, far below i32::MAX milliseconds"
+)]
 #[cfg(not(feature = "ssr"))]
 fn make_timeout_promise(timeout_secs: u32) -> Promise {
     let timeout_ms = f64::from(timeout_secs) * 1000.0;
@@ -946,9 +902,10 @@ fn make_timeout_promise(timeout_secs: u32) -> Promise {
         let cb = Closure::once(move || {
             let _ = reject.call1(&JsValue::UNDEFINED, &JsValue::from_str("timeout"));
         });
-        // Promise executor can't return a `Result`; `window()` and `set_timeout` are
-        // always available once this WASM module is running in a browser tab.
-        #[allow(clippy::unwrap_used)]
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a Promise executor cannot return a Result, and window exists whenever this module runs in a tab"
+        )]
         web_sys::window()
             .unwrap()
             .set_timeout_with_callback_and_timeout_and_arguments_0(
@@ -1221,13 +1178,6 @@ impl PasskeySession {
     /// # Errors
     ///
     /// Returns an error if the passkey creation fails.
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn create(rp_id: &str, rp_name: &str) -> Result<Self, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -1324,13 +1274,6 @@ impl PasskeySession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when passkey authentication fails.
-    #[cfg_attr(
-        feature = "ssr",
-        expect(
-            clippy::unused_async_trait_impl,
-            reason = "async signature is the shared API; only the browser build awaits"
-        )
-    )]
     pub async fn authenticate(credential_id: Option<Vec<u8>>) -> Result<Self, NostrAuthError> {
         #[cfg(feature = "ssr")]
         {
@@ -1430,10 +1373,10 @@ impl PasskeySession {
                 ))
             })?;
 
-        // No JS error value carries useful information here — an absent/mismatched-shape
-        // `prf.results` on the extension results object just means the browser/authenticator
-        // doesn't support the PRF extension, which `PasskeyNotSupported` already conveys.
-        #[allow(clippy::map_err_ignore)]
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "any failure here means no PRF support, which the returned error already conveys"
+        )]
         let prf_results = Reflect::get(&get_exts, &"prf".into())
             .and_then(|p| Reflect::get(&p, &"results".into()))
             .map_err(|_| NostrAuthError::PasskeyNotSupported)?;
@@ -1494,8 +1437,8 @@ fn sha256_bytes(input: &[u8]) -> [u8; 32] {
     sha256::Hash::hash(input).to_byte_array()
 }
 
-// `EventBuilder` reads time through universal-time's provider symbol, which this crate must not
-// require of wasm consumers.
+/// `EventBuilder` reads time through universal-time's provider symbol, which this crate must not
+/// require of wasm consumers.
 #[cfg(not(feature = "ssr"))]
 #[expect(
     clippy::cast_possible_truncation,
@@ -1526,12 +1469,12 @@ fn nip46_event(
 
 /// Fill a `Vec<u8>` of the given length with cryptographically random bytes via
 /// `window.crypto.getRandomValues`.
-// `window()`/`crypto()` are always present once this WASM module is running in a browser
-// tab, and `get_random_values_with_array_buffer_view` only errors for buffers over 64KiB
-// (the Web Crypto quota) — every caller here passes a small, fixed length (8-32 bytes).
-#[allow(clippy::unwrap_used)]
 #[cfg(not(feature = "ssr"))]
-#[allow(clippy::cast_possible_truncation)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    reason = "window and crypto exist in a tab, and callers pass 8-32 bytes, under the 64KiB quota and u32"
+)]
 fn random_bytes(len: usize) -> Vec<u8> {
     let window = web_sys::window().unwrap();
     let crypto = window.crypto().unwrap();
@@ -1557,17 +1500,21 @@ fn js_err_msg(e: &JsValue) -> String {
 }
 
 /// Set a property on a freshly-constructed, non-frozen JS object.
-// `Reflect::set` only fails on frozen/sealed targets or proxy invariant violations —
-// neither applies to the plain `Object::new()` targets this is always called with.
-#[allow(clippy::unwrap_used)]
 #[cfg(not(feature = "ssr"))]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Reflect::set only fails on frozen targets; callers pass fresh plain objects"
+)]
 fn set(obj: &Object, key: &str, val: &JsValue) {
     Reflect::set(obj, &key.into(), val).unwrap();
 }
 
 /// Set a string property on a freshly-constructed, non-frozen JS object.
-#[allow(clippy::unwrap_used)]
 #[cfg(not(feature = "ssr"))]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Reflect::set only fails on frozen targets; callers pass fresh plain objects"
+)]
 fn set_str(obj: &Object, key: &str, val: &str) {
     Reflect::set(obj, &key.into(), &JsValue::from_str(val)).unwrap();
 }
@@ -1756,7 +1703,7 @@ mod tests {
     #[test]
     fn sha256_abc_vector() {
         let d = sha256_bytes(b"abc");
-        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = bitcoin_hashes::sha256::Hash::from_byte_array(d).to_string();
         assert_eq!(
             hex,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -1768,7 +1715,7 @@ mod tests {
     fn prf_derivation_vector() {
         let input: Vec<u8> = (0..32).collect();
         let digest = sha256_bytes(&input);
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = bitcoin_hashes::sha256::Hash::from_byte_array(digest).to_string();
         assert_eq!(
             hex,
             "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd"
@@ -1797,5 +1744,15 @@ mod tests {
             ["p".to_owned(), remote.to_hex()]
         );
         ev.verify().unwrap();
+    }
+
+    #[cfg(all(target_arch = "wasm32", not(feature = "ssr")))]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn wasm_nip46_event_signs_with_browser_clock() {
+        let client = Keys::generate();
+        let remote = Keys::generate().public_key();
+        let ev = nip46_event(&client, remote, "ct".into(), now_timestamp()).unwrap();
+        ev.verify().unwrap();
+        assert!(ev.created_at.as_secs() > 1_700_000_000);
     }
 }

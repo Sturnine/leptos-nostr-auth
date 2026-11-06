@@ -22,11 +22,6 @@
 //!
 //! - `insecure_nsec_input` — enables raw nsec/hex key paste (XSS risk; opt-in only)
 
-// WASM is single-threaded, so none of our async fns need to be `Send`. The non-Send types
-// (Rc, RefCell, web-sys objects) that trigger this pedantic lint are wrapped in `send_wrapper`
-// where they cross an actual thread boundary API (see the `send_wrapper` dependency note in
-// Cargo.toml) — this lint has no remaining signal for this crate.
-#![allow(clippy::future_not_send)]
 // Layout queries on the modal's view tree exceed the default depth limit under `ssr`.
 #![recursion_limit = "256"]
 
@@ -273,7 +268,10 @@ mod types {
     /// let config = NostrAuthConfig { rp_id: Some("myapp.com".to_owned()), ..Default::default() };
     /// ```
     #[derive(Clone)]
-    #[allow(clippy::exhaustive_structs)] // intentionally exhaustive: users construct via struct update
+    #[expect(
+        clippy::exhaustive_structs,
+        reason = "consumers construct this with struct update syntax"
+    )]
     pub struct NostrAuthConfig {
         /// Persist session to localStorage after login (default: `true`)
         pub persist_session: bool,
