@@ -1082,10 +1082,11 @@ mod tests {
     fn rejects_wrong_author() {
         let mut fx = Fx::new(NostrConnectMethod::Connect);
         let attacker = Keys::generate();
+        // Replayed signer ciphertext, so only the author check can stop it.
         let event = signed_by(
             &attacker,
             fx.client.public_key(),
-            &attacker,
+            &fx.remote,
             fx.client.public_key(),
             &format!(r#"{{"id":"{ID}","result":"ack"}}"#),
         );
