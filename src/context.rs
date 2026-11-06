@@ -4,14 +4,12 @@
 )]
 use codee::string::JsonSerdeCodec;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_use_storage::use_local_storage;
 use nostr::nips::nip19::ToBech32;
 
 use crate::modal::NostrAuthModal;
 use crate::types::{AuthResult, NostrAuthConfig, PersistedSession};
-
-#[cfg(not(feature = "ssr"))]
-use wasm_bindgen_futures::spawn_local;
 
 /// Reactive auth context — available anywhere inside [`NostrAuthProvider`].
 ///
@@ -100,16 +98,10 @@ pub fn NostrAuthProvider(
     // Clone before Effect consumes delete_stored_session
     let delete_for_logout = delete_stored_session.clone();
 
-    // stored_session and set_restoring are used only inside the non-ssr Effect block
-    #[cfg(feature = "ssr")]
-    let _ = (stored_session, set_restoring, delete_stored_session);
-
     // On mount: one-time session restore from localStorage.
     // get_untracked() avoids re-running this Effect when the session is saved
-    // after a fresh login. Effects don't run on the server, so spawn_local is
-    // safe to cfg-gate here.
+    // after a fresh login.
     Effect::new(move |_| {
-        #[cfg(not(feature = "ssr"))]
         if cfg.get_value().persist_session
             && let Some(session) = stored_session.get_untracked()
         {
@@ -144,7 +136,6 @@ pub fn NostrAuthProvider(
     });
 
     let is_authenticated = Signal::derive(move || auth.get().is_some());
-    let is_restoring_signal = Signal::derive(move || restoring.get());
 
     let show_login = Callback::new(move |(): ()| set_show_modal.set(true));
 
@@ -158,7 +149,7 @@ pub fn NostrAuthProvider(
         public_key,
         npub,
         is_authenticated,
-        is_restoring: is_restoring_signal,
+        is_restoring: restoring.into(),
         show_login,
         logout,
     });
@@ -181,7 +172,7 @@ pub fn NostrAuthProvider(
 
     view! {
         // Show a subtle loading indicator while restoring (optional — UX polish)
-        <Show when=move || restoring.get() fallback=|| ()>
+        <Show when=move || restoring.get()>
             <div
                 aria-live="polite"
                 aria-label="Restoring session…"

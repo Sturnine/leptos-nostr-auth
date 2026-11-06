@@ -73,14 +73,13 @@ impl BunkerSession {
     /// (access revoked, or a non-compliant bunker that doesn't retain authorization), this call
     /// fails and the caller should fall back to prompting the user to reconnect from scratch.
     ///
-    /// Only called from `storage::restore_session`, which is itself client-only — no SSR stub
-    /// is needed here (unlike `connect`, which is public API called directly from the modal).
+    /// Only called from `storage::restore_session`, which never runs on the server; the server
+    /// stub exists so that caller compiles there.
     ///
     /// # Errors
     ///
     /// Returns an error when `client_secret_hex` is not a valid secret key, or when
     /// reconnection fails.
-    #[cfg(not(feature = "ssr"))]
     pub(crate) async fn reconnect(
         uri_without_secret: &str,
         timeout_secs: u32,
@@ -950,6 +949,15 @@ mod imp {
     pub(super) async fn connect(
         _uri: &str,
         _timeout_secs: u32,
+    ) -> Result<BunkerSession, NostrAuthError> {
+        Err(NostrAuthError::BunkerConnectionFailed(NOT_ON_SERVER.into()))
+    }
+
+    /// Server stub for `reconnect`.
+    pub(super) async fn reconnect(
+        _uri_without_secret: &str,
+        _timeout_secs: u32,
+        _client_secret_hex: &str,
     ) -> Result<BunkerSession, NostrAuthError> {
         Err(NostrAuthError::BunkerConnectionFailed(NOT_ON_SERVER.into()))
     }
