@@ -75,7 +75,13 @@ impl Platform {
     /// In SSR mode returns `server_default()` immediately (no browser APIs available).
     /// Call inside `Effect::new()` and write to a reactive signal so the UI narrows
     /// down from the full server-rendered list after hydration.
-    #[allow(clippy::missing_const_for_fn)] // non-SSR build calls browser APIs, which aren't const
+    #[cfg_attr(
+        feature = "ssr",
+        expect(
+            clippy::missing_const_for_fn,
+            reason = "const only under ssr; the browser build calls non-const APIs"
+        )
+    )]
     pub fn detect() -> Self {
         #[cfg(feature = "ssr")]
         {

@@ -88,6 +88,9 @@ send_wrapper = "0.6"
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3.80"
+
 [profile.release]
 opt-level     = "z"       # minimize binary size (WASM priority)
 lto           = true      # link-time optimization, reduces size + improves speed
@@ -138,3 +141,5 @@ module_name_repetitions = "allow" # intentional: NostrAuth* prefix throughout pu
 must_use_candidate      = "allow" # Leptos components return impl IntoView
 wildcard_imports        = "allow" # use leptos::prelude::* is idiomatic Leptos
 unused_async            = "allow" # SSR stubs are async to match the WASM API signature
+unused_async_trait_impl = "allow" # same stubs, reported on impl blocks
+future_not_send         = "allow" # wasm is single-threaded, nothing requires these futures to be Send

@@ -1,5 +1,3 @@
-// #[component] generates exhaustive props structs we cannot control.
-#![allow(clippy::exhaustive_structs)]
 use leptos::prelude::*;
 use leptos_nostr_auth::{NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
 

@@ -1,6 +1,7 @@
-// The #[component] macro generates exhaustive props structs that we cannot add
-// #[non_exhaustive] to. Suppressed here since real public types use it explicitly.
-#![allow(clippy::exhaustive_structs)]
+#![expect(
+    clippy::exhaustive_structs,
+    reason = "#[component] generates the exported props struct, which cannot take attributes"
+)]
 use codee::string::JsonSerdeCodec;
 use leptos::prelude::*;
 use leptos_use_storage::use_local_storage;
@@ -75,7 +76,6 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 ///     }
 /// }
 /// ```
-#[allow(clippy::exhaustive_structs)]
 #[component]
 pub fn NostrAuthProvider(
     /// Optional configuration (default: all methods enabled, persistence on).
