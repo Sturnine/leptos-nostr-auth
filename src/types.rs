@@ -238,6 +238,11 @@ pub struct NostrAuthConfig {
     /// NIP-46 timeout in seconds (default: `30`), applied per relay and per step: each socket open
     /// and each request gets the full value. A request whose signer sends an approval link waits
     /// one extra 300 s, only while a mounted [`crate::modal::NostrAuthModal`] can show the link.
+    ///
+    /// This is not a limit on a whole call. With `n` relays, at most 5, and this value as `T`, the
+    /// most a call can take is: `(n+1)T`, plus 300 s with an approval link, for a call that
+    /// reconnects; `2T`, plus 300 s with a link, for a call waiting on another call's reconnect;
+    /// `(2n+1)T + 600 s` for login; `2nT + 300 s` for restore.
     pub bunker_timeout_secs: u32,
     /// WebAuthn relying party ID — MUST match your domain (default: `window.location.hostname`)
     ///

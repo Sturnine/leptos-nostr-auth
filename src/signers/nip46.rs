@@ -58,9 +58,11 @@ impl BunkerSession {
     ///
     /// A URI may list up to five relays after duplicates are removed. If the signer sends an
     /// approval link, a mounted [`crate::modal::NostrAuthModal`] shows it, also while `open` is
-    /// false, and the request waits `timeout_secs` plus 300 s. A modal unmounted during that wait
-    /// does not shorten it. Closing the modal does not cancel a login: a dismissed login can still
-    /// complete up to that bound later and call `on_auth`.
+    /// false, and that request waits one extra 300 s. A login with `n` relays can take up to
+    /// `(2n+1) * timeout_secs + 600` seconds. A modal unmounted during that wait does not shorten
+    /// it. A lost socket ends a wait at once, including one for approval, which then needs a retry.
+    /// Closing the modal does not cancel a login: a dismissed login can still complete up to that
+    /// bound later and call `on_auth`.
     ///
     /// # Errors
     ///
@@ -110,6 +112,11 @@ impl BunkerSession {
     /// Send a NIP-46 `sign_event` request to the remote signer.
     ///
     /// Reuses the persistent WebSocket if it is open; reconnects automatically if not.
+    ///
+    /// A lost socket ends the request at once with [`NostrAuthError::BunkerConnectionFailed`],
+    /// including one waiting for approval, which then needs a retry. A pending request with no
+    /// approval link can fail the same way once another request on the socket has timed out and a
+    /// new one arrives, because the new one reconnects.
     ///
     /// # Errors
     ///
