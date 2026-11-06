@@ -1,0 +1,166 @@
+use nostr::key::{Keys, PublicKey};
+use nostr::nips::nip19::FromBech32;
+
+use crate::types::NostrAuthError;
+
+/// In-memory raw key session. Used for NIP-49 ncryptsec and (feature-gated) raw nsec paste.
+///
+/// The private key is held in memory for the lifetime of this struct. Each clone holds an
+/// independent copy — avoid unnecessary cloning. The nostr crate's `SecretKey` implements
+/// `ZeroizeOnDrop` internally, so each copy is zeroed when dropped.
+#[derive(Clone)]
+pub struct RawKeySession {
+    /// The authenticated user's public key.
+    pub public_key: PublicKey,
+    /// In-memory keypair; `Keys` erases its secret key on drop with a non-secure erase.
+    keys: Keys,
+}
+
+impl RawKeySession {
+    /// Decrypt a NIP-49 `ncryptsec1...` string with a password.
+    ///
+    /// scrypt derivation is CPU-intensive — call this inside `spawn_local` to avoid
+    /// blocking the browser's main thread while the spinner shows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when decrypting fails.
+    pub fn from_ncryptsec(ncryptsec: &str, password: &str) -> Result<Self, NostrAuthError> {
+        let encrypted = nostr::nips::nip49::EncryptedSecretKey::from_bech32(ncryptsec)
+            .map_err(|e| NostrAuthError::InvalidNcryptsec(e.to_string()))?;
+
+        let secret_key = encrypted.decrypt(password).map_err(|e| {
+            if e.kind() == nostr::error::ErrorKind::Crypto {
+                NostrAuthError::WrongPassword
+            } else {
+                NostrAuthError::InvalidNcryptsec(e.to_string())
+            }
+        })?;
+
+        let keys = Keys::new(secret_key);
+        Ok(Self {
+            public_key: keys.public_key(),
+            keys,
+        })
+    }
+
+    /// Parse a raw `nsec1...` bech32 or 64-char hex private key.
+    ///
+    /// Only available with the `insecure_nsec_input` feature flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when parsing nsec fails.
+    #[cfg(feature = "insecure_nsec_input")]
+    pub fn from_nsec_or_hex(input: &str) -> Result<Self, NostrAuthError> {
+        use nostr::key::SecretKey;
+
+        let input = input.trim();
+        let secret_key = if let Ok(sk) = SecretKey::from_bech32(input) {
+            sk
+        } else if let Ok(sk) = SecretKey::from_hex(input) {
+            sk
+        } else {
+            return Err(NostrAuthError::InvalidSecretKey(
+                "Expected nsec1... (bech32) or 64-char hex private key".into(),
+            ));
+        };
+        let keys = Keys::new(secret_key);
+        Ok(Self {
+            public_key: keys.public_key(),
+            keys,
+        })
+    }
+
+    /// Sign a Nostr event with the in-memory key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if signing fails.
+    pub fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
+        super::sign_with_keys(&self.keys, event_json)
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod tests {
+    use super::*;
+    use crate::types::AuthResult;
+    use nostr::event::Event;
+    use nostr::nips::nip19::ToBech32;
+    use nostr::nips::nip49::EncryptedSecretKey;
+
+    const CRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+    const CRYPTSEC_PUBKEY: &str =
+        "672a31bfc59d3f04548ec9b7daeeba2f61814e8ccc40448045007f5479f693a3";
+
+    // Expected values were computed outside the crate (shasum, Python hashlib and a pure-Python secp256k1 multiply).
+
+    #[test]
+    fn ncryptsec_correct_password() {
+        let s = RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap();
+        assert_eq!(s.public_key.to_hex(), CRYPTSEC_PUBKEY);
+    }
+
+    #[test]
+    fn ncryptsec_wrong_password() {
+        let r = RawKeySession::from_ncryptsec(CRYPTSEC, "wrong");
+        assert!(matches!(r, Err(NostrAuthError::WrongPassword)));
+    }
+
+    #[test]
+    fn ncryptsec_over_cost_cap() {
+        let mut bytes = EncryptedSecretKey::from_bech32(CRYPTSEC).unwrap().as_vec();
+        *bytes.get_mut(1).unwrap() = EncryptedSecretKey::MAX_LOG_N + 1;
+        let over = EncryptedSecretKey::from_slice(&bytes)
+            .unwrap()
+            .to_bech32()
+            .unwrap();
+        let r = RawKeySession::from_ncryptsec(&over, "nostr");
+        assert!(matches!(r, Err(NostrAuthError::InvalidNcryptsec(_))));
+    }
+
+    #[test]
+    fn ncryptsec_malformed() {
+        let r = RawKeySession::from_ncryptsec("not-an-ncryptsec", "nostr");
+        assert!(matches!(r, Err(NostrAuthError::InvalidNcryptsec(_))));
+    }
+
+    #[test]
+    fn raw_key_signing_verifies() {
+        let s = RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap();
+        let unsigned = format!(
+            r#"{{"pubkey":"{CRYPTSEC_PUBKEY}","created_at":1700000000,"kind":1,"tags":[],"content":"hi"}}"#
+        );
+        let signed = s.sign_event(&unsigned).unwrap();
+        Event::from_json(signed).unwrap().verify().unwrap();
+    }
+
+    #[test]
+    fn raw_key_rejects_malformed_json_and_names_method() {
+        let keys = Keys::generate();
+        let s = RawKeySession {
+            public_key: keys.public_key(),
+            keys,
+        };
+        assert!(matches!(
+            s.sign_event("{"),
+            Err(NostrAuthError::Serialization(_))
+        ));
+        assert_eq!(AuthResult::Ncryptsec(s).method_name(), "Encrypted Key");
+    }
+
+    #[cfg(feature = "insecure_nsec_input")]
+    #[test]
+    fn nsec_import_signs_and_verifies() {
+        let hex = "0000000000000000000000000000000000000000000000000000000000000001";
+        let s = RawKeySession::from_nsec_or_hex(hex).unwrap();
+        let unsigned = format!(
+            r#"{{"pubkey":"{}","created_at":1700000000,"kind":1,"tags":[],"content":"hi"}}"#,
+            s.public_key.to_hex()
+        );
+        let signed = s.sign_event(&unsigned).unwrap();
+        Event::from_json(signed).unwrap().verify().unwrap();
+    }
+}
