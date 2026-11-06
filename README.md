@@ -325,9 +325,9 @@ impl MonotonicClock for BrowserClock {
 define_time_provider!(BrowserClock);
 ```
 
-With rustc 1.99.1 a missing provider was a link error, and `custom_created_at` did not avoid it in a
-dev build. Other toolchains may link and trap at runtime, so do not assume `EventBuilder` works on
-wasm without a provider.
+With rustc 1.99.1 a missing provider was a link error, and `custom_created_at` did not avoid it,
+either in a dev build or with `opt-level = "z"` and `lto`. Other toolchains may link and trap at
+runtime, so do not assume `EventBuilder` works on wasm without a provider.
 
 - `sign_event_async` returns `NostrAuthError`. `finalize_async` wraps it in `nostr::error::Error`
   with the original as its source: `use core::error::Error as _;` then
@@ -527,7 +527,8 @@ All elements emit `data-nostr-*` attributes for styling:
   behave the other way: a missing provider could link and then trap at runtime with no build
   warning. Do not assume `EventBuilder` works on wasm without a provider. This includes
   `EventBuilder::finalize_async` and `nostr` helpers that build through it, and
-  `custom_created_at` did not avoid the link error in a dev build with rustc 1.99.1.
+  `custom_created_at` did not avoid the link error with rustc 1.99.1, in a dev build or with
+  `opt-level = "z"` and `lto`.
 - `AuthResult` now implements `nostr`'s `AsyncGetPublicKey`, `AsyncSignEvent` and `Debug`. `Debug`
   prints the variant and public key only.
 - A NIP-46 `auth_url` no longer returns an error containing the URL. The request stays pending and
