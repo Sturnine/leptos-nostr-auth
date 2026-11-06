@@ -43,6 +43,7 @@ codee = { version = "0.3", features = ["json_serde"] }
 nostr = { version = "0.45.7", default-features = false, features = [
   "std",
   "nip44",
+  "nip46",
   "nip49",
   "rand",
   "os-rng",
