@@ -313,7 +313,9 @@ pub(crate) mod tests {
 
     #[test]
     fn undecodable_json_is_an_error() {
-        assert!(<JsonSerdeCodec as Decoder<Option<PersistedSession>>>::decode("not json{").is_err());
+        assert!(
+            <JsonSerdeCodec as Decoder<Option<PersistedSession>>>::decode("not json{").is_err()
+        );
     }
 
     #[test]
@@ -377,10 +379,7 @@ pub(crate) mod tests {
 
     #[test]
     fn nothing_stored_keeps() {
-        assert!(matches!(
-            action(true, None, None),
-            LoginStorageAction::Keep
-        ));
+        assert!(matches!(action(true, None, None), LoginStorageAction::Keep));
     }
 
     #[test]

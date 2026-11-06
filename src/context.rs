@@ -262,8 +262,7 @@ pub fn NostrAuthProvider(
 
     let show_login = Callback::new(move |(): ()| set_show_modal.set(true));
 
-    let has_saved_session =
-        Signal::derive(move || settled.get() && stored_session.get().is_some());
+    let has_saved_session = Signal::derive(move || settled.get() && stored_session.get().is_some());
 
     let logout = Callback::new({
         let delete = delete_stored_session.clone();
