@@ -36,16 +36,15 @@ pub struct BunkerSession {
     /// Persistent WebSocket — opened by the handshake, reopened by `ensure_ws` if lost.
     #[cfg(not(feature = "ssr"))]
     ws: send_wrapper::SendWrapper<imp::WsSlot>,
-    /// Current onmessage handler for `ws` — replaced (not leaked) on reconnect,
+    /// Current `onmessage` and `onclose` handlers for `ws` — replaced (not leaked) on reconnect,
     /// so reconnects don't accumulate closures holding `client_keys` clones.
     #[cfg(not(feature = "ssr"))]
-    message_handler: send_wrapper::SendWrapper<imp::MessageHandlerSlot>,
+    handlers: send_wrapper::SendWrapper<imp::HandlerSlot>,
     /// Requests awaiting a response.
     #[cfg(not(feature = "ssr"))]
     inflight: send_wrapper::SendWrapper<imp::InflightSlot>,
-    /// Set while a reconnect is in flight; a concurrent caller awaits this
-    /// promise instead of racing a second WebSocket into existence, then
-    /// reads the winner's result off `ws`. See `ensure_ws`.
+    /// Serializes reconnects: a concurrent caller waits for the running one's outcome, up to its
+    /// own timeout, instead of racing a second WebSocket into existence. See `ensure_ws`.
     #[cfg(not(feature = "ssr"))]
     connect_lock: send_wrapper::SendWrapper<imp::ConnectLock>,
 }
@@ -59,9 +58,11 @@ impl BunkerSession {
     ///
     /// A URI may list up to five relays after duplicates are removed. If the signer sends an
     /// approval link, a mounted [`crate::modal::NostrAuthModal`] shows it, also while `open` is
-    /// false, and the request waits `timeout_secs` plus 300 s. A modal unmounted during that wait
-    /// does not shorten it. Closing the modal does not cancel a login: a dismissed login can still
-    /// complete up to that bound later and call `on_auth`.
+    /// false, and that request waits one extra 300 s. A login with `n` relays can take up to
+    /// `(2n+1) * timeout_secs + 600` seconds. A modal unmounted during that wait does not shorten
+    /// it. A lost socket ends a wait at once, including one for approval, which then needs a retry.
+    /// Closing the modal does not cancel a login: a dismissed login can still complete up to that
+    /// bound later and call `on_auth`.
     ///
     /// # Errors
     ///
@@ -111,6 +112,11 @@ impl BunkerSession {
     /// Send a NIP-46 `sign_event` request to the remote signer.
     ///
     /// Reuses the persistent WebSocket if it is open; reconnects automatically if not.
+    ///
+    /// A lost socket ends the request at once with [`NostrAuthError::BunkerConnectionFailed`],
+    /// including one waiting for approval, which then needs a retry. A pending request with no
+    /// approval link can fail the same way once another request on the socket has timed out and a
+    /// new one arrives, because the new one reconnects.
     ///
     /// # Errors
     ///
@@ -205,14 +211,15 @@ mod imp {
 
     use super::BunkerSession;
     use crate::signers::browser::{
-        js_err_msg, make_rpc_promise, make_timeout_promise, now_timestamp, random_bytes,
+        RpcTimer, js_err_msg, make_rpc_promise, now_timestamp, random_bytes,
     };
     use crate::signers::nip46_protocol::{
         AUTH_URL_TIMEOUT_SECS, AttemptLog, BunkerTarget, DeadlineAction, Effect, Handshake,
-        HttpsUrl, Inflight, Peer, PromptList, REQUEST_BUILD_FAILED, RpcFailure, connect_request,
-        connect_result, event_frame, needs_connect, nip44_result, parse_bunker_uri, persisted_uri,
-        public_key_result, request_event, request_message, rotate_to_front, signed_event_result,
-        subscribe_frame, unsigned_for_signing,
+        HttpsUrl, Inflight, Peer, PromptList, REQUEST_BUILD_FAILED, ReconnectGate,
+        ReconnectOutcome, ReconnectWaker, RpcFailure, connect_request, connect_result, event_frame,
+        needs_connect, nip44_result, parse_bunker_uri, persisted_uri, public_key_result,
+        request_event, request_message, rotate_to_front, signed_event_result, subscribe_frame,
+        unsigned_for_signing,
     };
     use crate::types::NostrAuthError;
 
@@ -269,37 +276,65 @@ mod imp {
     /// How a settled request reaches the call awaiting it.
     type Outcome = Result<ResponseResult, RpcFailure>;
 
-    /// Wakes `send_on`. The typed outcome goes through the slot, so the promise is only a wake-up
-    /// and no error text has to survive a trip through JS.
-    pub(super) struct RpcWaker {
+    /// Wakes a waiting call. The typed outcome goes through the slot, so the promise is only a
+    /// wake-up and no error text has to survive a trip through JS.
+    pub(super) struct Waker<T> {
         /// Read by the waiting call once woken.
-        slot: Rc<RefCell<Option<Outcome>>>,
+        slot: Rc<RefCell<Option<T>>>,
         /// Resolves the promise the waiting call races.
         resolve: js_sys::Function,
     }
 
-    impl RpcWaker {
+    impl<T> Waker<T> {
         /// Hand over the outcome and wake the waiting call.
-        fn wake(self, outcome: Outcome) {
+        fn wake(self, outcome: T) {
             *self.slot.borrow_mut() = Some(outcome);
             let _ = self.resolve.call0(&JsValue::UNDEFINED);
         }
     }
 
+    impl ReconnectWaker for Waker<ReconnectOutcome> {
+        fn wake(self, outcome: ReconnectOutcome) {
+            Self::wake(self, outcome);
+        }
+    }
+
+    /// A promise to race, the slot to read once it resolves, and the waker that fills both.
+    fn wake_pair<T>() -> (Promise, Rc<RefCell<Option<T>>>, Waker<T>) {
+        let slot = Rc::new(RefCell::new(None));
+        let (woken, resolve, _) = make_rpc_promise();
+        let waker = Waker {
+            slot: Rc::clone(&slot),
+            resolve,
+        };
+        (woken, slot, waker)
+    }
+
+    /// Wakes `send_on`.
+    pub(super) type RpcWaker = Waker<Outcome>;
+
     /// Requests awaiting a response.
     pub(super) type InflightSlot = Rc<RefCell<Inflight<RpcWaker>>>;
 
-    /// Slot holding the current persistent-WebSocket `onmessage` closure.
-    /// Replacing it (rather than `Closure::forget()`-ing every reconnect's handler)
+    /// A socket's event closures, owned here because the socket only borrows them.
+    #[expect(dead_code, reason = "held to keep the closures alive, never read")]
+    pub(super) struct SocketHandlers {
+        /// `onmessage`.
+        on_message: Closure<dyn FnMut(web_sys::MessageEvent)>,
+        /// `onclose`.
+        on_close: Closure<dyn FnMut(web_sys::Event)>,
+    }
+
+    /// Slot holding the current persistent-WebSocket closures.
+    /// Replacing it (rather than `Closure::forget()`-ing every reconnect's handlers)
     /// drops the previous closure's captured `client_keys` clone promptly.
-    pub(super) type MessageHandlerSlot =
-        Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MessageEvent)>>>>;
+    pub(super) type HandlerSlot = Rc<RefCell<Option<SocketHandlers>>>;
 
     /// Persistent WebSocket slot.
     pub(super) type WsSlot = Rc<RefCell<Option<web_sys::WebSocket>>>;
 
-    /// In-flight reconnect promise slot.
-    pub(super) type ConnectLock = Rc<RefCell<Option<Promise>>>;
+    /// Serializes reconnects.
+    pub(super) type ConnectLock = Rc<ReconnectGate<Waker<ReconnectOutcome>>>;
 
     /// Removes a request from `Inflight` on every exit from `send_on`, including a dropped future,
     /// which runs no exit code.
@@ -351,11 +386,30 @@ mod imp {
 
     /// The single socket cleanup. Handlers go first, because the closures they point at can be
     /// freed while the socket is still closing.
+    ///
+    /// No close event reaches anyone after this, so the caller must have failed, or be about to
+    /// fail, what is in flight on this socket.
     fn close_socket(ws: &web_sys::WebSocket) {
         ws.set_onmessage(None);
         ws.set_onopen(None);
         ws.set_onerror(None);
+        ws.set_onclose(None);
         let _ = ws.close();
+    }
+
+    /// Run what a relay frame or a lost socket caused, after the `Inflight` borrow has ended.
+    fn run_effects(effects: Vec<Effect<RpcWaker>>, ws: Option<&web_sys::WebSocket>) {
+        for effect in effects {
+            match effect {
+                Effect::Settle { waker, outcome } => waker.wake(outcome),
+                Effect::Prompt { request_id, url } => show_prompt(request_id, url),
+                Effect::CloseSocket => {
+                    if let Some(ws) = ws {
+                        close_socket(ws);
+                    }
+                }
+            }
+        }
     }
 
     /// Fresh login with a newly generated local pairing keypair.
@@ -463,9 +517,9 @@ mod imp {
                 remote_pubkey: remote,
                 relays: relays.clone(),
                 ws: SendWrapper::new(Rc::new(RefCell::new(None))),
-                message_handler: SendWrapper::new(Rc::new(RefCell::new(None))),
+                handlers: SendWrapper::new(Rc::new(RefCell::new(None))),
                 inflight: SendWrapper::new(Rc::new(RefCell::new(Inflight::default()))),
-                connect_lock: SendWrapper::new(Rc::new(RefCell::new(None))),
+                connect_lock: SendWrapper::new(Rc::default()),
             };
             let mut paired = false;
             let mut failures = AttemptLog::default();
@@ -516,58 +570,45 @@ mod imp {
         /// Returns the WebSocket ready to send messages.
         ///
         /// Concurrent callers serialize on `connect_lock`: only the first caller
-        /// actually reconnects; subsequent callers await that attempt's result
-        /// instead of each opening their own socket (which would orphan all but
+        /// actually reconnects; subsequent callers wait for that attempt's outcome, up to
+        /// `timeout_secs`, instead of each opening their own socket (which would orphan all but
         /// one in-flight RPC until timeout).
         async fn ensure_ws(&self) -> Result<web_sys::WebSocket, NostrAuthError> {
-            if let Some(ws) = self.ws.borrow().as_ref()
+            let current = self.ws.borrow().clone();
+            let must_reconnect = self.inflight.borrow().must_reconnect();
+            if let Some(ws) = current
                 && ws.ready_state() == web_sys::WebSocket::OPEN
+                && !must_reconnect
             {
-                return Ok(ws.clone());
+                return Ok(ws);
             }
 
-            // Someone else is already (re)connecting — await their result.
-            let in_flight = self.connect_lock.borrow().clone();
-            if let Some(promise) = in_flight {
-                JsFuture::from(promise).await.map_err(|e| {
-                    let msg = e.as_string().unwrap_or_else(|| "connect failed".into());
-                    if msg == "timeout" {
-                        NostrAuthError::BunkerTimeout
-                    } else {
-                        NostrAuthError::BunkerConnectionFailed(msg)
-                    }
-                })?;
-                return self.ws.borrow().as_ref().cloned().ok_or_else(|| {
+            let (woken, slot, waker) = wake_pair();
+            if let Some(lead) = self.connect_lock.join(waker) {
+                let result = self.do_reconnect().await;
+                lead.finish(result.as_ref().map(|_| ()).map_err(Clone::clone));
+                return result;
+            }
+
+            let timer = RpcTimer::start(self.timeout_secs);
+            let race = Promise::race(&Array::of2(&woken, timer.fired()));
+            let _ = JsFuture::from(race).await;
+            let outcome = slot.borrow_mut().take();
+            match outcome {
+                None => Err(NostrAuthError::BunkerTimeout),
+                Some(Err(e)) => Err(e),
+                Some(Ok(())) => self.ws.borrow().as_ref().cloned().ok_or_else(|| {
                     NostrAuthError::BunkerConnectionFailed("reconnect failed".into())
-                });
+                }),
             }
-
-            // We're the leader: publish a shared promise so concurrent callers
-            // can await this attempt instead of starting their own.
-            let (lock_promise, lock_resolve, lock_reject) = make_rpc_promise();
-            *self.connect_lock.borrow_mut() = Some(lock_promise);
-
-            let result = self.do_reconnect().await;
-
-            *self.connect_lock.borrow_mut() = None;
-            match &result {
-                Ok(_) => {
-                    let _ = lock_resolve.call1(&JsValue::UNDEFINED, &JsValue::UNDEFINED);
-                }
-                Err(e) => {
-                    let _ =
-                        lock_reject.call1(&JsValue::UNDEFINED, &JsValue::from_str(&e.to_string()));
-                }
-            }
-
-            result
         }
 
         /// Tears down any stale socket and opens a new one, trying each relay in order.
         /// Only ever called from `ensure_ws`, which serializes concurrent callers.
         async fn do_reconnect(&self) -> Result<web_sys::WebSocket, NostrAuthError> {
-            if let Some(old_ws) = self.ws.borrow_mut().take() {
-                close_socket(&old_ws);
+            let old_ws = self.ws.borrow().clone();
+            if let Some(old_ws) = old_ws {
+                self.retire_socket(&old_ws);
             }
             let mut last = NostrAuthError::BunkerConnectionFailed("no relay to try".into());
             for relay in &self.relays {
@@ -583,7 +624,20 @@ mod imp {
             Err(last)
         }
 
-        /// Open a socket to `relay`, install the handler and subscribe.
+        /// Stop using `ws` and fail what is in flight on it. A relay's close frame leaves a socket
+        /// `CLOSING` with no close event yet, and closing it here clears `onclose`, so its entries
+        /// must fail now or they wait out their deadlines.
+        fn retire_socket(&self, ws: &web_sys::WebSocket) {
+            let current = self.ws.borrow().as_ref() == Some(ws);
+            if current {
+                *self.ws.borrow_mut() = None;
+            }
+            close_socket(ws);
+            let effects = self.inflight.borrow_mut().fail_socket_lost();
+            run_effects(effects, None);
+        }
+
+        /// Open a socket to `relay`, install the handlers and subscribe.
         async fn open_relay(&self, relay: &RelayUrl) -> Result<AttemptGuard, NostrAuthError> {
             let ws = web_sys::WebSocket::new(relay.as_str()).map_err(|e| {
                 NostrAuthError::BunkerConnectionFailed(format!("WebSocket: {}", js_err_msg(&e)))
@@ -594,7 +648,7 @@ mod imp {
             };
             ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
             self.inflight.borrow_mut().reset_socket();
-            self.install_message_handler(&ws);
+            self.install_handlers(&ws);
 
             let (open_promise, open_resolve, open_reject) = make_rpc_promise();
             let on_open = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
@@ -609,30 +663,30 @@ mod imp {
             ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
             ws.set_onerror(Some(on_error_open.as_ref().unchecked_ref()));
 
-            let timeout_promise = make_timeout_promise(self.timeout_secs);
-            let race = Promise::race(&Array::of2(&open_promise, &timeout_promise));
-            let opened = JsFuture::from(race).await;
+            let opened = {
+                let timer = RpcTimer::start(self.timeout_secs);
+                let race = Promise::race(&Array::of2(&open_promise, timer.fired()));
+                JsFuture::from(race).await
+            };
 
             ws.set_onopen(None);
             ws.set_onerror(None);
 
-            opened.map_err(|e| {
-                let msg = e.as_string().unwrap_or_else(|| "connect failed".into());
-                if msg == "timeout" {
-                    NostrAuthError::BunkerTimeout
-                } else {
-                    NostrAuthError::BunkerConnectionFailed(msg)
-                }
-            })?;
+            if let Err(e) = opened {
+                return Err(NostrAuthError::BunkerConnectionFailed(js_err_msg(&e)));
+            }
+            if ws.ready_state() != web_sys::WebSocket::OPEN {
+                return Err(NostrAuthError::BunkerTimeout);
+            }
 
             ws.send_with_str(&subscribe_frame(self.client_keys.public_key()))
                 .map_err(|e| NostrAuthError::BunkerConnectionFailed(js_err_msg(&e)))?;
             Ok(attempt)
         }
 
-        /// Install the handler for `ws`. The closure is stored in `message_handler`, which drops
-        /// any previous handler's captured `client_keys` clone instead of leaking it.
-        fn install_message_handler(&self, ws: &web_sys::WebSocket) {
+        /// Install the handlers for `ws`. The closures are stored in `handlers`, which drops any
+        /// previous handler's captured `client_keys` clone instead of leaking it.
+        fn install_handlers(&self, ws: &web_sys::WebSocket) {
             let inflight = Rc::clone(&self.inflight);
             let peer = Peer {
                 client: self.client_keys.clone(),
@@ -643,29 +697,40 @@ mod imp {
                     return;
                 };
                 let effects = inflight.borrow_mut().on_frame(&data, &peer);
-                for effect in effects {
-                    match effect {
-                        Effect::Settle { waker, outcome } => waker.wake(outcome),
-                        Effect::Prompt { request_id, url } => show_prompt(request_id, url),
-                        Effect::CloseSocket => {
-                            if let Some(ws) = e
-                                .target()
-                                .and_then(|t| t.dyn_into::<web_sys::WebSocket>().ok())
-                            {
-                                close_socket(&ws);
-                            }
-                        }
-                    }
-                }
+                let target = e
+                    .target()
+                    .and_then(|t| t.dyn_into::<web_sys::WebSocket>().ok());
+                run_effects(effects, target.as_ref());
+            });
+            let inflight = Rc::clone(&self.inflight);
+            let on_close = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
+                let effects = inflight.borrow_mut().fail_socket_lost();
+                run_effects(effects, None);
             });
             ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-            *self.message_handler.borrow_mut() = Some(on_message);
+            ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+            *self.handlers.borrow_mut() = Some(SocketHandlers {
+                on_message,
+                on_close,
+            });
         }
 
         /// Post-handshake request: reconnect if needed, then send.
         async fn send_rpc(&self, request: &NostrConnectRequest) -> Outcome {
             let ws = self.ensure_ws().await.map_err(RpcFailure::Socket)?;
-            self.send_on(&ws, request).await
+            let result = self.send_on(&ws, request).await;
+            let current = self.ws.borrow().as_ref() == Some(&ws);
+            if !current {
+                return result;
+            }
+            let tear_down = self
+                .inflight
+                .borrow_mut()
+                .note_settled(result.as_ref().err());
+            if tear_down {
+                self.retire_socket(&ws);
+            }
+            result
         }
 
         /// The one RPC body. Takes the socket so a handshake cannot finish on a different relay
@@ -686,17 +751,10 @@ mod imp {
             )
             .ok_or(RpcFailure::Malformed(REQUEST_BUILD_FAILED))?;
 
-            let slot = Rc::new(RefCell::new(None));
-            let (woken, resolve, _) = make_rpc_promise();
-            self.inflight.borrow_mut().insert(
-                id.clone(),
-                request.method(),
-                event.id,
-                RpcWaker {
-                    slot: Rc::clone(&slot),
-                    resolve,
-                },
-            );
+            let (woken, slot, waker): (_, _, RpcWaker) = wake_pair();
+            self.inflight
+                .borrow_mut()
+                .insert(id.clone(), request.method(), event.id, waker);
             let _guard = RequestGuard::new(Rc::clone(&self.inflight), id.clone());
 
             ws.send_with_str(&event_frame(&event)).map_err(|e| {
@@ -705,8 +763,8 @@ mod imp {
 
             let mut wait_secs = self.timeout_secs;
             loop {
-                let timer = make_timeout_promise(wait_secs);
-                let race = Promise::race(&Array::of2(&woken, &timer));
+                let timer = RpcTimer::start(wait_secs);
+                let race = Promise::race(&Array::of2(&woken, timer.fired()));
                 let _ = JsFuture::from(race).await;
                 if let Some(outcome) = slot.borrow_mut().take() {
                     return outcome;

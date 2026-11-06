@@ -338,6 +338,16 @@ unmounted during the extended wait does not shorten it. Mount one modal: each mo
 the same link, and one Escape reaches all of them. `NostrAuthProvider` already mounts its own.
 A challenge at page load shows the same link while `is_restoring` stays `true`.
 
+`bunker_timeout_secs` (T) applies per relay and per step, so it does not cap a whole call. With n
+relays, at most 5, the longest a call can take is:
+
+| Call | Bound | No approval link | T = 30, n = 5: no link / with link |
+|---|---|---|---|
+| Call that reconnects | (n+1)T + 300 s | (n+1)T | 180 s / 480 s |
+| Call waiting on another call's reconnect | 2T + 300 s | 2T | 60 s / 360 s |
+| Login | (2n+1)T + 600 s | | 930 s with link |
+| Restore | 2nT + 300 s | | 600 s with link |
+
 The `is_restoring` signal on `NostrAuthContext` is `true` while restore is in progress.
 Use it to suppress the login button flash:
 
@@ -477,6 +487,17 @@ All elements emit `data-nostr-*` attributes for styling:
 - A `bunker://` URI may list at most five relays after duplicates are removed. More are refused.
 - `BunkerSession::nip44_encrypt` and `nip44_decrypt` now reject a counterparty that is not a hex
   public key with `InvalidPublicKey`, before anything is sent.
+- A signer's refusal of `sign_event`, `nip44_encrypt` or `nip44_decrypt` is now
+  `SigningFailed(text)`, not `BunkerConnectionFailed(text)`. A refusal at login stays
+  `BunkerConnectionFailed`.
+- A lost relay socket now fails pending requests at once with
+  `BunkerConnectionFailed("relay connection lost")`, including requests waiting for approval, which
+  need a retry.
+- A pending request can fail with that same error once another request on the socket has timed out
+  and a new request arrives, because the new request reconnects. A request waiting on a verified
+  approval link keeps the socket instead.
+- A call waiting on another call's reconnect gets `BunkerConnectionFailed("reconnect cancelled")` if
+  that call's future is dropped.
 
 ## Development
 

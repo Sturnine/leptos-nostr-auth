@@ -14,30 +14,59 @@ pub(super) fn make_rpc_promise() -> (Promise, js_sys::Function, js_sys::Function
     (promise, resolve, reject)
 }
 
-/// Create a Promise that rejects with `"timeout"` after `timeout_secs` seconds.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "timeout_secs is a small config value, far below i32::MAX milliseconds"
-)]
-pub(super) fn make_timeout_promise(timeout_secs: u32) -> Promise {
-    let timeout_ms = f64::from(timeout_secs) * 1000.0;
-    Promise::new(&mut |_resolve, reject| {
-        let cb = Closure::once(move || {
-            let _ = reject.call1(&JsValue::UNDEFINED, &JsValue::from_str("timeout"));
-        });
-        #[expect(
-            clippy::unwrap_used,
-            reason = "a Promise executor cannot return a Result, and window exists whenever this module runs in a tab"
-        )]
-        web_sys::window()
-            .unwrap()
+/// A one-shot timer for a race. The callback is the promise's own `resolve`, because a Rust closure
+/// passed to `setTimeout` leaks when the timer is cleared and never calls it. `fired` never rejects.
+///
+/// Hold it in a named local across the await: a temporary drops first, and dropping resolves.
+pub(super) struct RpcTimer {
+    /// Owns the timer id.
+    window: web_sys::Window,
+    /// Cleared on drop.
+    id: i32,
+    /// Resolves when the time is up.
+    fired: Promise,
+    /// Resolves `fired`.
+    resolve: js_sys::Function,
+}
+
+impl RpcTimer {
+    /// Start a timer of `timeout_secs` seconds.
+    #[expect(
+        clippy::unwrap_used,
+        clippy::cast_possible_truncation,
+        reason = "window exists whenever this module runs in a tab, and timeout_secs is a small config value, far below i32::MAX milliseconds"
+    )]
+    pub(super) fn start(timeout_secs: u32) -> Self {
+        let (fired, resolve, _) = make_rpc_promise();
+        let window = web_sys::window().unwrap();
+        let id = window
             .set_timeout_with_callback_and_timeout_and_arguments_0(
-                cb.as_ref().unchecked_ref(),
-                timeout_ms as i32,
+                &resolve,
+                (f64::from(timeout_secs) * 1000.0) as i32,
             )
             .unwrap();
-        cb.forget();
-    })
+        Self {
+            window,
+            id,
+            fired,
+            resolve,
+        }
+    }
+
+    /// Resolves when the time is up, or when the timer is dropped.
+    pub(super) const fn fired(&self) -> &Promise {
+        &self.fired
+    }
+}
+
+impl Drop for RpcTimer {
+    fn drop(&mut self) {
+        self.window.clear_timeout_with_handle(self.id);
+        // `JsFuture` frees its callbacks only when its promise settles, and dropping it does not
+        // settle it. Every race holds one of these, so this settles the race of a dropped future.
+        // Outcomes are read from slots, so this resolve cannot produce one.
+        let _ = self.resolve.call0(&JsValue::UNDEFINED);
+    }
 }
 
 /// `EventBuilder` reads time through universal-time's provider symbol, which this crate must not
