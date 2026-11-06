@@ -9,7 +9,7 @@ use leptos_use_storage::use_local_storage;
 use nostr::nips::nip19::ToBech32;
 
 use crate::modal::NostrAuthModal;
-use crate::types::{AuthResult, NostrAuthConfig, PersistedSession};
+use crate::types::{AuthResult, NostrAuthConfig, PersistedMethod, PersistedSession};
 
 /// Reactive auth context — available anywhere inside [`NostrAuthProvider`].
 ///
@@ -134,7 +134,10 @@ pub fn NostrAuthProvider(
                         web_sys::console::info_1(
                             &format!("leptos-nostr-auth: session restore failed: {e}").into(),
                         );
-                        delete();
+                        // A stored extension session survives any failed restore: the extension may inject late.
+                        if !matches!(session.method, PersistedMethod::Extension) {
+                            delete();
+                        }
                     }
                 }
                 set_restoring.set(false);
@@ -215,7 +218,6 @@ pub fn NostrAuthProvider(
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
-    use crate::types::PersistedMethod;
     use codee::{Decoder, Encoder};
 
     const READ_ONLY_JSON: &str = r#"{"public_key_hex":"82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2","method":"ReadOnly","bunker_uri":null,"bunker_client_secret_hex":null,"passkey_credential_id":null}"#;

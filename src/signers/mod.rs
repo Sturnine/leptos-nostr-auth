@@ -10,6 +10,8 @@ const NOT_ON_SERVER: &str = "not available on server";
 /// Browser-only helpers shared by the backends.
 #[cfg(not(feature = "ssr"))]
 mod browser;
+/// The input and returned-event contract every signing path shares.
+mod event_contract;
 /// NIP-07 browser extension backend.
 mod nip07;
 /// NIP-46 remote signer (bunker) backend.
@@ -36,16 +38,14 @@ pub use passkey::PasskeySession;
 pub use raw_key::RawKeySession;
 pub use read_only::ReadOnlyHandle;
 
-use nostr::event::{FinalizeEvent, UnsignedEvent};
+use nostr::event::FinalizeEvent;
 use nostr::key::Keys;
 
 use crate::types::NostrAuthError;
 
 /// Sign an unsigned event given as JSON with in-memory keys.
 fn sign_with_keys(keys: &Keys, event_json: &str) -> Result<String, NostrAuthError> {
-    let unsigned: UnsignedEvent = serde_json::from_str(event_json)
-        .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
-    let signed = unsigned
+    let signed = event_contract::prepare(event_json, keys.public_key())?
         .finalize(keys)
         .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
     serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))

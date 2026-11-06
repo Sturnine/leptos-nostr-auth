@@ -124,7 +124,10 @@ impl BunkerSession {
     /// Returns an error when called with SSR features or when signing fails. Returns
     /// [`NostrAuthError::BunkerAuthRequired`] when the signer asks for approval and no modal is
     /// mounted to show the link, and [`NostrAuthError::BunkerSessionClosed`] once the session was
-    /// closed.
+    /// closed. The request and the returned event follow the contract on
+    /// [`crate::AuthResult::sign_event`]: a returned event from another key is
+    /// [`NostrAuthError::SignerKeyMismatch`], and any other refusal is
+    /// [`NostrAuthError::SigningFailed`] or [`NostrAuthError::Serialization`].
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         imp::sign_event(self, event_json).await
     }
@@ -217,13 +220,13 @@ mod imp {
     use crate::signers::browser::{
         RpcTimer, js_err_msg, make_rpc_promise, now_timestamp, random_bytes,
     };
+    use crate::signers::event_contract::{checked_event, prepare};
     use crate::signers::nip46_protocol::{
         AUTH_URL_TIMEOUT_SECS, AttemptLog, BunkerTarget, DeadlineAction, Effect, Handshake,
         HttpsUrl, Inflight, Peer, PromptList, REQUEST_BUILD_FAILED, ReconnectGate,
         ReconnectOutcome, ReconnectWaker, RpcFailure, connect_request, connect_result, event_frame,
         needs_connect, nip44_result, parse_bunker_uri, persisted_uri, public_key_result,
         request_event, request_message, rotate_to_front, signed_event_result, subscribe_frame,
-        unsigned_for_signing,
     };
     use crate::types::NostrAuthError;
 
@@ -527,12 +530,13 @@ mod imp {
         session: &BunkerSession,
         event_json: &str,
     ) -> Result<String, NostrAuthError> {
-        let unsigned = unsigned_for_signing(event_json, session.public_key)?;
-        session
-            .send_rpc(&NostrConnectRequest::SignEvent(unsigned))
+        let request = prepare(event_json, session.public_key)?;
+        let returned = session
+            .send_rpc(&NostrConnectRequest::SignEvent(request.clone()))
             .await
             .and_then(signed_event_result)
-            .map_err(RpcFailure::into_signing_error)
+            .map_err(RpcFailure::into_signing_error)?;
+        checked_event(&request, session.public_key, &returned)
     }
 
     /// NIP-46 `nip44_encrypt` over the persistent WebSocket.
