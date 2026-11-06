@@ -79,11 +79,11 @@
           commonArgs = {
             src = craneLib.cleanCargoSource ./.;
             strictDeps = true;
-            # secp256k1-sys compiles C for wasm32, which the cc-wrapper clang can't target.
             # Tests keep overflow checks and match `cargo test`.
             CARGO_PROFILE = "";
             env = {
               CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER = "wasm-bindgen-test-runner";
+              # secp256k1-sys compiles C for wasm32, which the cc-wrapper clang can't target.
               CC_wasm32_unknown_unknown = "${llvm.clang-unwrapped}/bin/clang";
               AR_wasm32_unknown_unknown = "${llvm.bintools-unwrapped}/bin/llvm-ar";
               CFLAGS_wasm32_unknown_unknown = "-isystem ${llvm.libclang.lib}/lib/clang/${clangMajor}/include";
@@ -102,6 +102,13 @@
           };
           csrArgs = commonArgs // {
             cargoExtraArgs = "--locked --target wasm32-unknown-unknown --features csr";
+            doCheck = false;
+          };
+          csrTachysSsrArgs = commonArgs // {
+            cargoExtraArgs = "--locked --features csr,insecure_nsec_input,leptos/ssr";
+            env = commonArgs.env // {
+              CARGO_PROFILE_DEV_OPT_LEVEL = "0";
+            };
             doCheck = false;
           };
           withNsec = args: args // { cargoExtraArgs = args.cargoExtraArgs + ",insecure_nsec_input"; };
@@ -182,6 +189,11 @@
                   pkgs.nodejs
                 ];
               }
+            );
+
+            # The depth overflow appears only at codegen; check and clippy miss it.
+            build-csr-tachys-ssr = craneLib.cargoBuild (
+              csrTachysSsrArgs // leaf // { cargoArtifacts = craneLib.buildDepsOnly csrTachysSsrArgs; }
             );
 
             example-basic-csr = mkExample "basic-csr" "--locked --target wasm32-unknown-unknown";
