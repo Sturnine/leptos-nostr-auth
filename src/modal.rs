@@ -11,19 +11,12 @@
 )]
 use leptos::portal::Portal;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_use_event_listener::use_event_listener;
 use leptos_use_window::use_window;
 
-#[cfg(not(feature = "ssr"))]
-use wasm_bindgen_futures::spawn_local;
-
 use crate::platform::{Os, Platform};
-#[cfg(not(feature = "ssr"))]
-use crate::signers::{BunkerSession, Nip07Handle, PasskeySession};
-// RawKeySession: used in spawn_local (non-ssr) and in StepRawNsec sync code (insecure_nsec_input)
-#[cfg(any(not(feature = "ssr"), feature = "insecure_nsec_input"))]
-use crate::signers::RawKeySession;
-use crate::signers::ReadOnlyHandle;
+use crate::signers::{BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle};
 use crate::types::{AuthResult, LoginMethod, NostrAuthConfig};
 
 /// Which form is currently shown inside the modal.
@@ -139,7 +132,7 @@ pub fn NostrAuthModal(
 
     view! {
         <Portal>
-            <Show when=move || open.get() fallback=|| ()>
+            <Show when=move || open.get()>
                 // Backdrop
                 <div
                     data-nostr-backdrop=""
@@ -221,7 +214,7 @@ pub fn NostrAuthModal(
                         </div>
 
                         // Error display
-                        <Show when=move || error.get().is_some() fallback=|| ()>
+                        <Show when=move || error.get().is_some()>
                             <div
                                 role="alert"
                                 data-nostr-error=""
@@ -252,7 +245,7 @@ fn ModalHeader(
             data-nostr-modal-header=""
         >
             <div>
-                <Show when=show_back fallback=|| ()>
+                <Show when=show_back>
                     <button
                         aria-label="Back to login methods"
                         data-nostr-back=""
@@ -303,9 +296,25 @@ fn StepMethodSelect(
     let show_readonly = has(&LoginMethod::ReadOnly);
     let show_ncryptsec = has(&LoginMethod::Ncryptsec);
     #[cfg(feature = "insecure_nsec_input")]
-    let show_nsec = has(&LoginMethod::RawNsec);
+    let advanced = has(&LoginMethod::RawNsec).then(|| {
+        view! {
+            <details data-nostr-advanced="">
+                <summary>
+                    "Advanced"
+                </summary>
+                <div>
+                    <MethodButton
+                        icon=icon_warning
+                        title="Secret Key"
+                        subtitle="⚠️ Paste nsec — not recommended for web use"
+                        on_click=move || set_step.set(ModalStep::RawNsecWarn)
+                    />
+                </div>
+            </details>
+        }
+    });
     #[cfg(not(feature = "insecure_nsec_input"))]
-    let show_nsec = false;
+    let advanced = ();
 
     // Reactive closures: re-evaluate when platform signal changes after hydration
     let show_passkey = move || platform.get().supports_webauthn && passkey_allowed;
@@ -314,7 +323,7 @@ fn StepMethodSelect(
         <div data-nostr-methods="">
 
             // ── Apple: passkey first ──────────────────────────────────────────
-            <Show when=move || matches!(platform.get().os, Os::Apple) && show_passkey() fallback=|| ()>
+            <Show when=move || matches!(platform.get().os, Os::Apple) && show_passkey()>
                 <MethodButton
                     icon=icon_passkey
                     title="Passkey"
@@ -324,58 +333,45 @@ fn StepMethodSelect(
                 />
             </Show>
 
-            // ── Extension: non-Apple (badge = Recommended) ───────────────────
-            // Two separate Shows so the badge value is stable per variant.
-            <Show when=move || { let p = platform.get(); !matches!(p.os, Os::Apple) && p.has_nostr_extension && extension_allowed } fallback=|| ()>
+            // ── Browser extension ─────────────────────────────────────────────
+            <Show when=move || platform.get().has_nostr_extension && extension_allowed>
                 <MethodButton
                     icon=icon_extension
                     title="Browser Extension"
                     subtitle="Alby, nos2x, Nostr KeyX, and more"
-                    badge=Some("Recommended")
-                    on_click=move || set_step.set(ModalStep::Extension)
-                />
-            </Show>
-
-            // ── Extension: Apple (no badge) ───────────────────────────────────
-            <Show when=move || { let p = platform.get(); matches!(p.os, Os::Apple) && p.has_nostr_extension && extension_allowed } fallback=|| ()>
-                <MethodButton
-                    icon=icon_extension
-                    title="Browser Extension"
-                    subtitle="Alby, nos2x, Nostr KeyX, and more"
-                    badge=None
+                    badge=Signal::derive(move || {
+                        (!matches!(platform.get().os, Os::Apple)).then_some("Recommended")
+                    })
                     on_click=move || set_step.set(ModalStep::Extension)
                 />
             </Show>
 
             // ── Android: Amber hint before generic bunker ─────────────────────
-            <Show when=move || matches!(platform.get().os, Os::Android) && show_bunker fallback=|| ()>
+            <Show when=move || matches!(platform.get().os, Os::Android) && show_bunker>
                 <MethodButton
                     icon=icon_amber
                     title="Amber"
                     subtitle="Open in Amber signer app via NIP-46"
-                    badge=None
                     on_click=move || set_step.set(ModalStep::Bunker)
                 />
             </Show>
 
             // ── Nostr Connect (Bunker) ────────────────────────────────────────
-            <Show when=move || show_bunker fallback=|| ()>
+            <Show when=move || show_bunker>
                 <MethodButton
                     icon=icon_bunker
                     title="Nostr Connect"
                     subtitle="Paste a bunker:// URI from nsecBunker or Amber"
-                    badge=None
                     on_click=move || set_step.set(ModalStep::Bunker)
                 />
             </Show>
 
             // ── Non-Apple: passkey after bunker ───────────────────────────────
-            <Show when=move || !matches!(platform.get().os, Os::Apple) && show_passkey() fallback=|| ()>
+            <Show when=move || !matches!(platform.get().os, Os::Apple) && show_passkey()>
                 <MethodButton
                     icon=icon_passkey
                     title="Passkey"
                     subtitle="Windows Hello · Android biometric"
-                    badge=None
                     on_click=move || set_step.set(ModalStep::Passkey)
                 />
             </Show>
@@ -386,55 +382,27 @@ fn StepMethodSelect(
             </div>
 
             // ── ncryptsec (NIP-49) ────────────────────────────────────────────
-            <Show when=move || show_ncryptsec fallback=|| ()>
+            <Show when=move || show_ncryptsec>
                 <MethodButton
                     icon=icon_ncryptsec
                     title="Encrypted Key"
                     subtitle="Decrypt an ncryptsec1... key with your password"
-                    badge=None
                     on_click=move || set_step.set(ModalStep::Ncryptsec)
                 />
             </Show>
 
             // ── Read-Only ─────────────────────────────────────────────────────
-            <Show when=move || show_readonly fallback=|| ()>
+            <Show when=move || show_readonly>
                 <MethodButton
                     icon=icon_read_only
                     title="Read-Only"
                     subtitle="Paste an npub — browse without posting"
-                    badge=None
                     on_click=move || set_step.set(ModalStep::ReadOnly)
                 />
             </Show>
 
             // ── Raw nsec (feature-gated) ──────────────────────────────────────
-            <Show when=move || show_nsec fallback=|| ()>
-                <details data-nostr-advanced="">
-                    <summary>
-                        "Advanced"
-                    </summary>
-                    <div>
-                        {
-                            #[cfg(feature = "insecure_nsec_input")]
-                            {
-                                view! {
-                                    <MethodButton
-                                        icon=icon_warning
-                                        title="Secret Key"
-                                        subtitle="⚠️ Paste nsec — not recommended for web use"
-                                        badge=None
-                                        on_click=move || set_step.set(ModalStep::RawNsecWarn)
-                                    />
-                                }.into_any()
-                            }
-                            #[cfg(not(feature = "insecure_nsec_input"))]
-                            {
-                                view! { <span/> }.into_any()
-                            }
-                        }
-                    </div>
-                </details>
-            </Show>
+            {advanced}
         </div>
     }
 }
@@ -446,7 +414,7 @@ fn MethodButton(
     icon: impl IntoView + 'static,
     title: &'static str,
     subtitle: &'static str,
-    badge: Option<&'static str>,
+    #[prop(optional, into)] badge: MaybeProp<&'static str>,
     on_click: impl Fn() + 'static,
 ) -> impl IntoView {
     view! {
@@ -463,7 +431,7 @@ fn MethodButton(
                     data-nostr-method-title=""
                 >
                     {title}
-                    {badge.map(|b| view! {
+                    {move || badge.get().map(|b| view! {
                         <span
                             data-nostr-badge=""
                         >
@@ -521,14 +489,10 @@ fn StepExtension(
     let (loading, set_loading) = signal(true);
     let (done, set_done) = signal(false);
 
-    #[cfg(feature = "ssr")]
-    let _ = (on_auth, set_done);
-
     // Shared login attempt — called from both the mount Effect and the "Try again" button.
     let attempt = move || {
         set_error.set(None);
         set_loading.set(true);
-        #[cfg(not(feature = "ssr"))]
         spawn_local(async move {
             match Nip07Handle::get_public_key().await {
                 Ok(handle) => {
@@ -542,8 +506,6 @@ fn StepExtension(
                 }
             }
         });
-        #[cfg(feature = "ssr")]
-        set_loading.set(false);
     };
 
     // Trigger extension login immediately on mount
@@ -551,7 +513,7 @@ fn StepExtension(
 
     view! {
         <div data-nostr-step="extension">
-            <Show when=move || loading.get() fallback=|| ()>
+            <Show when=move || loading.get()>
                 <span
                     aria-label="Waiting for extension…"
                     aria-live="polite"
@@ -561,7 +523,7 @@ fn StepExtension(
                     "Waiting for extension approval…"
                 </p>
             </Show>
-            <Show when=move || !loading.get() && !done.get() fallback=|| ()>
+            <Show when=move || !loading.get() && !done.get()>
                 <button
                     on:click=move |_| attempt()
                 >
@@ -590,9 +552,6 @@ fn StepBunker(
     let (loading, set_loading) = signal(false);
     let timeout = config.bunker_timeout_secs;
 
-    #[cfg(feature = "ssr")]
-    let _ = (on_auth, timeout);
-
     let connect = move || {
         let uri_val = uri.get().trim().to_owned();
         if uri_val.is_empty() {
@@ -601,7 +560,6 @@ fn StepBunker(
         }
         set_error.set(None);
         set_loading.set(true);
-        #[cfg(not(feature = "ssr"))]
         spawn_local(async move {
             match BunkerSession::connect(&uri_val, timeout).await {
                 Ok(session) => {
@@ -614,8 +572,6 @@ fn StepBunker(
                 }
             }
         });
-        #[cfg(feature = "ssr")]
-        set_loading.set(false);
     };
 
     view! {
@@ -629,7 +585,7 @@ fn StepBunker(
             </p>
 
             // Amber tip — Android only
-            <Show when=move || matches!(platform.get().os, Os::Android) fallback=|| ()>
+            <Show when=move || matches!(platform.get().os, Os::Android)>
                 <div
                     data-nostr-tip=""
                 >
@@ -677,9 +633,6 @@ fn StepPasskey(
     let rp_id = StoredValue::new(config.rp_id);
     let rp_name = StoredValue::new(config.rp_name);
 
-    #[cfg(feature = "ssr")]
-    let _ = (on_auth, rp_id, rp_name);
-
     view! {
         <div data-nostr-step="passkey">
             <Show when=move || sub_step.get() == PasskeySubStep::Choose fallback=move || view! {
@@ -703,31 +656,26 @@ fn StepPasskey(
                     on:click=move |_| {
                         set_sub_step.set(PasskeySubStep::Loading);
                         set_error.set(None);
-                        #[cfg(not(feature = "ssr"))]
-                        {
-                            let rp = rp_id
-                                .get_value()
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or_else(|| {
-                                    web_sys::window()
-                                        .and_then(|w| w.location().hostname().ok())
-                                        .unwrap_or_else(|| "localhost".into())
-                                });
-                            let rp_name_val = rp_name.get_value();
-                            spawn_local(async move {
-                                match PasskeySession::create(&rp, &rp_name_val).await {
-                                    Ok(session) => {
-                                        on_auth.run(AuthResult::Passkey(session));
-                                    }
-                                    Err(e) => {
-                                        set_error.set(Some(e.to_string()));
-                                        set_sub_step.set(PasskeySubStep::Choose);
-                                    }
-                                }
+                        let rp = rp_id
+                            .get_value()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| {
+                                web_sys::window()
+                                    .and_then(|w| w.location().hostname().ok())
+                                    .unwrap_or_else(|| "localhost".into())
                             });
-                        }
-                        #[cfg(feature = "ssr")]
-                        set_sub_step.set(PasskeySubStep::Choose);
+                        let rp_name_val = rp_name.get_value();
+                        spawn_local(async move {
+                            match PasskeySession::create(&rp, &rp_name_val).await {
+                                Ok(session) => {
+                                    on_auth.run(AuthResult::Passkey(session));
+                                }
+                                Err(e) => {
+                                    set_error.set(Some(e.to_string()));
+                                    set_sub_step.set(PasskeySubStep::Choose);
+                                }
+                            }
+                        });
                     }
                 >
                     "Create new Nostr identity"
@@ -737,7 +685,6 @@ fn StepPasskey(
                     on:click=move |_| {
                         set_sub_step.set(PasskeySubStep::Loading);
                         set_error.set(None);
-                        #[cfg(not(feature = "ssr"))]
                         spawn_local(async move {
                             // None → discoverable login: browser presents all stored passkeys
                             match PasskeySession::authenticate(None).await {
@@ -750,8 +697,6 @@ fn StepPasskey(
                                 }
                             }
                         });
-                        #[cfg(feature = "ssr")]
-                        set_sub_step.set(PasskeySubStep::Choose);
                     }
                 >
                     "I already have a Nostr passkey — restore it"
@@ -821,9 +766,6 @@ fn StepNcryptsec(
     let (password, set_password) = signal(String::new());
     let (loading, set_loading) = signal(false);
 
-    #[cfg(feature = "ssr")]
-    let _ = on_auth;
-
     let decrypt = move || {
         let nc = ncryptsec.get().trim().to_owned();
         let pw = password.get();
@@ -838,7 +780,6 @@ fn StepNcryptsec(
         set_error.set(None);
         set_loading.set(true);
         // scrypt is CPU-intensive — run in spawn_local so the spinner renders first
-        #[cfg(not(feature = "ssr"))]
         spawn_local(async move {
             // Yield one frame so the spinner renders before scrypt blocks the thread.
             #[expect(
@@ -863,8 +804,6 @@ fn StepNcryptsec(
                 }
             }
         });
-        #[cfg(feature = "ssr")]
-        set_loading.set(false);
     };
 
     view! {
