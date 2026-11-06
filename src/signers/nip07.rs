@@ -1,27 +1,6 @@
 use nostr::key::PublicKey;
-#[cfg(not(feature = "ssr"))]
-use wasm_bindgen::prelude::*;
 
-#[cfg(not(feature = "ssr"))]
-use super::browser::js_err_msg;
 use crate::types::NostrAuthError;
-
-// JS bindings for window.nostr (NIP-07) — WASM-only
-#[cfg(not(feature = "ssr"))]
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = ["window", "nostr"], js_name = getPublicKey, catch)]
-    async fn nostr_get_public_key() -> Result<JsValue, JsValue>;
-
-    #[wasm_bindgen(js_namespace = ["window", "nostr"], js_name = signEvent, catch)]
-    async fn nostr_sign_event(event: JsValue) -> Result<JsValue, JsValue>;
-
-    #[wasm_bindgen(js_namespace = ["window", "nostr", "nip44"], js_name = encrypt, catch)]
-    async fn nostr_nip44_encrypt(pubkey: &str, plaintext: &str) -> Result<JsValue, JsValue>;
-
-    #[wasm_bindgen(js_namespace = ["window", "nostr", "nip44"], js_name = decrypt, catch)]
-    async fn nostr_nip44_decrypt(pubkey: &str, ciphertext: &str) -> Result<JsValue, JsValue>;
-}
 
 /// Handle to an authenticated NIP-07 browser extension session.
 #[derive(Clone)]
@@ -38,21 +17,7 @@ impl Nip07Handle {
     ///
     /// Returns an error when called with SSR features or when getting the public key fails.
     pub async fn get_public_key() -> Result<Self, NostrAuthError> {
-        #[cfg(feature = "ssr")]
-        return Err(NostrAuthError::ExtensionNotFound);
-
-        #[cfg(not(feature = "ssr"))]
-        {
-            let js_pk = nostr_get_public_key()
-                .await
-                .map_err(|e| NostrAuthError::ExtensionRejected(js_err_msg(&e)))?;
-            let hex = js_pk.as_string().ok_or_else(|| {
-                NostrAuthError::ExtensionRejected("expected string pubkey".into())
-            })?;
-            let pk = PublicKey::from_hex(&hex)
-                .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
-            Ok(Self { public_key: pk })
-        }
+        imp::get_public_key().await
     }
 
     /// Sign a Nostr event via the extension.
@@ -61,31 +26,7 @@ impl Nip07Handle {
     ///
     /// Returns an error when called with SSR features or when signing fails.
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
-        #[cfg(feature = "ssr")]
-        {
-            let _ = event_json;
-            Err(NostrAuthError::SigningFailed(
-                "not available on server".into(),
-            ))
-        }
-
-        #[cfg(not(feature = "ssr"))]
-        {
-            let event_val = js_sys::JSON::parse(event_json).map_err(|e| {
-                NostrAuthError::SigningFailed(format!("invalid event JSON: {}", js_err_msg(&e)))
-            })?;
-            let signed = nostr_sign_event(event_val)
-                .await
-                .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?;
-            js_sys::JSON::stringify(&signed)
-                .map(|s| s.as_string().unwrap_or_default())
-                .map_err(|e| {
-                    NostrAuthError::SigningFailed(format!(
-                        "could not stringify signed event: {}",
-                        js_err_msg(&e)
-                    ))
-                })
-        }
+        imp::sign_event(event_json).await
     }
 
     /// NIP-44 encrypt via extension.
@@ -98,22 +39,7 @@ impl Nip07Handle {
         recipient_hex: &str,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
-        #[cfg(feature = "ssr")]
-        {
-            let _ = (recipient_hex, plaintext);
-            Err(NostrAuthError::SigningFailed(
-                "not available on server".into(),
-            ))
-        }
-
-        #[cfg(not(feature = "ssr"))]
-        {
-            nostr_nip44_encrypt(recipient_hex, plaintext)
-                .await
-                .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?
-                .as_string()
-                .ok_or_else(|| NostrAuthError::SigningFailed("expected string ciphertext".into()))
-        }
+        imp::nip44_encrypt(recipient_hex, plaintext).await
     }
 
     /// NIP-44 decrypt via extension.
@@ -126,22 +52,123 @@ impl Nip07Handle {
         sender_hex: &str,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
-        #[cfg(feature = "ssr")]
-        {
-            let _ = (sender_hex, ciphertext);
-            Err(NostrAuthError::SigningFailed(
-                "not available on server".into(),
-            ))
-        }
+        imp::nip44_decrypt(sender_hex, ciphertext).await
+    }
+}
 
-        #[cfg(not(feature = "ssr"))]
-        {
-            nostr_nip44_decrypt(sender_hex, ciphertext)
-                .await
-                .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?
-                .as_string()
-                .ok_or_else(|| NostrAuthError::SigningFailed("expected string plaintext".into()))
-        }
+/// Browser implementation.
+#[cfg(not(feature = "ssr"))]
+mod imp {
+    use nostr::key::PublicKey;
+    use wasm_bindgen::prelude::*;
+
+    use super::Nip07Handle;
+    use crate::signers::browser::js_err_msg;
+    use crate::types::NostrAuthError;
+
+    // JS bindings for window.nostr (NIP-07) — WASM-only
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = ["window", "nostr"], js_name = getPublicKey, catch)]
+        async fn nostr_get_public_key() -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(js_namespace = ["window", "nostr"], js_name = signEvent, catch)]
+        async fn nostr_sign_event(event: JsValue) -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(js_namespace = ["window", "nostr", "nip44"], js_name = encrypt, catch)]
+        async fn nostr_nip44_encrypt(pubkey: &str, plaintext: &str) -> Result<JsValue, JsValue>;
+
+        #[wasm_bindgen(js_namespace = ["window", "nostr", "nip44"], js_name = decrypt, catch)]
+        async fn nostr_nip44_decrypt(pubkey: &str, ciphertext: &str) -> Result<JsValue, JsValue>;
+    }
+
+    /// Request the public key from the extension.
+    pub(super) async fn get_public_key() -> Result<Nip07Handle, NostrAuthError> {
+        let js_pk = nostr_get_public_key()
+            .await
+            .map_err(|e| NostrAuthError::ExtensionRejected(js_err_msg(&e)))?;
+        let hex = js_pk
+            .as_string()
+            .ok_or_else(|| NostrAuthError::ExtensionRejected("expected string pubkey".into()))?;
+        let pk = PublicKey::from_hex(&hex)
+            .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
+        Ok(Nip07Handle { public_key: pk })
+    }
+
+    /// Sign an event through the extension.
+    pub(super) async fn sign_event(event_json: &str) -> Result<String, NostrAuthError> {
+        let event_val = js_sys::JSON::parse(event_json).map_err(|e| {
+            NostrAuthError::SigningFailed(format!("invalid event JSON: {}", js_err_msg(&e)))
+        })?;
+        let signed = nostr_sign_event(event_val)
+            .await
+            .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?;
+        js_sys::JSON::stringify(&signed)
+            .map(|s| s.as_string().unwrap_or_default())
+            .map_err(|e| {
+                NostrAuthError::SigningFailed(format!(
+                    "could not stringify signed event: {}",
+                    js_err_msg(&e)
+                ))
+            })
+    }
+
+    /// NIP-44 encrypt through the extension.
+    pub(super) async fn nip44_encrypt(
+        recipient_hex: &str,
+        plaintext: &str,
+    ) -> Result<String, NostrAuthError> {
+        nostr_nip44_encrypt(recipient_hex, plaintext)
+            .await
+            .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?
+            .as_string()
+            .ok_or_else(|| NostrAuthError::SigningFailed("expected string ciphertext".into()))
+    }
+
+    /// NIP-44 decrypt through the extension.
+    pub(super) async fn nip44_decrypt(
+        sender_hex: &str,
+        ciphertext: &str,
+    ) -> Result<String, NostrAuthError> {
+        nostr_nip44_decrypt(sender_hex, ciphertext)
+            .await
+            .map_err(|e| NostrAuthError::SigningFailed(js_err_msg(&e)))?
+            .as_string()
+            .ok_or_else(|| NostrAuthError::SigningFailed("expected string plaintext".into()))
+    }
+}
+
+/// Server stubs.
+#[cfg(feature = "ssr")]
+mod imp {
+    use super::Nip07Handle;
+    use crate::signers::NOT_ON_SERVER;
+    use crate::types::NostrAuthError;
+
+    /// Server stub for `get_public_key`.
+    pub(super) async fn get_public_key() -> Result<Nip07Handle, NostrAuthError> {
+        Err(NostrAuthError::ExtensionNotFound)
+    }
+
+    /// Server stub for `sign_event`.
+    pub(super) async fn sign_event(_event_json: &str) -> Result<String, NostrAuthError> {
+        Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
+    }
+
+    /// Server stub for `nip44_encrypt`.
+    pub(super) async fn nip44_encrypt(
+        _recipient_hex: &str,
+        _plaintext: &str,
+    ) -> Result<String, NostrAuthError> {
+        Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
+    }
+
+    /// Server stub for `nip44_decrypt`.
+    pub(super) async fn nip44_decrypt(
+        _sender_hex: &str,
+        _ciphertext: &str,
+    ) -> Result<String, NostrAuthError> {
+        Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
     }
 }
 

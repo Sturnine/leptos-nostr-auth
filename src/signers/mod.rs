@@ -1,3 +1,12 @@
+// A public browser method is a facade plus two `imp` fns, one per `feature = "ssr"` cfg, and the
+// facade keeps server futures `Send`. Above `signers/` nothing is gated on `ssr`: handlers and
+// Effects never run on the server, and the stubs make them compile. Pure logic that only the
+// browser path calls belongs in `imp`, or it is dead code under `ssr`.
+
+/// Message returned by every server stub.
+#[cfg(feature = "ssr")]
+const NOT_ON_SERVER: &str = "not available on server";
+
 /// Browser-only helpers shared by the backends.
 #[cfg(not(feature = "ssr"))]
 mod browser;
