@@ -14,7 +14,7 @@ use crate::types::{NostrAuthError, PersistedSession};
 pub async fn restore_session(
     session: &PersistedSession,
     bunker_timeout_secs: u32,
-) -> Result<crate::signers::AuthResult, NostrAuthError> {
+) -> Result<crate::types::AuthResult, NostrAuthError> {
     #[cfg(feature = "ssr")]
     {
         let _ = (session, bunker_timeout_secs);
@@ -38,7 +38,7 @@ pub async fn restore_session(
                         "Extension returned a different public key than the stored session".into(),
                     ));
                 }
-                Ok(crate::signers::AuthResult::Extension(handle))
+                Ok(crate::types::AuthResult::Extension(handle))
             }
             PersistedMethod::Bunker => {
                 let uri = session
@@ -60,7 +60,7 @@ pub async fn restore_session(
                         "Bunker returned a different public key than the stored session".into(),
                     ));
                 }
-                Ok(crate::signers::AuthResult::Bunker(Box::new(session)))
+                Ok(crate::types::AuthResult::Bunker(Box::new(session)))
             }
             PersistedMethod::Passkey => {
                 let cred_id_b64 = session.passkey_credential_id.as_deref().ok_or_else(|| {
@@ -77,9 +77,9 @@ pub async fn restore_session(
                         "Passkey derived a different public key than the stored session".into(),
                     ));
                 }
-                Ok(crate::signers::AuthResult::Passkey(ps))
+                Ok(crate::types::AuthResult::Passkey(ps))
             }
-            PersistedMethod::ReadOnly => Ok(crate::signers::AuthResult::ReadOnly(
+            PersistedMethod::ReadOnly => Ok(crate::types::AuthResult::ReadOnly(
                 crate::signers::ReadOnlyHandle {
                     public_key: stored_pk,
                 },

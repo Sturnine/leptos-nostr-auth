@@ -23,8 +23,8 @@ use crate::signers::{BunkerSession, Nip07Handle, PasskeySession};
 // RawKeySession: used in spawn_local (non-ssr) and in StepRawNsec sync code (insecure_nsec_input)
 #[cfg(any(not(feature = "ssr"), feature = "insecure_nsec_input"))]
 use crate::signers::RawKeySession;
-use crate::signers::{AuthResult, ReadOnlyHandle};
-use crate::types::{LoginMethod, NostrAuthConfig};
+use crate::signers::ReadOnlyHandle;
+use crate::types::{AuthResult, LoginMethod, NostrAuthConfig};
 
 /// Which form is currently shown inside the modal.
 #[derive(Clone, PartialEq)]

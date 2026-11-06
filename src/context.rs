@@ -8,8 +8,7 @@ use leptos_use_storage::use_local_storage;
 use nostr::nips::nip19::ToBech32;
 
 use crate::modal::NostrAuthModal;
-use crate::signers::AuthResult;
-use crate::types::{NostrAuthConfig, PersistedSession};
+use crate::types::{AuthResult, NostrAuthConfig, PersistedSession};
 
 #[cfg(not(feature = "ssr"))]
 use wasm_bindgen_futures::spawn_local;
