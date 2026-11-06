@@ -1,5 +1,7 @@
+use core::cell::RefCell;
 use core::fmt;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use nostr::event::{Event, EventId, FinalizeEvent, Kind, Tag, UnsignedEvent};
 use nostr::filter::Filter;
@@ -37,6 +39,8 @@ const UNEXPECTED_RESULT: &str = "remote signer sent an unexpected result";
 const REFUSED_AUTH_URL: &str = "remote signer sent an approval link that is not a safe https URL";
 /// Fixed text for a request that could not be built.
 pub(super) const REQUEST_BUILD_FAILED: &str = "could not build the request";
+/// Fixed text for a caller whose reconnect was led by a future that got dropped.
+const RECONNECT_CANCELLED: &str = "reconnect cancelled";
 
 /// What a `bunker://` URI names.
 pub(super) struct BunkerTarget {
@@ -524,6 +528,75 @@ pub(super) enum Effect<W> {
     },
     /// Close the socket, so the next call resubscribes.
     CloseSocket,
+}
+
+/// How a reconnect ended. Passed by value, so no error text has to survive a trip through JS.
+pub(super) type ReconnectOutcome = Result<(), NostrAuthError>;
+
+/// Wakes a caller waiting on someone else's reconnect.
+pub(super) trait ReconnectWaker {
+    /// Hand over the outcome and wake the caller.
+    fn wake(self, outcome: ReconnectOutcome);
+}
+
+/// Serializes reconnects: the first caller leads, and the rest wait for its outcome.
+pub(super) struct ReconnectGate<W> {
+    /// `None` when no reconnect is running.
+    followers: RefCell<Option<Vec<W>>>,
+}
+
+impl<W> Default for ReconnectGate<W> {
+    fn default() -> Self {
+        Self {
+            followers: RefCell::new(None),
+        }
+    }
+}
+
+impl<W: ReconnectWaker> ReconnectGate<W> {
+    /// Lead on an idle gate, dropping `waker`. Otherwise register `waker` and return `None`.
+    pub(super) fn join(self: &Rc<Self>, waker: W) -> Option<ReconnectLead<W>> {
+        let mut followers = self.followers.borrow_mut();
+        if let Some(waiting) = followers.as_mut() {
+            waiting.push(waker);
+            return None;
+        }
+        *followers = Some(Vec::new());
+        Some(ReconnectLead {
+            gate: Rc::clone(self),
+            outcome: None,
+        })
+    }
+}
+
+/// The running reconnect. Dropping it reopens the gate and wakes the followers, including when the
+/// leader's future is dropped, which runs no exit code.
+pub(super) struct ReconnectLead<W: ReconnectWaker> {
+    /// The gate this reconnect holds.
+    gate: Rc<ReconnectGate<W>>,
+    /// Set by `finish`.
+    outcome: Option<ReconnectOutcome>,
+}
+
+impl<W: ReconnectWaker> ReconnectLead<W> {
+    /// End the reconnect with `outcome`.
+    pub(super) fn finish(mut self, outcome: ReconnectOutcome) {
+        self.outcome = Some(outcome);
+    }
+}
+
+impl<W: ReconnectWaker> Drop for ReconnectLead<W> {
+    fn drop(&mut self) {
+        let followers = self.gate.followers.borrow_mut().take().unwrap_or_default();
+        let outcome = self.outcome.take().unwrap_or_else(|| {
+            Err(NostrAuthError::BunkerConnectionFailed(
+                RECONNECT_CANCELLED.to_owned(),
+            ))
+        });
+        for follower in followers {
+            follower.wake(outcome.clone());
+        }
+    }
 }
 
 /// What to do when a request's timer fires.
@@ -1938,6 +2011,112 @@ mod tests {
         ));
         let signer = RpcFailure::Signer("denied".into()).into_signing_error();
         assert_eq!(signer.to_string(), "Bunker connection failed: denied");
+    }
+
+    /// Records its outcome, and can rejoin the gate from inside `wake`.
+    struct TestWaker {
+        seen: Rc<RefCell<Vec<ReconnectOutcome>>>,
+        rejoin: Option<Rc<ReconnectGate<Self>>>,
+    }
+
+    impl ReconnectWaker for TestWaker {
+        fn wake(self, outcome: ReconnectOutcome) {
+            self.seen.borrow_mut().push(outcome);
+            if let Some(gate) = self.rejoin {
+                let lead = gate.join(Self {
+                    seen: Rc::clone(&self.seen),
+                    rejoin: None,
+                });
+                assert!(lead.is_some());
+            }
+        }
+    }
+
+    type Seen = Rc<RefCell<Vec<ReconnectOutcome>>>;
+
+    fn gate_fixture() -> (Rc<ReconnectGate<TestWaker>>, Seen) {
+        (Rc::default(), Rc::default())
+    }
+
+    fn follower(seen: &Seen) -> TestWaker {
+        TestWaker {
+            seen: Rc::clone(seen),
+            rejoin: None,
+        }
+    }
+
+    #[test]
+    fn dropped_lead_wakes_followers_and_clears_gate() {
+        let (gate, seen) = gate_fixture();
+        let lead = gate.join(follower(&seen)).unwrap();
+        assert!(gate.join(follower(&seen)).is_none());
+        assert!(gate.join(follower(&seen)).is_none());
+        drop(lead);
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 2);
+        for outcome in seen.iter() {
+            let Err(NostrAuthError::BunkerConnectionFailed(text)) = outcome else {
+                unreachable!("expected a connection failure");
+            };
+            assert_eq!(text, "reconnect cancelled");
+        }
+        drop(seen);
+        assert!(gate.join(follower(&Seen::default())).is_some());
+    }
+
+    #[test]
+    fn finished_lead_passes_error_by_value() {
+        for error in [
+            NostrAuthError::BunkerTimeout,
+            NostrAuthError::BunkerAuthRequired,
+            NostrAuthError::BunkerConnectionFailed("x".into()),
+        ] {
+            let (gate, seen) = gate_fixture();
+            let lead = gate.join(follower(&seen)).unwrap();
+            assert!(gate.join(follower(&seen)).is_none());
+            lead.finish(Err(error.clone()));
+            let seen = seen.borrow();
+            let Some(Err(got)) = seen.first() else {
+                unreachable!("expected one failure");
+            };
+            assert_eq!(
+                core::mem::discriminant(got),
+                core::mem::discriminant(&error)
+            );
+            assert_eq!(got.to_string(), error.to_string());
+            assert!(got.to_string().matches("Bunker connection failed:").count() <= 1);
+        }
+    }
+
+    #[test]
+    fn finished_lead_passes_ok() {
+        let (gate, seen) = gate_fixture();
+        let lead = gate.join(follower(&seen)).unwrap();
+        assert!(gate.join(follower(&seen)).is_none());
+        lead.finish(Ok(()));
+        assert!(matches!(seen.borrow().as_slice(), [Ok(())]));
+    }
+
+    #[test]
+    fn second_join_follows() {
+        let (gate, seen) = gate_fixture();
+        let lead = gate.join(follower(&seen));
+        assert!(lead.is_some());
+        assert!(gate.join(follower(&seen)).is_none());
+        assert!(seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn wake_may_rejoin_the_gate() {
+        let (gate, seen) = gate_fixture();
+        let lead = gate.join(follower(&seen)).unwrap();
+        let rejoining = TestWaker {
+            seen: Rc::clone(&seen),
+            rejoin: Some(Rc::clone(&gate)),
+        };
+        assert!(gate.join(rejoining).is_none());
+        lead.finish(Ok(()));
+        assert_eq!(seen.borrow().len(), 1);
     }
 
     #[test]
