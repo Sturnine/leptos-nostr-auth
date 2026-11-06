@@ -136,12 +136,49 @@ impl BunkerSession {
     }
 }
 
+/// The approval link on show, if any. A tracked read, so modal closures react.
+#[cfg_attr(
+    feature = "ssr",
+    expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
+)]
+pub fn current_auth_url() -> Option<String> {
+    imp::current_auth_url()
+}
+
+/// Stop showing the current approval link. Its request continues until its deadline.
+#[cfg_attr(
+    feature = "ssr",
+    expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
+)]
+pub fn dismiss_auth_prompt() {
+    imp::dismiss_auth_prompt();
+}
+
+/// Record a mounted `NostrAuthModal`, which can show approval links.
+#[cfg_attr(
+    feature = "ssr",
+    expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
+)]
+pub fn register_auth_presenter() {
+    imp::register_auth_presenter();
+}
+
+/// Record an unmounted `NostrAuthModal`.
+#[cfg_attr(
+    feature = "ssr",
+    expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
+)]
+pub fn unregister_auth_presenter() {
+    imp::unregister_auth_presenter();
+}
+
 /// Browser implementation.
 #[cfg(not(feature = "ssr"))]
 mod imp {
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
     use core::fmt::Write;
     use js_sys::{Array, Promise};
+    use leptos::prelude::{ArcRwSignal, Read, Update, WithUntracked};
     use nostr::key::{Keys, PublicKey, SecretKey};
     use nostr::nips::nip46::{NostrConnectRequest, ResponseResult};
     use nostr::types::RelayUrl;
@@ -156,12 +193,62 @@ mod imp {
     };
     use crate::signers::nip46_protocol::{
         AUTH_URL_TIMEOUT_SECS, AttemptLog, BunkerTarget, DeadlineAction, Effect, Handshake,
-        Inflight, Peer, REQUEST_BUILD_FAILED, RpcFailure, connect_request, connect_result,
-        event_frame, needs_connect, nip44_result, parse_bunker_uri, persisted_uri,
+        HttpsUrl, Inflight, Peer, PromptList, REQUEST_BUILD_FAILED, RpcFailure, connect_request,
+        connect_result, event_frame, needs_connect, nip44_result, parse_bunker_uri, persisted_uri,
         public_key_result, request_event, request_message, rotate_to_front, signed_event_result,
         subscribe_frame, unsigned_for_signing,
     };
     use crate::types::NostrAuthError;
+
+    thread_local! {
+        /// Global because challenges often arrive at `sign_event` and at restore, with the modal
+        /// closed, and threading a handle there would change public signatures. A tab is one
+        /// thread and one user.
+        static PROMPTS: ArcRwSignal<PromptList> = ArcRwSignal::new(PromptList::default());
+        /// Mounted `NostrAuthModal`s.
+        static PRESENTERS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// See the facade.
+    pub(super) fn current_auth_url() -> Option<String> {
+        PROMPTS.with(|prompts| prompts.read().current().map(str::to_owned))
+    }
+
+    /// See the facade.
+    pub(super) fn dismiss_auth_prompt() {
+        PROMPTS.with(|prompts| prompts.update(PromptList::remove_current));
+    }
+
+    /// See the facade.
+    pub(super) fn register_auth_presenter() {
+        PRESENTERS.with(|count| count.set(count.get().saturating_add(1)));
+    }
+
+    /// See the facade.
+    pub(super) fn unregister_auth_presenter() {
+        PRESENTERS.with(|count| count.set(count.get().saturating_sub(1)));
+    }
+
+    /// Whether a mounted `NostrAuthModal` can show a link.
+    fn presenter_mounted() -> bool {
+        PRESENTERS.with(Cell::get) > 0
+    }
+
+    /// Show a request's approval link.
+    pub(super) fn show_prompt(id: String, url: HttpsUrl) {
+        PROMPTS.with(|prompts| prompts.update(|list| list.upsert(id, url)));
+    }
+
+    /// Remove a request's link, notifying readers only if it had one.
+    fn remove_prompt(id: &str) {
+        PROMPTS.with(|prompts| {
+            if prompts.with_untracked(|list| list.has(id)) {
+                prompts.update(|list| {
+                    list.remove(id);
+                });
+            }
+        });
+    }
 
     /// How a settled request reaches the call awaiting it.
     type Outcome = Result<ResponseResult, RpcFailure>;
@@ -217,6 +304,7 @@ mod imp {
     impl<W> Drop for RequestGuard<W> {
         fn drop(&mut self) {
             self.inflight.borrow_mut().remove(&self.id);
+            remove_prompt(&self.id);
         }
     }
 
@@ -542,6 +630,7 @@ mod imp {
                 for effect in effects {
                     match effect {
                         Effect::Settle { waker, outcome } => waker.wake(outcome),
+                        Effect::Prompt { request_id, url } => show_prompt(request_id, url),
                         Effect::CloseSocket => {
                             if let Some(ws) = e
                                 .target()
@@ -621,11 +710,6 @@ mod imp {
         }
     }
 
-    /// Whether a mounted `NostrAuthModal` can show a link.
-    const fn presenter_mounted() -> bool {
-        false
-    }
-
     /// Generate a cryptographically random request ID using `window.crypto.getRandomValues`.
     fn generate_request_id() -> String {
         random_bytes(8).iter().fold(String::new(), |mut acc, b| {
@@ -684,13 +768,28 @@ mod imp {
     ) -> Result<String, NostrAuthError> {
         Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
     }
+
+    /// Server stub for `current_auth_url`. No state may cross requests.
+    pub(super) const fn current_auth_url() -> Option<String> {
+        None
+    }
+
+    /// Server stub for `dismiss_auth_prompt`.
+    pub(super) const fn dismiss_auth_prompt() {}
+
+    /// Server stub for `register_auth_presenter`.
+    pub(super) const fn register_auth_presenter() {}
+
+    /// Server stub for `unregister_auth_presenter`.
+    pub(super) const fn unregister_auth_presenter() {}
 }
 
 #[cfg(test)]
 #[cfg(not(feature = "ssr"))]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
-    use crate::signers::nip46_protocol::Inflight;
+    use crate::signers::nip46_protocol::{Inflight, parse_auth_url};
     use core::cell::RefCell;
     use nostr::event::EventId;
     use nostr::nips::nip46::NostrConnectMethod;
@@ -706,9 +805,15 @@ mod tests {
             (),
         );
         let guard = imp::RequestGuard::new(Rc::clone(&inflight), "a".to_owned());
+        imp::show_prompt(
+            "a".to_owned(),
+            parse_auth_url("https://s.example/a").unwrap(),
+        );
         assert!(inflight.borrow().contains("a"));
+        assert_eq!(current_auth_url().as_deref(), Some("https://s.example/a"));
         drop(guard);
         assert!(!inflight.borrow().contains("a"));
+        assert_eq!(current_auth_url(), None);
     }
 }
 
@@ -741,5 +846,13 @@ pub(super) mod server_tests {
         assert_eq!(text(ready(s.sign_event("{}"))), want);
         assert_eq!(text(ready(s.nip44_encrypt("a", "b"))), want);
         assert_eq!(text(ready(s.nip44_decrypt("a", "b"))), want);
+    }
+
+    #[test]
+    fn prompt_facades_do_nothing_on_server() {
+        register_auth_presenter();
+        dismiss_auth_prompt();
+        unregister_auth_presenter();
+        assert_eq!(current_auth_url(), None);
     }
 }

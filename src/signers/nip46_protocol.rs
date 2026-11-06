@@ -225,7 +225,49 @@ pub(super) fn event_frame(event: &Event) -> String {
 
 /// An approval link that passed every check. Only `parse_auth_url` builds one, and it has no
 /// `Debug`, because these URLs carry tokens.
-pub(super) struct HttpsUrl(#[expect(dead_code, reason = "the modal reads it")] String);
+pub(super) struct HttpsUrl(String);
+
+impl HttpsUrl {
+    /// The parsed URL, the only form ever rendered.
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Approval links on show, oldest first, keyed by request id. The newest is the one displayed, so
+/// removing it exposes the previous one.
+#[derive(Default)]
+pub(super) struct PromptList(Vec<(String, HttpsUrl)>);
+
+impl PromptList {
+    /// Show `url` for a request, replacing any link it already has.
+    pub(super) fn upsert(&mut self, id: String, url: HttpsUrl) {
+        self.remove(&id);
+        self.0.push((id, url));
+    }
+
+    /// Whether a request has a link.
+    pub(super) fn has(&self, id: &str) -> bool {
+        self.0.iter().any(|(owner, _)| owner == id)
+    }
+
+    /// Remove a request's link. Returns whether it had one.
+    pub(super) fn remove(&mut self, id: &str) -> bool {
+        let before = self.0.len();
+        self.0.retain(|(owner, _)| owner != id);
+        self.0.len() != before
+    }
+
+    /// Remove the link on show.
+    pub(super) fn remove_current(&mut self) {
+        self.0.pop();
+    }
+
+    /// The link on show.
+    pub(super) fn current(&self) -> Option<&str> {
+        self.0.last().map(|(_, url)| url.as_str())
+    }
+}
 
 /// Accept a link only if it is https with a host and no credentials. The stored form is the parsed
 /// one, never the raw string.
@@ -472,6 +514,13 @@ pub(super) enum Effect<W> {
         /// The request's result.
         outcome: Result<ResponseResult, RpcFailure>,
     },
+    /// Show an approval link. The request stays pending.
+    Prompt {
+        /// The request the link belongs to.
+        request_id: String,
+        /// The checked link.
+        url: HttpsUrl,
+    },
     /// Close the socket, so the next call resubscribes.
     CloseSocket,
 }
@@ -653,11 +702,14 @@ impl<W> Inflight<W> {
         let method = entry.method;
         let error = error.filter(|text| !text.is_empty());
         if let (Some("auth_url"), Some(url)) = (result.as_deref(), error.as_deref()) {
-            if parse_auth_url(url).is_none() {
+            let Some(url) = parse_auth_url(url) else {
                 return self.settle(id, Err(RpcFailure::Malformed(REFUSED_AUTH_URL)));
-            }
+            };
             entry.auth_seen = true;
-            return Vec::new();
+            return vec![Effect::Prompt {
+                request_id: id.to_owned(),
+                url,
+            }];
         }
         if let Some(text) = error {
             return self.settle(id, Err(RpcFailure::Signer(sanitize_remote_text(&text))));
@@ -806,6 +858,11 @@ mod tests {
         fn auth_seen(&self) -> bool {
             self.inflight.entries.get(ID).unwrap().auth_seen
         }
+
+        fn prompt_from_genuine_auth_url(mut self) -> Vec<Effect<()>> {
+            let challenge = auth_url_event(&self, TOKEN_URL);
+            self.feed(&frame(&challenge))
+        }
     }
 
     fn other_event_id() -> EventId {
@@ -866,7 +923,7 @@ mod tests {
         assert_eq!(effects.len(), 1);
         match effects.pop().unwrap() {
             Effect::Settle { outcome, .. } => outcome,
-            Effect::CloseSocket => unreachable!("expected a settle"),
+            _ => unreachable!("expected a settle"),
         }
     }
 
@@ -1398,15 +1455,81 @@ mod tests {
 
     const TOKEN_URL: &str = "https://signer.example/approve?token=SECRETTOKEN";
 
+    fn only_prompt(mut effects: Vec<Effect<()>>) -> (String, HttpsUrl) {
+        assert_eq!(effects.len(), 1);
+        match effects.pop().unwrap() {
+            Effect::Prompt { request_id, url } => (request_id, url),
+            _ => unreachable!("expected a prompt"),
+        }
+    }
+
     #[test]
     fn auth_url_keeps_the_entry_and_a_later_response_completes_it() {
         let mut fx = Fx::new(NostrConnectMethod::Connect);
         let challenge = auth_url_event(&fx, TOKEN_URL);
-        let _ = fx.feed(&frame(&challenge));
+        let (request_id, url) = only_prompt(fx.feed(&frame(&challenge)));
+        assert_eq!(request_id, ID);
+        assert_eq!(url.as_str(), TOKEN_URL);
         assert!(fx.pending());
         assert!(fx.auth_seen());
         let event = fx.response("ack");
         assert!(only_outcome(fx.feed(&frame(&event))).is_ok());
+    }
+
+    #[test]
+    fn second_auth_url_replaces_the_first() {
+        let mut fx = Fx::new(NostrConnectMethod::SignEvent);
+        let mut prompts = PromptList::default();
+        for url in [TOKEN_URL, "https://signer.example/second"] {
+            let challenge = auth_url_event(&fx, url);
+            let (id, url) = only_prompt(fx.feed(&frame(&challenge)));
+            prompts.upsert(id, url);
+        }
+        assert_eq!(prompts.current(), Some("https://signer.example/second"));
+        assert!(prompts.remove(ID));
+        assert_eq!(prompts.current(), None);
+    }
+
+    #[test]
+    fn href_is_the_parsed_form() {
+        let mut fx = Fx::new(NostrConnectMethod::Connect);
+        let challenge = auth_url_event(&fx, "HTTPS://Signer.Example/a b");
+        let (_, url) = only_prompt(fx.feed(&frame(&challenge)));
+        assert_eq!(url.as_str(), "https://signer.example/a%20b");
+    }
+
+    #[test]
+    fn rejects_wrong_signature_on_auth_url() {
+        assert!(matches!(
+            Fx::new(NostrConnectMethod::Connect)
+                .prompt_from_genuine_auth_url()
+                .as_slice(),
+            [Effect::Prompt { .. }]
+        ));
+        let mut fx = Fx::new(NostrConnectMethod::Connect);
+        let other = fx.response("other");
+        let mut forged = serde_json::to_value(auth_url_event(&fx, TOKEN_URL)).unwrap();
+        set(&mut forged, "sig", serde_json::to_value(other.sig).unwrap());
+        assert_dropped(&mut fx, &value_frame(&forged));
+        assert!(!fx.auth_seen());
+    }
+
+    #[test]
+    fn prompt_list_overlap() {
+        let link = |path: &str| parse_auth_url(&format!("https://s.example/{path}")).unwrap();
+        let mut prompts = PromptList::default();
+        prompts.upsert("a".into(), link("a"));
+        prompts.upsert("b".into(), link("b"));
+        assert_eq!(prompts.current(), Some("https://s.example/b"));
+        assert!(prompts.remove("b"));
+        assert_eq!(prompts.current(), Some("https://s.example/a"));
+        prompts.upsert("b".into(), link("b"));
+        assert!(prompts.remove("a"));
+        assert_eq!(prompts.current(), Some("https://s.example/b"));
+        assert!(!prompts.remove("a"));
+        prompts.upsert("a".into(), link("a"));
+        prompts.remove_current();
+        assert_eq!(prompts.current(), Some("https://s.example/b"));
     }
 
     #[test]
