@@ -296,6 +296,9 @@ pub enum NostrAuthError {
         "Remote signer requires link approval, but no NostrAuthModal is mounted to show the link"
     )]
     BunkerAuthRequired,
+    /// This session was closed for good. Retrying cannot succeed; read the current session from `NostrAuthContext::auth`.
+    #[error("Bunker session closed by logout or replacement")]
+    BunkerSessionClosed,
     /// A WebAuthn / passkey operation failed.
     #[error("Passkey operation failed: {0}")]
     PasskeyFailed(String),

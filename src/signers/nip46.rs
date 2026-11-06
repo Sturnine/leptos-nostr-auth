@@ -333,9 +333,49 @@ mod imp {
         /// Serializes reconnects: a concurrent caller waits for the running one's outcome, up to
         /// its own timeout, instead of racing a second WebSocket into existence. See `ensure_ws`.
         connect_lock: ConnectLock,
+        /// Set once by `close`, and never cleared.
+        pub(super) closed: Cell<bool>,
+        /// The attempt `do_reconnect` is opening. It is not in `ws` and has no request entries,
+        /// so `close` reaches it only through this. A dropped future leaves a stale entry, and
+        /// closing that again is harmless.
+        opening: RefCell<Option<OpeningSocket>>,
+    }
+
+    /// A socket still opening, and how to wake the call racing its open.
+    struct OpeningSocket {
+        /// The attempt's socket.
+        ws: web_sys::WebSocket,
+        /// Resolves the promise `open_relay` races.
+        wake: js_sys::Function,
+    }
+
+    /// The error every call on a closed session returns.
+    fn closed_error() -> NostrAuthError {
+        RpcFailure::SessionClosed.into_connect_error()
     }
 
     impl Connection {
+        /// Close the session for good.
+        ///
+        /// Must stay free of signal access: `Drop` can run while `set_auth` holds its write guard.
+        /// The failure pass goes before `retire_socket`, so waiters get the closed error rather
+        /// than a lost socket. Handlers stay alive until `Connection` drops; every socket's hooks
+        /// are already cleared by then.
+        pub(super) fn close(&self) {
+            self.closed.set(true);
+            let effects = self.inflight.borrow_mut().fail_session_closed();
+            run_effects(effects, None);
+            let current = self.ws.borrow().clone();
+            if let Some(ws) = current {
+                self.retire_socket(&ws);
+            }
+            let opening = self.opening.borrow_mut().take();
+            if let Some(OpeningSocket { ws, wake }) = opening {
+                close_socket(&ws);
+                let _ = wake.call0(&JsValue::UNDEFINED);
+            }
+        }
+
         /// Stop using `ws` and fail what is in flight on it. A relay's close frame leaves a socket
         /// `CLOSING` with no close event yet, and closing it here clears `onclose`, so its entries
         /// must fail now or they wait out their deadlines.
@@ -347,6 +387,12 @@ mod imp {
             close_socket(ws);
             let effects = self.inflight.borrow_mut().fail_socket_lost();
             run_effects(effects, None);
+        }
+    }
+
+    impl Drop for Connection {
+        fn drop(&mut self) {
+            self.close();
         }
     }
 
@@ -585,6 +631,9 @@ mod imp {
         /// `timeout_secs`, instead of each opening their own socket (which would orphan all but
         /// one in-flight RPC until timeout).
         async fn ensure_ws(&self) -> Result<web_sys::WebSocket, NostrAuthError> {
+            if self.conn.closed.get() {
+                return Err(closed_error());
+            }
             let current = self.conn.ws.borrow().clone();
             let must_reconnect = self.conn.inflight.borrow().must_reconnect();
             if let Some(ws) = current
@@ -605,6 +654,9 @@ mod imp {
             let race = Promise::race(&Array::of2(&woken, timer.fired()));
             let _ = JsFuture::from(race).await;
             let outcome = slot.borrow_mut().take();
+            if self.conn.closed.get() {
+                return Err(closed_error());
+            }
             match outcome {
                 None => Err(NostrAuthError::BunkerTimeout),
                 Some(Err(e)) => Err(e),
@@ -623,7 +675,11 @@ mod imp {
             }
             let mut last = NostrAuthError::BunkerConnectionFailed("no relay to try".into());
             for relay in &self.relays {
-                match self.open_relay(relay).await {
+                let opened = self.open_relay(relay).await;
+                if self.conn.closed.get() {
+                    return Err(closed_error());
+                }
+                match opened {
                     Ok(attempt) => {
                         let ws = attempt.disarm();
                         *self.conn.ws.borrow_mut() = Some(ws.clone());
@@ -649,6 +705,7 @@ mod imp {
             self.install_handlers(&ws);
 
             let (open_promise, open_resolve, open_reject) = make_rpc_promise();
+            let open_wake = open_resolve.clone();
             let on_open = Closure::<dyn FnMut(_)>::new(move |_: web_sys::Event| {
                 let _ = open_resolve.call1(&JsValue::UNDEFINED, &JsValue::UNDEFINED);
             });
@@ -657,6 +714,10 @@ mod imp {
                     &JsValue::UNDEFINED,
                     &JsValue::from_str("WebSocket error during connection"),
                 );
+            });
+            *self.conn.opening.borrow_mut() = Some(OpeningSocket {
+                ws: ws.clone(),
+                wake: open_wake,
             });
             ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
             ws.set_onerror(Some(on_error_open.as_ref().unchecked_ref()));
@@ -667,6 +728,7 @@ mod imp {
                 JsFuture::from(race).await
             };
 
+            *self.conn.opening.borrow_mut() = None;
             ws.set_onopen(None);
             ws.set_onerror(None);
 
@@ -862,9 +924,47 @@ mod tests {
     use super::*;
     use crate::signers::nip46_protocol::{Inflight, parse_auth_url};
     use core::cell::RefCell;
+    use core::future::Future;
+    use core::pin::pin;
+    use core::task::{Context, Poll, Waker};
     use nostr::event::EventId;
     use nostr::nips::nip46::NostrConnectMethod;
     use std::rc::Rc;
+
+    fn session() -> BunkerSession {
+        let client_keys = Keys::generate();
+        BunkerSession {
+            public_key: client_keys.public_key(),
+            bunker_uri: String::new(),
+            timeout_secs: 1,
+            remote_pubkey: client_keys.public_key(),
+            client_keys,
+            relays: Vec::new(),
+            conn: send_wrapper::SendWrapper::new(Rc::default()),
+        }
+    }
+
+    #[test]
+    fn clones_share_one_connection() {
+        let a = session();
+        let b = a.clone();
+        assert!(Rc::ptr_eq(&a.conn, &b.conn));
+        drop(b);
+        assert!(!a.conn.closed.get());
+    }
+
+    // Reaching `web_sys` would panic natively, so this also pins the check's place at the top.
+    #[test]
+    fn closed_session_refuses_before_any_socket() {
+        let s = session();
+        s.conn.close();
+        let event = r#"{"kind":1,"content":"x","tags":[],"created_at":1700000000}"#;
+        let polled = pin!(s.sign_event(event)).poll(&mut Context::from_waker(Waker::noop()));
+        assert!(matches!(
+            polled,
+            Poll::Ready(Err(NostrAuthError::BunkerSessionClosed))
+        ));
+    }
 
     #[test]
     fn guard_drop_removes_entry_and_prompt() {

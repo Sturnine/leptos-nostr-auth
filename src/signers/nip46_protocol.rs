@@ -342,6 +342,8 @@ pub(super) enum RpcFailure {
     /// A verified response was unusable, or the request could not be built locally. Fixed text
     /// only: parser errors can quote values.
     Malformed(&'static str),
+    /// The session was closed for good, so no retry on any clone can work.
+    SessionClosed,
 }
 
 impl fmt::Debug for RpcFailure {
@@ -371,6 +373,7 @@ impl fmt::Debug for RpcFailure {
                 .finish(),
             Self::Signer(text) => f.debug_tuple("Signer").field(text).finish(),
             Self::Malformed(text) => f.debug_tuple("Malformed").field(text).finish(),
+            Self::SessionClosed => f.write_str("SessionClosed"),
         }
     }
 }
@@ -431,6 +434,7 @@ impl RpcFailure {
             }
             Self::Signer(text) => NostrAuthError::BunkerConnectionFailed(text),
             Self::Malformed(text) => NostrAuthError::BunkerConnectionFailed(text.to_owned()),
+            Self::SessionClosed => NostrAuthError::BunkerSessionClosed,
         }
     }
 }
@@ -881,6 +885,11 @@ impl<W> Inflight<W> {
     /// Fail every request because the socket went away.
     pub(super) fn fail_socket_lost(&mut self) -> Vec<Effect<W>> {
         self.fail_all_with(|signer_answered| RpcFailure::SocketLost { signer_answered })
+    }
+
+    /// Fail every request because the session was closed.
+    pub(super) fn fail_session_closed(&mut self) -> Vec<Effect<W>> {
+        self.fail_all_with(|_| RpcFailure::SessionClosed)
     }
 
     /// Fail every request, passing each its own `auth_seen`.
@@ -2402,5 +2411,82 @@ mod tests {
         assert!(matches!(log.finish(), RpcFailure::Socket(_)));
         let stopped = AttemptLog::default().record(RpcFailure::Signer("no".into()));
         assert!(matches!(stopped, Some(RpcFailure::Signer(_))));
+    }
+
+    fn two_entries_one_auth_seen() -> Inflight<()> {
+        let mut inflight = Inflight::default();
+        for id in ["a", "b"] {
+            inflight.insert(
+                id.to_owned(),
+                NostrConnectMethod::SignEvent,
+                other_event_id(),
+                (),
+            );
+        }
+        inflight.entries.get_mut("b").unwrap().auth_seen = true;
+        inflight
+    }
+
+    #[test]
+    fn session_closed_fails_every_entry() {
+        let mut inflight = two_entries_one_auth_seen();
+        let effects = inflight.fail_session_closed();
+        assert_eq!(effects.len(), 2);
+        for effect in effects {
+            assert!(matches!(
+                effect,
+                Effect::Settle {
+                    outcome: Err(RpcFailure::SessionClosed),
+                    ..
+                }
+            ));
+        }
+        assert!(inflight.entries.is_empty());
+    }
+
+    #[test]
+    fn session_closed_does_not_advance() {
+        assert!(!RpcFailure::SessionClosed.advances_to_next_relay());
+        let stopped = AttemptLog::default().record(RpcFailure::SessionClosed);
+        assert!(matches!(stopped, Some(RpcFailure::SessionClosed)));
+    }
+
+    #[test]
+    fn session_closed_maps_to_variant() {
+        let text = "Bunker session closed by logout or replacement";
+        for error in [
+            RpcFailure::SessionClosed.into_connect_error(),
+            RpcFailure::SessionClosed.into_signing_error(),
+        ] {
+            assert!(matches!(error, NostrAuthError::BunkerSessionClosed));
+            assert_eq!(error.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn session_closed_passes_through_followers() {
+        let (gate, seen) = gate_fixture();
+        let lead = gate.join(follower(&seen)).unwrap();
+        assert!(gate.join(follower(&seen)).is_none());
+        lead.finish(Err(RpcFailure::SessionClosed.into_connect_error()));
+        assert!(matches!(
+            seen.borrow().as_slice(),
+            [Err(NostrAuthError::BunkerSessionClosed)]
+        ));
+    }
+
+    #[test]
+    fn session_closed_leaves_suspect_alone() {
+        let mut inflight = two_entries_one_auth_seen();
+        assert!(!inflight.note_settled(Some(&RpcFailure::SessionClosed)));
+        assert!(!inflight.suspect);
+    }
+
+    #[test]
+    fn response_after_close_is_inert() {
+        let mut fx = Fx::new(NostrConnectMethod::SignEvent);
+        let response = fx.response("ack");
+        assert_eq!(fx.inflight.fail_session_closed().len(), 1);
+        assert!(fx.feed(&frame(&response)).is_empty());
     }
 }
