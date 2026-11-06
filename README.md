@@ -16,7 +16,7 @@ Drop-in login modal supporting every Nostr authentication method. Headless — b
 | Amber deep-link | Android user-agent only |
 | Raw nsec paste | Only with `insecure_nsec_input` feature (opt-in) |
 
-Passkeys use the WebAuthn PRF extension with a fixed salt (`"nostr-key-v1"`) to deterministically derive the same secp256k1 key from the same passkey on any device. On Apple devices, passkeys sync silently via iCloud Keychain — no passwords, no clipboard.
+Passkeys use the WebAuthn PRF extension with a fixed salt (`"nostr-key-v1"`) to deterministically derive the same secp256k1 key from the same passkey. A synced passkey gives the same key on devices using this crate with the same RP ID. No passwords, no clipboard.
 
 ## Quick Start (CSR)
 
@@ -158,7 +158,7 @@ let config = NostrAuthConfig {
     // Close modal on Escape key (default: true)
     close_on_escape: true,
 
-    // REQUIRED for passkey: your domain (no https:// prefix)
+    // WebAuthn relying party ID (no https:// prefix). Set it to share passkeys across subdomains.
     // Default: window.location.hostname
     rp_id: Some("myapp.com".into()),
 
@@ -187,28 +187,36 @@ view! {
 }
 ```
 
-## Passkey Setup (macOS / iOS)
+## Passkey Setup
 
-Passkeys are scoped to a **Relying Party ID** (your domain). You **must** configure `rp_id`:
+Passkeys are scoped to a **Relying Party ID**. `rp_id` defaults to the page's hostname. Set it to share credentials across subdomains:
 
 ```rust
 NostrAuthConfig {
-    rp_id: Some("myapp.com".into()), // must match window.location.hostname exactly
+    rp_id: Some("myapp.com".into()), // this host, or a registrable-domain suffix of it
     ..Default::default()
 }
 ```
 
-Passkeys created on `myapp.com` only work on `myapp.com`. On localhost for development, use `rp_id: Some("localhost".into())`.
+The RP ID must equal the host or be a registrable-domain suffix of it, and cannot be a public suffix. So `myapp.com` works on `myapp.com` and `app.myapp.com`, while a credential created under `app.myapp.com` does not work on `myapp.com` or on a sibling host.
 
-**How it works (Roadflare iOS pattern ported to WebAuthn):**
+Every ceremony sends the RP ID, so changing `rp_id` strands credentials made under the old value, including ones made under the hostname before `rp_id` was set. Reverting the config recovers them.
+
+**How it works:**
 
 1. Browser calls `navigator.credentials.create()` with PRF extension and salt `"nostr-key-v1"`
-2. OS shows Touch ID / Face ID sheet (macOS/iOS) or platform authenticator
-3. PRF returns a deterministic 32-byte output
+2. The OS or the authenticator asks the user to verify. Platform authenticators, security keys and cross-device passkeys are all offered
+3. PRF returns a deterministic 32-byte output. An authenticator that reports PRF as enabled without output gets a follow-up `get` for the new credential
 4. SHA-256 of that output becomes the secp256k1 private key
 5. Only the passkey credential ID is stored in localStorage — no private key bytes
 
-Same passkey on any device → same Nostr identity. Syncs automatically via iCloud Keychain on Apple, Google Password Manager on Android, Windows Hello on Windows.
+A synced passkey gives the same Nostr identity on devices using this crate with the same RP ID. Whether a passkey syncs depends on its provider.
+
+**Logging back in.** A stored passkey never prompts on page load. The app stays logged out with the session kept, and the prompt comes from `show_login`:
+
+Call `show_login` from a user gesture, such as a click handler, with nothing deferred before it, so that restoring a passkey takes one tap. Before the user's first interaction with the page it opens the login modal and never prompts. After that the crate does not check that the call is in a gesture: a call from a timer or Effect can prompt where the browser allows it. A failed or cancelled prompt keeps the session and opens the modal.
+
+A second `show_login` while a prompt is up opens the modal without a second prompt, so a hung prompt cannot block other methods.
 
 ## Examples
 
@@ -317,7 +325,8 @@ texts may change.
 again to switch." The crate does not log out, so a signer cannot end a session by returning a bad
 event, and switching the extension back makes the same session work again. On reload the mismatch
 fails restore with `SignerKeyMismatch` in `restore_error`, for every method. The session stays stored,
-logged out, and is retried on next load, so switching back restores it. Extension
+logged out, and is retried on next load, or for a passkey on the next login click, so switching back
+restores it. Extension
 `nip44_encrypt` and `nip44_decrypt` call `getPublicKey` first and fail the same way, which costs one
 extra extension call each, and a switch between the two calls is not detected.
 
@@ -405,9 +414,10 @@ A failed or cancelled prompt never clears the session. Only a logout or a succes
 | Case | Stored session | Result |
 |---|---|---|
 | `logout` | Deleted | Logged out; also works while logged out |
-| Failed or cancelled restore, any method | Kept | Logged out; retried on next load, once per page load, with no timers |
+| Stored passkey at page load | Kept | Logged out, with no prompt. `restore_error` stays `None`, since nothing has failed. The login click restores it |
+| Failed or cancelled restore, any method | Kept | Logged out; retried on next load, once per page load, with no timers. A passkey retries on the next login click instead, and its failure also opens the modal |
 | Another key on restore, any method | Kept | The other key is never adopted. `restore_error` is `SignerKeyMismatch`. Switching the signer back restores it |
-| Stored data can never restore (bad hex, missing fields, bad base64) | Kept | Logged out, with no prompt or network call |
+| Stored data can never restore (bad hex, missing fields, bad base64) | Kept | Logged out, with no prompt or network call. `restore_error` says why |
 | Stored method removed from `allowed_methods` | Kept | Logged out, with no prompt or network call. `restore_error` is `RestoreMethodNotAllowed` |
 | Stored JSON cannot be decoded | Kept | Reads as nothing stored. `logout` removes it |
 | New login, persistable method | Overwritten | Replaced by the new login |
@@ -426,7 +436,7 @@ With `persist_session: false` the crate writes nothing on login, starts no resto
 |---|---|
 | Extension | Re-calls `window.nostr.getPublicKey()`, verifies pubkey matches |
 | Bunker | Opens a socket to the stored relays, in order, and sends `get_public_key` with the stored client key; verifies pubkey matches |
-| Passkey | Calls `navigator.credentials.get()` → biometric → re-derives same key |
+| Passkey | From the login click only: calls `navigator.credentials.get()` → biometric → re-derives same key, verifies pubkey matches |
 | Read-Only | Restores directly from stored hex pubkey |
 | ncryptsec | **Not persisted** — user must decrypt again (password not stored) |
 | Raw nsec | **Not persisted** — user must paste again |
@@ -480,7 +490,8 @@ timeout. A login, a logout, a logout in another tab or an unmount ends it at onc
 
 `is_restoring` is false on the first hydrated render, because server HTML cannot know storage, and
 turns true after hydration before any of your Effects read it. A provider mounted later on the
-client, and any CSR app, sees it true on its first render when a restorable session is stored.
+client, and any CSR app, sees it true on its first render when a restorable session is stored. A
+stored passkey leaves it false until the login click.
 
 An extension that asks on every call prompts on every load until the user forgets the session.
 
@@ -499,6 +510,7 @@ Any removal of the stored session logs out other tabs, through the browser's `st
 - Undecodable bytes under our key count the same: `removeItem` or `clear()` of them logs this tab out, though nothing was restorable.
 - A page restored from the back/forward cache gets no `storage` event for a logout that happened meanwhile.
 - A `restore_error` here can go stale if another tab logs in persistably while this tab stays logged out.
+- A persistable login in another tab during a held passkey prompt does not cancel the prompt. Its result lands here while the other identity is stored.
 
 To disable persistence:
 
@@ -518,14 +530,22 @@ pub struct NostrAuthContext {
     pub npub: Signal<Option<String>>,
     /// `true` when logged in.
     pub is_authenticated: Signal<bool>,
-    /// `true` while a persisted session is being restored from localStorage on mount. False on the
-    /// first hydrated render. Do not hide the login button behind it.
+    /// `true` while a persisted session is being restored: from localStorage on mount, or for a
+    /// passkey, from the login click. False on the first hydrated render and at load for a stored
+    /// passkey. Do not hide the login button behind it.
     pub is_restoring: Signal<bool>,
     /// `true` when localStorage holds a decodable session, restored or not.
     pub has_saved_session: Signal<bool>,
-    /// Why the stored session did not restore on this load. Untrusted display text.
+    /// Why the stored session did not restore. `None` for a passkey awaiting the login click.
+    /// Untrusted display text.
     pub restore_error: Signal<Option<NostrAuthError>>,
-    /// Open the login modal programmatically.
+    /// Open the login modal, or restore a stored passkey.
+    ///
+    /// Call `show_login` from a user gesture, such as a click handler, with nothing deferred before
+    /// it, so that restoring a passkey takes one tap. Before the user's first interaction with the
+    /// page it opens the login modal and never prompts. After that the crate does not check that
+    /// the call is in a gesture: a call from a timer or Effect can prompt where the browser allows
+    /// it. A failed or cancelled prompt keeps the session and opens the modal.
     pub show_login: Callback<()>,
     /// Log out, clear the stored session and close a bunker session for good.
     pub logout: Callback<()>,
@@ -579,7 +599,7 @@ pub enum NostrAuthError {
 
     // Signing
     SigningFailed(String),
-    // Another key than the session's. As `restore_error`, the session is kept and retried
+    // Another key than the session's. As `restore_error`, the session is kept and retried on the next load, or for a passkey on the next login click
     SignerKeyMismatch,
 
     // Session restore: the stored method is no longer in `allowed_methods`
@@ -691,7 +711,7 @@ All elements emit `data-nostr-*` attributes for styling:
   Before, it raised an uncaught `TypeError` and the future never finished.
 - A stored session of any method is now kept when restore fails for any reason, including another
   key and data that can never restore. The user is logged out, `is_restoring` ends false, and restore
-  is retried on next load. Before, most failures deleted it, and an absent or throwing extension left
+  is retried on next load, or for a passkey on the next login click. Before, most failures deleted it, and an absent or throwing extension left
   `is_restoring` stuck true. An extension that asks on every call now prompts on every load until the
   user forgets the session.
 - New `NostrAuthContext::has_saved_session` and `restore_error`, and new
@@ -706,13 +726,21 @@ All elements emit `data-nostr-*` attributes for styling:
   stored. A bunker session there closes for good. A persistable login elsewhere does not log them out,
   and a logout with nothing stored does not reach them.
 - `is_restoring` is now true on the first render with a restorable session, except on the first
-  hydrated render. Stop hiding the login button behind it: it can stay true for a long time, or without
-  bound with an extension that never answers.
+  hydrated render and for a stored passkey, which leaves it false until the login click. Stop hiding the
+  login button behind it: it can stay true for a long time, or without bound with an extension that
+  never answers.
 - A restore landing while the login modal is open leaves the modal open.
 - Extension `nip44_encrypt` and `nip44_decrypt` now call `getPublicKey` first and return
   `SignerKeyMismatch` on a switch. A missing `nip44` is `ExtensionNotFound`. A throwing or rejecting
   `getPublicKey` here is `ExtensionRejected(msg)`, and a malformed key from it is `InvalidPublicKey`;
   these two are new, since these methods only returned `SigningFailed` before.
+- A stored passkey no longer prompts on page load. `show_login` starts a passkey prompt when a passkey session is stored, unless the user has not interacted with the page yet.
+- `PasskeySession::authenticate` now takes `rp_id` first: `authenticate(rp_id, credential_id)`. It always sends `rpId`.
+- `create` no longer filters on `authenticatorAttachment`, so security keys and cross-device passkeys are offered. An authenticator without PRF reaches `create`, gets `PasskeyNotSupported` and leaves a credential behind on each retry. The variant's text is now "This browser or authenticator does not support the WebAuthn PRF extension".
+- `create` now completes through a follow-up `get` when the authenticator reports `prf.enabled` with no output. If that fails, the error says to use the existing passkey.
+- The passkey option is hidden when `PublicKeyCredential` is absent, or `getClientCapabilities()` reports `extension:prf` as false. An unknown capability keeps it.
+- A passkey created under a configured `rp_id` now logs in on a subdomain. A site with no configured `rp_id` sees no change.
+- `rpId` is now always sent, so changing `rp_id` strands credentials made under the old value, including ones made under the hostname before `rp_id` was set. Reverting the config recovers them.
 
 ## Development
 

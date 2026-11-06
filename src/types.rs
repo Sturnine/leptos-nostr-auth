@@ -12,7 +12,8 @@ pub enum AuthResult {
     Extension(Nip07Handle),
     /// NIP-46: remote bunker signer (also covers Amber via NIP-46 mode)
     Bunker(Box<BunkerSession>),
-    /// Passkey: WebAuthn PRF-derived secp256k1 key, syncs via iCloud Keychain / platform
+    /// Passkey: WebAuthn PRF-derived secp256k1 key. A synced passkey gives the same key on devices
+    /// using this crate with the same RP ID.
     Passkey(PasskeySession),
     /// Read-only: public key only, no signing capability
     ReadOnly(ReadOnlyHandle),
@@ -293,10 +294,13 @@ pub struct NostrAuthConfig {
     /// reconnects; `2T`, plus 300 s with a link, for a call waiting on another call's reconnect;
     /// `(2n+1)T + 600 s` for login; `2nT + 300 s` for restore.
     pub bunker_timeout_secs: u32,
-    /// WebAuthn relying party ID — MUST match your domain (default: `window.location.hostname`)
+    /// WebAuthn relying party ID (default: `window.location.hostname`), with no `https://` prefix.
     ///
-    /// **Required for passkey to work.** Passkeys are scoped to an RP ID.
-    /// Set this to your domain, e.g. `"myapp.com"` (no `https://` prefix).
+    /// Set it to share credentials across subdomains, e.g. `"myapp.com"`. It must equal the host or
+    /// be a registrable-domain suffix of it, not a public suffix.
+    ///
+    /// Every ceremony sends it, so changing it strands credentials made under the old value,
+    /// including ones made under the hostname before it was set. Reverting the config recovers them.
     pub rp_id: Option<String>,
     /// WebAuthn relying party display name (default: `"Nostr App"`)
     pub rp_name: String,
