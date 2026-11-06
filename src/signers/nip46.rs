@@ -707,12 +707,9 @@ mod imp {
             loop {
                 let timer = make_timeout_promise(wait_secs);
                 let race = Promise::race(&Array::of2(&woken, &timer));
-                let woke = JsFuture::from(race).await.is_ok();
+                let _ = JsFuture::from(race).await;
                 if let Some(outcome) = slot.borrow_mut().take() {
                     return outcome;
-                }
-                if woke {
-                    continue;
                 }
                 let mut inflight = self.inflight.borrow_mut();
                 match inflight.on_deadline(&id, presenter_mounted()) {
