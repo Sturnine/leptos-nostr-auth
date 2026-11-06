@@ -2,7 +2,8 @@
 #![allow(clippy::exhaustive_structs, clippy::missing_docs_in_private_items)]
 use leptos::portal::Portal;
 use leptos::prelude::*;
-use leptos_use::{use_event_listener, use_window};
+use leptos_use_event_listener::use_event_listener;
+use leptos_use_window::use_window;
 
 #[cfg(not(feature = "ssr"))]
 use wasm_bindgen_futures::spawn_local;
