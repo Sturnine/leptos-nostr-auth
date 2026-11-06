@@ -468,6 +468,7 @@ All elements emit `data-nostr-*` attributes for styling:
   a mounted modal shows the link. Direct `BunkerSession` callers mount one closed modal, for example
   `<NostrAuthModal open=false on_auth=... />`; a provider already mounts its own. With no modal
   mounted the request fails at its timeout with the new `NostrAuthError::BunkerAuthRequired`.
+- A bunker `sign_event` result now uses `nostr`'s JSON key order, not the order the signer sent.
 - `bunker://` errors changed: everything `nostr`'s URI parser rejects, including a bad or missing
   pubkey, is now `InvalidBunkerUri("invalid URI")`. A bad pubkey was `InvalidPublicKey`.
 - A raw `+` in a URI secret now decodes to a space. Hex and UUID secrets are unaffected.

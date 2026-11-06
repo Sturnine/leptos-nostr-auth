@@ -328,7 +328,8 @@ pub(super) enum RpcFailure {
     },
     /// A verified signer refused, with its sanitised text.
     Signer(String),
-    /// A verified response was unusable. Fixed text only: parser errors can quote values.
+    /// A verified response was unusable, or the request could not be built locally. Fixed text
+    /// only: parser errors can quote values.
     Malformed(&'static str),
 }
 
