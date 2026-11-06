@@ -42,10 +42,22 @@ impl AuthResult {
     /// All backends present a uniform async interface. Sync backends (Passkey, Ncryptsec)
     /// return immediately without suspending.
     ///
+    /// `event_json` takes `kind`, `tags`, `content` and `created_at`, on every method. An absent
+    /// `pubkey` is filled in with the session key. A `pubkey` that differs from it, or an `id` that
+    /// does not match the fields, is refused before anything reaches a signer.
+    ///
+    /// An event from a remote signer is returned only if its `pubkey` is the session key, its
+    /// `kind`, `tags`, `content` and `created_at` equal the request, and its id and signature
+    /// verify. The returned JSON is that verified event, without any extra fields the signer added.
+    ///
     /// # Errors
     ///
     /// Read-only sessions return an error. Also, returns an error if signing fails. A closed
-    /// bunker session returns [`NostrAuthError::BunkerSessionClosed`].
+    /// bunker session returns [`NostrAuthError::BunkerSessionClosed`]. A returned event from
+    /// another key returns [`NostrAuthError::SignerKeyMismatch`], usually after an account switch
+    /// in the extension. Other refused requests and returns are
+    /// [`NostrAuthError::SigningFailed`], and malformed input is
+    /// [`NostrAuthError::Serialization`]. Match the variant, not the text.
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         match self {
             Self::Extension(h) => h.sign_event(event_json).await,
@@ -297,7 +309,7 @@ impl Default for NostrAuthConfig {
 #[derive(Debug, Error, Clone)]
 #[non_exhaustive]
 pub enum NostrAuthError {
-    /// `window.nostr` was not found — no NIP-07 extension installed.
+    /// `window.nostr` or the requested method was not found.
     #[error("Browser extension (window.nostr) not found")]
     ExtensionNotFound,
     /// The extension rejected the request (e.g. user denied permission).
@@ -324,6 +336,9 @@ pub enum NostrAuthError {
     /// This session was closed for good. Retrying cannot succeed; read the current session from `NostrAuthContext::auth`.
     #[error("Bunker session closed by logout or replacement")]
     BunkerSessionClosed,
+    /// The signer used a different key than this session, usually after an account switch in the extension. Log in again to switch.
+    #[error("Signer is using a different account than this session. Log in again to switch.")]
+    SignerKeyMismatch,
     /// A WebAuthn / passkey operation failed.
     #[error("Passkey operation failed: {0}")]
     PasskeyFailed(String),

@@ -172,23 +172,6 @@ pub(super) fn request_message(id: String, request: &NostrConnectRequest) -> Nost
     }
 }
 
-/// Parse the caller's event JSON. NIP-46 lists `sign_event` params without `pubkey`, so it is
-/// filled in when absent. A supplied `pubkey` is left as it is.
-pub(super) fn unsigned_for_signing(
-    event_json: &str,
-    session_pubkey: PublicKey,
-) -> Result<UnsignedEvent, NostrAuthError> {
-    let mut value: serde_json::Value = serde_json::from_str(event_json)
-        .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| NostrAuthError::Serialization("event must be a JSON object".into()))?;
-    object
-        .entry("pubkey")
-        .or_insert_with(|| session_pubkey.to_hex().into());
-    serde_json::from_value(value).map_err(|e| NostrAuthError::Serialization(e.to_string()))
-}
-
 /// Encrypt and sign a kind 24133 event. Takes the time as an argument because upstream's builder
 /// reads the system clock, which this crate must not reach on wasm.
 pub(super) fn request_event(
@@ -941,6 +924,7 @@ impl<W> Inflight<W> {
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
+    use crate::signers::event_contract::prepare;
     use nostr::event::Tags;
 
     const ID: &str = "req-1";
@@ -1360,7 +1344,7 @@ mod tests {
     #[test]
     fn sign_event_param_is_a_json_string() {
         let fx = Fx::new(NostrConnectMethod::SignEvent);
-        let unsigned = unsigned_for_signing(&unsigned_json(), fx.client.public_key()).unwrap();
+        let unsigned = prepare(&unsigned_json(), fx.client.public_key()).unwrap();
         let event = wire(&fx, &NostrConnectRequest::SignEvent(unsigned.clone()));
         let params = decrypted_params(&fx, &event);
         assert_eq!(params.len(), 1);
@@ -1371,20 +1355,20 @@ mod tests {
     #[test]
     fn sign_event_partial_form() {
         let session = Keys::generate().public_key();
-        let filled = unsigned_for_signing(&unsigned_json(), session).unwrap();
+        let filled = prepare(&unsigned_json(), session).unwrap();
         assert_eq!(filled.pubkey, session);
         let supplied = Keys::generate().public_key();
         let full = format!(
             r#"{{"pubkey":"{}","kind":1,"content":"hi","tags":[],"created_at":1700000000}}"#,
             supplied.to_hex()
         );
-        assert_eq!(
-            unsigned_for_signing(&full, session).unwrap().pubkey,
-            supplied
-        );
+        assert!(matches!(
+            prepare(&full, session),
+            Err(NostrAuthError::SigningFailed(_))
+        ));
         for bad in ["[1]", "\"x\"", "not json"] {
             assert!(matches!(
-                unsigned_for_signing(bad, session),
+                prepare(bad, session),
                 Err(NostrAuthError::Serialization(_))
             ));
         }

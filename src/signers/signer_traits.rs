@@ -76,7 +76,7 @@ pub(in crate::signers) mod tests {
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
     use nostr::error::ErrorKind;
-    use nostr::event::{FinalizeEventAsync, Kind, Tag};
+    use nostr::event::{EventId, FinalizeEvent, FinalizeEventAsync, Kind, Tag};
     use nostr::key::Keys;
     use nostr::types::Timestamp;
     use std::sync::Arc;
@@ -187,6 +187,28 @@ pub(in crate::signers) mod tests {
             let out = ready(auth.sign_event_async(input.clone())).unwrap();
             assert_fields_equal(&input, &out);
         }
+    }
+
+    #[test]
+    fn keys_refuse_other_pubkey() {
+        let keys = Keys::generate();
+        let err = unsigned(Keys::generate().public_key()).finalize(&keys);
+        assert_eq!(err.unwrap_err().to_string(), "invalid signature");
+    }
+
+    #[test]
+    fn keys_refuse_wrong_preset_id() {
+        let keys = Keys::generate();
+        let mut wrong = unsigned(keys.public_key());
+        wrong.id = Some(EventId::from_byte_array([7; 32]));
+        assert_eq!(
+            wrong.finalize(&keys).unwrap_err().to_string(),
+            "invalid event ID"
+        );
+        let mut right = unsigned(keys.public_key());
+        let want = right.compute_id();
+        right.id = Some(want);
+        assert_eq!(right.finalize(&keys).unwrap().id, want);
     }
 
     #[test]

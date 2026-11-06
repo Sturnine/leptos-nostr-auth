@@ -288,6 +288,43 @@ if auth.auth.get().map(|a| a.can_sign()).unwrap_or(false) {
 }
 ```
 
+### What signing checks
+
+`sign_event` takes the same input on every login method:
+
+- `kind`, `tags`, `content` and `created_at` are required. A missing or invalid one is
+  `Serialization`.
+- An absent `pubkey` is filled in with the session key. A `pubkey` that differs from it is refused
+  with `SigningFailed`, and nothing reaches a signer.
+- A preset `id` is allowed if it matches the fields. Otherwise it is refused the same way.
+
+An event from an extension or a bunker is returned only if all of these hold, and the returned JSON
+is the verified event, without any extra fields the signer added:
+
+- Its `pubkey` is the session key, else `SignerKeyMismatch`.
+- Its `kind`, `tags` (in order), `content` and `created_at` equal the request, else `SigningFailed`.
+- Its id and signature verify, else `SigningFailed`.
+
+A return that is not a full event, including an object holding only `sig`, is refused with
+`SigningFailed`. It is not completed from the request. Match the variant, since the `SigningFailed`
+texts may change.
+
+**Switching accounts in the extension.** The extension shows its own prompt, then the call fails with
+`SignerKeyMismatch`, whose text is "Signer is using a different account than this session. Log in
+again to switch." The crate does not log out, so a signer cannot end a session by returning a bad
+event, and switching the extension back makes the same session work again. On reload the mismatch
+fails restore and the session stays stored, logged out, and is retried on next load. Extension
+`nip44_encrypt` and `nip44_decrypt` call `getPublicKey` first and fail the same way, which costs one
+extra extension call each, and a switch between the two calls is not detected.
+
+An extension that keeps the supplied `pubkey` while signing with a switched account reports an
+invalid signature through `SigningFailed`, not `SignerKeyMismatch`, because its return names the
+session key.
+
+These checks catch a switched account or a faulty or dishonest return. They do not protect against a
+compromised page, since an extension in the page realm can patch `Promise`, `WebSocket` or
+`WebAssembly` before the crate loads, and an extension holding the key can sign anything.
+
 ### Using AuthResult as a nostr signer
 
 `AuthResult` implements `nostr`'s `AsyncGetPublicKey` and `AsyncSignEvent`, so it can be passed to
@@ -333,7 +370,8 @@ runtime, so do not assume `EventBuilder` works on wasm without a provider.
   with the original as its source: `use core::error::Error as _;` then
   `err.source().and_then(|s| s.downcast_ref::<NostrAuthError>())`. Match
   `NostrAuthError::BunkerSessionClosed` and handle it by re-reading `NostrAuthContext::auth`.
-- `get_public_key_async` returns the session's key, not the extension's current account.
+- `get_public_key_async` returns the session's key, not the extension's current account. A switched
+  account shows up as `SignerKeyMismatch` when signing.
 - A future can move between threads until its first poll. Without `ssr`, one that has suspended must
   stay on its thread. Key, read-only and closed sessions finish in their first poll.
 - `nostr` helpers that also require `AsyncNip44`, such as NIP-17 and NIP-59 gift wrap, do not accept
@@ -360,7 +398,7 @@ When `persist_session: true` (default), successful logins are cached in localSto
 
 | Method | Restore behavior |
 |---|---|
-| Extension | Re-calls `window.nostr.getPublicKey()`, verifies pubkey matches |
+| Extension | Re-calls `window.nostr.getPublicKey()`, verifies pubkey matches. If restore fails, the session stays stored and is retried on next load. |
 | Bunker | Opens a socket to the stored relays, in order, and sends `get_public_key` with the stored client key; verifies pubkey matches |
 | Passkey | Calls `navigator.credentials.get()` → biometric → re-derives same key |
 | Read-Only | Restores directly from stored hex pubkey |
@@ -483,6 +521,7 @@ pub enum NostrAuthError {
 
     // Signing
     SigningFailed(String),
+    SignerKeyMismatch,
 
     // Internal serialization
     Serialization(String),
@@ -561,6 +600,40 @@ All elements emit `data-nostr-*` attributes for styling:
   approval link keeps the socket instead.
 - A call waiting on another call's reconnect gets `BunkerConnectionFailed("reconnect cancelled")` if
   that call's future is dropped.
+- Events returned by an extension or a bunker are now checked. Another key is the new
+  `NostrAuthError::SignerKeyMismatch`. A changed `kind`, `tags`, `content` or `created_at`, a wrong
+  id or a bad signature is `SigningFailed`, so an extension that rewrites a field now fails every
+  signature. Before, all of these returned `Ok`.
+- A malformed return through the trait is now `SigningFailed("signer returned an invalid event")`,
+  without the parser's text.
+- A request whose `pubkey` differs from the session, or whose preset `id` does not match its fields,
+  is now `SigningFailed("event pubkey differs from the session key")` or
+  `SigningFailed("event id does not match its fields")` on every method, and a remote signer never
+  sees it. Before, a remote signer could return `Ok`, and local keys failed with `nostr`'s text.
+- Local keys now fill in an absent `pubkey`, where they returned `Serialization`. Duplicate JSON keys
+  in a local request now take the last value, where they were a serde error.
+- Extension requests now go through the same parsing as other methods. Malformed JSON is
+  `Serialization`, not `SigningFailed("invalid event JSON: ..")`. A missing field, `id:""`,
+  `pubkey:null`, a non-string tag element, an empty tag, a `kind` above 65535 or a non-integer
+  `created_at` is `Serialization` with nothing sent. Unknown request fields are dropped.
+- A direct `Nip07Handle::sign_event` no longer returns `Ok("")`, `Ok("null")` or an object missing a
+  field, including `{"sig":..}`. All are `SigningFailed("signer returned an invalid event")`.
+- A `Nip07Handle::sign_event` result now uses `nostr`'s JSON key order, with extra fields removed.
+- An extension that rejects with a non-Error object now gives the static text "extension rejected the
+  request", not a dump of the object.
+- A missing `window.nostr`, `nip44` or method, or a non-callable one, is now always
+  `ExtensionNotFound`, including from `Nip07Handle::get_public_key`. Before, it raised an uncaught
+  `TypeError` and the future never finished.
+- A present extension method that throws synchronously is now a rejection, the same as an asynchronous
+  one: `SigningFailed(msg)` for `signEvent` and `nip44_*`, `ExtensionRejected(msg)` for `getPublicKey`.
+  Before, it raised an uncaught `TypeError` and the future never finished.
+- A stored extension session is now kept when restore fails for any reason. The user is logged out,
+  `is_restoring` ends false, and restore is retried on next load. Before, a rejection or another key
+  deleted it, and an absent or throwing extension left `is_restoring` stuck true.
+- Extension `nip44_encrypt` and `nip44_decrypt` now call `getPublicKey` first and return
+  `SignerKeyMismatch` on a switch. A missing `nip44` is `ExtensionNotFound`. A throwing or rejecting
+  `getPublicKey` here is `ExtensionRejected(msg)`, and a malformed key from it is `InvalidPublicKey`;
+  these two are new, since these methods only returned `SigningFailed` before.
 
 ## Development
 
