@@ -1699,6 +1699,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn raw_key_rejects_malformed_json_and_names_method() {
+        let keys = Keys::generate();
+        let s = RawKeySession {
+            public_key: keys.public_key(),
+            secret_key: keys.secret_key().clone(),
+        };
+        assert!(matches!(
+            s.sign_event("{"),
+            Err(NostrAuthError::Serialization(_))
+        ));
+        assert_eq!(AuthResult::Ncryptsec(s).method_name(), "Encrypted Key");
+    }
+
+    #[test]
+    fn passkey_signs_rejects_malformed_json_and_names_method() {
+        let keys = Keys::generate();
+        let s = PasskeySession {
+            public_key: keys.public_key(),
+            secret_key: keys.secret_key().clone(),
+            credential_id: vec![1, 2, 3],
+        };
+        assert!(matches!(
+            s.sign_event("{"),
+            Err(NostrAuthError::Serialization(_))
+        ));
+        let unsigned = format!(
+            r#"{{"pubkey":"{}","created_at":1700000000,"kind":1,"tags":[],"content":"hi"}}"#,
+            keys.public_key().to_hex()
+        );
+        let signed = s.sign_event(&unsigned).unwrap();
+        Event::from_json(signed).unwrap().verify().unwrap();
+        assert_eq!(AuthResult::Passkey(s).method_name(), "Passkey");
+    }
+
+    #[cfg(feature = "insecure_nsec_input")]
+    #[test]
+    fn nsec_import_signs_and_verifies() {
+        let hex = "0000000000000000000000000000000000000000000000000000000000000001";
+        let s = RawKeySession::from_nsec_or_hex(hex).unwrap();
+        let unsigned = format!(
+            r#"{{"pubkey":"{}","created_at":1700000000,"kind":1,"tags":[],"content":"hi"}}"#,
+            s.public_key.to_hex()
+        );
+        let signed = s.sign_event(&unsigned).unwrap();
+        Event::from_json(signed).unwrap().verify().unwrap();
+    }
+
     #[cfg(not(feature = "ssr"))]
     #[test]
     fn sha256_abc_vector() {
@@ -1754,5 +1802,126 @@ mod tests {
         let ev = nip46_event(&client, remote, "ct".into(), now_timestamp()).unwrap();
         ev.verify().unwrap();
         assert!(ev.created_at.as_secs() > 1_700_000_000);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "ssr")]
+mod server_tests {
+    use super::*;
+    use core::future::Future;
+    use core::pin::pin;
+    use core::task::{Context, Poll, Waker};
+
+    fn ready<F: Future>(fut: F) -> F::Output {
+        match pin!(fut).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(out) => out,
+            Poll::Pending => unreachable!("server stubs never suspend"),
+        }
+    }
+
+    fn text<T>(result: Result<T, NostrAuthError>) -> String {
+        result.map_or_else(|e| e.to_string(), |_| "Ok".to_owned())
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    fn bunker() -> BunkerSession {
+        let client_keys = Keys::generate();
+        BunkerSession {
+            public_key: client_keys.public_key(),
+            bunker_uri: String::new(),
+            timeout_secs: 1,
+            remote_pubkey: client_keys.public_key(),
+            client_keys,
+            relay_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn nip07_server_stubs() {
+        let h = Nip07Handle {
+            public_key: Keys::generate().public_key(),
+        };
+        assert_eq!(
+            text(ready(Nip07Handle::get_public_key())),
+            "Browser extension (window.nostr) not found"
+        );
+        let want = "Signing failed: not available on server";
+        assert_eq!(text(ready(h.sign_event("{}"))), want);
+        assert_eq!(text(ready(h.nip44_encrypt("a", "b"))), want);
+        assert_eq!(text(ready(h.nip44_decrypt("a", "b"))), want);
+    }
+
+    #[test]
+    fn nip46_server_stubs() {
+        let s = bunker();
+        assert_eq!(
+            text(ready(BunkerSession::connect("bunker://x", 1))),
+            "Bunker connection failed: not available on server"
+        );
+        let want = "Signing failed: not available on server";
+        assert_eq!(text(ready(s.sign_event("{}"))), want);
+        assert_eq!(text(ready(s.nip44_encrypt("a", "b"))), want);
+        assert_eq!(text(ready(s.nip44_decrypt("a", "b"))), want);
+    }
+
+    #[test]
+    fn passkey_server_stubs() {
+        let want = "Passkey operation failed: not available on server";
+        assert_eq!(text(ready(PasskeySession::create("rp", "name"))), want);
+        assert_eq!(text(ready(PasskeySession::authenticate(None))), want);
+    }
+
+    #[test]
+    fn server_futures_are_send() {
+        let h = Nip07Handle {
+            public_key: Keys::generate().public_key(),
+        };
+        let s = bunker();
+        assert_send(Nip07Handle::get_public_key());
+        assert_send(h.sign_event("{}"));
+        assert_send(h.nip44_encrypt("a", "b"));
+        assert_send(h.nip44_decrypt("a", "b"));
+        assert_send(BunkerSession::connect("bunker://x", 1));
+        assert_send(s.sign_event("{}"));
+        assert_send(s.nip44_encrypt("a", "b"));
+        assert_send(s.nip44_decrypt("a", "b"));
+        assert_send(PasskeySession::create("rp", "name"));
+        assert_send(PasskeySession::authenticate(None));
+        assert_send(AuthResult::Extension(h).sign_event("{}"));
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_arch = "wasm32")]
+#[cfg(not(feature = "ssr"))]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod wasm_tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    const SHIM: &str = r#"globalThis.window = { nostr: {
+        getPublicKey: async () => "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+        signEvent: async (e) => Object.assign({}, e, { id: "00", sig: "11" }),
+        nip44: {
+            encrypt: async (pk, pt) => "enc:" + pk + ":" + pt,
+            decrypt: async (pk, ct) => "dec:" + pk + ":" + ct,
+        },
+    } };"#;
+
+    #[wasm_bindgen_test]
+    async fn nip07_calls_reach_window_nostr() {
+        js_sys::eval(SHIM).unwrap();
+        let h = Nip07Handle::get_public_key().await.unwrap();
+        assert_eq!(
+            h.public_key.to_hex(),
+            "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+        );
+        let signed = h.sign_event(r#"{"kind":1}"#).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        assert_eq!(v.get("sig").and_then(|s| s.as_str()), Some("11"));
+        assert_eq!(h.nip44_encrypt("pk", "hi").await.unwrap(), "enc:pk:hi");
+        assert_eq!(h.nip44_decrypt("pk", "ct").await.unwrap(), "dec:pk:ct");
     }
 }

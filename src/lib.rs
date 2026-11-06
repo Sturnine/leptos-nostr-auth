@@ -353,4 +353,26 @@ mod types {
         #[error("Serialization error: {0}")]
         Serialization(String),
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use nostr::key::Keys;
+
+        #[test]
+        fn method_names_are_stable() {
+            assert_eq!(LoginMethod::Extension.name(), "Browser Extension");
+            assert_eq!(LoginMethod::Bunker.name(), "Nostr Connect");
+            assert_eq!(LoginMethod::Passkey.name(), "Passkey");
+            assert_eq!(LoginMethod::ReadOnly.name(), "Read-Only");
+            assert_eq!(LoginMethod::Ncryptsec.name(), "Encrypted Key");
+            #[cfg(feature = "insecure_nsec_input")]
+            assert_eq!(LoginMethod::RawNsec.name(), "Secret Key");
+            let public_key = Keys::generate().public_key();
+            let ext = AuthResult::Extension(Nip07Handle { public_key });
+            assert_eq!(ext.method_name(), "Browser Extension");
+            let ro = AuthResult::ReadOnly(ReadOnlyHandle { public_key });
+            assert_eq!(ro.method_name(), "Read-Only");
+        }
+    }
 }
