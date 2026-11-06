@@ -2089,7 +2089,10 @@ mod tests {
         let Err(failure) = only_outcome(fx.feed(&frame(&event))) else {
             unreachable!("expected a failure");
         };
-        assert!(matches!(&failure, RpcFailure::Signer(text) if text == "timeout"));
+        let RpcFailure::Signer(signer_text) = &failure else {
+            unreachable!("expected a signer failure");
+        };
+        assert_eq!(signer_text, "timeout");
         let NostrAuthError::SigningFailed(text) = failure.into_signing_error() else {
             unreachable!("expected a signing failure");
         };
