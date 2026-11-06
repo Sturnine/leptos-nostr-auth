@@ -205,7 +205,7 @@ mod imp {
 
     use super::BunkerSession;
     use crate::signers::browser::{
-        js_err_msg, make_rpc_promise, make_timeout_promise, now_timestamp, random_bytes,
+        RpcTimer, js_err_msg, make_rpc_promise, now_timestamp, random_bytes,
     };
     use crate::signers::nip46_protocol::{
         AUTH_URL_TIMEOUT_SECS, AttemptLog, BunkerTarget, DeadlineAction, Effect, Handshake,
@@ -609,21 +609,21 @@ mod imp {
             ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
             ws.set_onerror(Some(on_error_open.as_ref().unchecked_ref()));
 
-            let timeout_promise = make_timeout_promise(self.timeout_secs);
-            let race = Promise::race(&Array::of2(&open_promise, &timeout_promise));
-            let opened = JsFuture::from(race).await;
+            let opened = {
+                let timer = RpcTimer::start(self.timeout_secs);
+                let race = Promise::race(&Array::of2(&open_promise, timer.fired()));
+                JsFuture::from(race).await
+            };
 
             ws.set_onopen(None);
             ws.set_onerror(None);
 
-            opened.map_err(|e| {
-                let msg = e.as_string().unwrap_or_else(|| "connect failed".into());
-                if msg == "timeout" {
-                    NostrAuthError::BunkerTimeout
-                } else {
-                    NostrAuthError::BunkerConnectionFailed(msg)
-                }
-            })?;
+            if let Err(e) = opened {
+                return Err(NostrAuthError::BunkerConnectionFailed(js_err_msg(&e)));
+            }
+            if ws.ready_state() != web_sys::WebSocket::OPEN {
+                return Err(NostrAuthError::BunkerTimeout);
+            }
 
             ws.send_with_str(&subscribe_frame(self.client_keys.public_key()))
                 .map_err(|e| NostrAuthError::BunkerConnectionFailed(js_err_msg(&e)))?;
@@ -705,8 +705,8 @@ mod imp {
 
             let mut wait_secs = self.timeout_secs;
             loop {
-                let timer = make_timeout_promise(wait_secs);
-                let race = Promise::race(&Array::of2(&woken, &timer));
+                let timer = RpcTimer::start(wait_secs);
+                let race = Promise::race(&Array::of2(&woken, timer.fired()));
                 let _ = JsFuture::from(race).await;
                 if let Some(outcome) = slot.borrow_mut().take() {
                     return outcome;
