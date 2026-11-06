@@ -990,6 +990,65 @@ mod tests {
     }
 
     #[test]
+    fn closed_session_through_traits() {
+        use crate::signers::signer_traits::tests::{ready, unsigned};
+        use core::error::Error as _;
+        use nostr::event::{AsyncSignEvent, FinalizeEventAsync};
+        use nostr::key::AsyncGetPublicKey;
+        let s = session();
+        let pk = s.public_key;
+        s.conn.close();
+        let auth = crate::types::AuthResult::Bunker(Box::new(s));
+        let direct = ready(auth.sign_event_async(unsigned(pk)));
+        assert!(matches!(direct, Err(NostrAuthError::BunkerSessionClosed)));
+        let wrapped = ready(unsigned(pk).finalize_async(&auth)).unwrap_err();
+        let source = wrapped
+            .source()
+            .and_then(|e| e.downcast_ref::<NostrAuthError>());
+        assert!(matches!(source, Some(NostrAuthError::BunkerSessionClosed)));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use nostr::event::{EventBuilder, Kind};
+            let built =
+                ready(EventBuilder::new(Kind::TextNote, "hi").finalize_async(&auth)).unwrap_err();
+            let source = built
+                .source()
+                .and_then(|e| e.downcast_ref::<NostrAuthError>());
+            assert!(matches!(source, Some(NostrAuthError::BunkerSessionClosed)));
+        }
+        assert_eq!(ready(auth.get_public_key_async()).unwrap(), pk);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn closed_session_through_trait_on_wasm() {
+        use crate::signers::signer_traits::tests::unsigned;
+        use nostr::event::AsyncSignEvent;
+        let s = session();
+        let pk = s.public_key;
+        s.conn.close();
+        let auth = crate::types::AuthResult::Bunker(Box::new(s));
+        let r = auth.sign_event_async(unsigned(pk)).await;
+        assert!(matches!(r, Err(NostrAuthError::BunkerSessionClosed)));
+    }
+
+    #[test]
+    fn debug_redacts_bunker() {
+        let mut s = session();
+        s.bunker_uri = "bunker://abc?relay=wss%3A%2F%2Frelay.example&secret=TOPSECRET".to_owned();
+        let pk = s.public_key.to_hex();
+        let auth = crate::types::AuthResult::Bunker(Box::new(s));
+        assert_eq!(
+            format!("{auth:?}"),
+            format!("Bunker {{ public_key: PublicKey({pk}) }}")
+        );
+        assert_eq!(
+            format!("{auth:#?}"),
+            format!("Bunker {{\n    public_key: PublicKey({pk}),\n}}")
+        );
+    }
+
+    #[test]
     fn guard_drop_removes_entry_and_prompt() {
         let inflight = Rc::new(RefCell::new(Inflight::<()>::default()));
         inflight.borrow_mut().insert(
@@ -1050,6 +1109,20 @@ pub(super) mod server_tests {
         auth.close_session();
         assert_eq!(
             text(ready(auth.sign_event("{}"))),
+            "Signing failed: not available on server"
+        );
+    }
+
+    #[test]
+    fn bunker_reports_server_stub_through_trait() {
+        use crate::signers::signer_traits::tests::{ready, unsigned};
+        use nostr::event::AsyncSignEvent;
+        let s = bunker();
+        let pk = s.public_key;
+        s.close();
+        let auth = crate::types::AuthResult::Bunker(Box::new(s));
+        assert_eq!(
+            text(ready(auth.sign_event_async(unsigned(pk)))),
             "Signing failed: not available on server"
         );
     }

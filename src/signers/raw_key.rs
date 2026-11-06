@@ -80,6 +80,15 @@ impl RawKeySession {
     pub fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         super::sign_with_keys(&self.keys, event_json)
     }
+
+    /// Wraps known keys for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn for_tests(keys: Keys) -> Self {
+        Self {
+            public_key: keys.public_key(),
+            keys,
+        }
+    }
 }
 
 #[cfg(test)]

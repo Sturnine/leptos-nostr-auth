@@ -2,9 +2,20 @@
 //! Style via `data-nostr-*` attributes in your own CSS.
 
 use leptos::prelude::*;
-use leptos_nostr_auth::nostr::event::{Kind, UnsignedEvent};
+use leptos_nostr_auth::nostr::event::{FinalizeEventAsync, Kind, UnsignedEvent};
+use leptos_nostr_auth::nostr::key::{AsyncGetPublicKey, PublicKey};
 use leptos_nostr_auth::nostr::types::Timestamp;
 use leptos_nostr_auth::{NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
+
+fn test_event(pubkey: PublicKey) -> UnsignedEvent {
+    UnsignedEvent::new(
+        pubkey,
+        Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64),
+        Kind::TextNote,
+        [],
+        "Hello from leptos-nostr-auth!",
+    )
+}
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -77,15 +88,7 @@ fn HomePage() -> impl IntoView {
                         class="btn"
                         on:click=move |_| {
                             if let Some(auth_result) = auth.auth.get() {
-                                let pubkey = auth_result.public_key();
-                                let unsigned = UnsignedEvent::new(
-                                    pubkey,
-                                    Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64),
-                                    Kind::TextNote,
-                                    [],
-                                    "Hello from leptos-nostr-auth!",
-                                );
-                                let event_json = unsigned.as_json();
+                                let event_json = test_event(auth_result.public_key()).as_json();
                                 set_sign_output.set("Signing…".into());
                                 wasm_bindgen_futures::spawn_local(async move {
                                     match auth_result.sign_event(&event_json).await {
@@ -100,6 +103,31 @@ fn HomePage() -> impl IntoView {
                         }
                     >
                         "Sign test event"
+                    </button>
+                    <button
+                        class="btn"
+                        on:click=move |_| {
+                            if let Some(auth_result) = auth.auth.get() {
+                                set_sign_output.set("Signing…".into());
+                                wasm_bindgen_futures::spawn_local(async move {
+                                    let signed = match auth_result.get_public_key_async().await {
+                                        Ok(pubkey) => {
+                                            test_event(pubkey)
+                                                .finalize_async(&auth_result)
+                                                .await
+                                                .map_err(|e| e.to_string())
+                                        }
+                                        Err(e) => Err(e.to_string()),
+                                    };
+                                    match signed {
+                                        Ok(event) => set_sign_output.set(event.as_json()),
+                                        Err(e) => set_sign_output.set(format!("Error: {e}")),
+                                    }
+                                });
+                            }
+                        }
+                    >
+                        "Sign with finalize_async"
                     </button>
                     <Show when=move || !sign_output.get().is_empty() fallback=|| ()>
                         <pre class="signed-output">

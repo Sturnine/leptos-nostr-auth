@@ -84,7 +84,7 @@ thiserror = "2"
 
 # Makes non-Send types (Rc, web-sys objects) usable in Leptos signals on WASM.
 # Safe because WASM is single-threaded; SendWrapper panics on cross-thread access.
-send_wrapper = "0.6"
+send_wrapper = { version = "0.6", features = ["futures"] }
 
 # nostr 0.45 randomness (rand 0.10 -> getrandom 0.4) needs the browser backend explicitly
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]

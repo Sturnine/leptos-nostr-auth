@@ -137,6 +137,23 @@ impl AuthResult {
     }
 }
 
+impl core::fmt::Debug for AuthResult {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let variant = match self {
+            Self::Extension(_) => "Extension",
+            Self::Bunker(_) => "Bunker",
+            Self::Passkey(_) => "Passkey",
+            Self::ReadOnly(_) => "ReadOnly",
+            Self::Ncryptsec(_) => "Ncryptsec",
+            #[cfg(feature = "insecure_nsec_input")]
+            Self::RawNsec(_) => "RawNsec",
+        };
+        f.debug_struct(variant)
+            .field("public_key", &self.public_key())
+            .finish()
+    }
+}
+
 /// What gets written to localStorage.
 ///
 /// Never contains the user's Nostr identity secret key. **Does** contain a disposable,
@@ -349,5 +366,58 @@ mod tests {
         assert_eq!(ext.method_name(), "Browser Extension");
         let ro = AuthResult::ReadOnly(ReadOnlyHandle { public_key });
         assert_eq!(ro.method_name(), "Read-Only");
+    }
+
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+    fn debug_prints_variant_and_public_key_only() {
+        use crate::signers::{PasskeySession, RawKeySession};
+        let keys = Keys::new(
+            nostr::key::SecretKey::from_hex(
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .unwrap(),
+        );
+        let hex = keys.public_key().to_hex();
+        let check = |name: &str, auth: &AuthResult| {
+            assert_eq!(
+                format!("{auth:?}"),
+                format!("{name} {{ public_key: PublicKey({hex}) }}")
+            );
+            assert_eq!(
+                format!("{auth:#?}"),
+                format!("{name} {{\n    public_key: PublicKey({hex}),\n}}")
+            );
+        };
+        #[cfg(feature = "insecure_nsec_input")]
+        check(
+            "RawNsec",
+            &AuthResult::RawNsec(RawKeySession::for_tests(keys.clone())),
+        );
+        let cases = [
+            (
+                "Extension",
+                AuthResult::Extension(Nip07Handle {
+                    public_key: keys.public_key(),
+                }),
+            ),
+            (
+                "ReadOnly",
+                AuthResult::ReadOnly(ReadOnlyHandle {
+                    public_key: keys.public_key(),
+                }),
+            ),
+            (
+                "Ncryptsec",
+                AuthResult::Ncryptsec(RawKeySession::for_tests(keys.clone())),
+            ),
+            (
+                "Passkey",
+                AuthResult::Passkey(PasskeySession::for_tests(keys, vec![7, 8, 9])),
+            ),
+        ];
+        for (name, auth) in &cases {
+            check(name, auth);
+        }
     }
 }

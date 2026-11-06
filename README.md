@@ -288,6 +288,57 @@ if auth.auth.get().map(|a| a.can_sign()).unwrap_or(false) {
 }
 ```
 
+### Using AuthResult as a nostr signer
+
+`AuthResult` implements `nostr`'s `AsyncGetPublicKey` and `AsyncSignEvent`, so it can be passed to
+`finalize_async`. Its `Debug` prints the variant and public key only.
+
+```rust
+use leptos_nostr_auth::nostr::event::{FinalizeEventAsync, Kind, UnsignedEvent};
+use leptos_nostr_auth::nostr::types::Timestamp;
+
+let now = Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64);
+let event = UnsignedEvent::new(auth_result.public_key(), now, Kind::TextNote, [], "hi")
+    .finalize_async(&auth_result)
+    .await?;
+```
+
+`EventBuilder::new(Kind::TextNote, "hi").finalize_async(&auth_result)` reaches `Timestamp::now`,
+as does any `nostr` helper that builds through `EventBuilder`, such as NIP-98
+`HttpData::to_authorization`. On wasm that needs your own `universal-time = "0.3"` and `js-sys`
+dependencies and this provider in your binary crate:
+
+```rust
+use core::time::Duration;
+use universal_time::{Instant, MonotonicClock, SystemTime, WallClock, define_time_provider};
+struct BrowserClock;
+impl WallClock for BrowserClock {
+    fn system_time(&self) -> SystemTime {
+        SystemTime::from_unix_duration(Duration::from_millis(js_sys::Date::now() as u64))
+    }
+}
+impl MonotonicClock for BrowserClock {
+    fn instant(&self) -> Instant {
+        Instant::from_ticks(Duration::from_millis(js_sys::Date::now() as u64))
+    }
+}
+define_time_provider!(BrowserClock);
+```
+
+With rustc 1.99.1 a missing provider was a link error, and `custom_created_at` did not avoid it,
+either in a dev build or with `opt-level = "z"` and `lto`. Other toolchains may link and trap at
+runtime, so do not assume `EventBuilder` works on wasm without a provider.
+
+- `sign_event_async` returns `NostrAuthError`. `finalize_async` wraps it in `nostr::error::Error`
+  with the original as its source: `use core::error::Error as _;` then
+  `err.source().and_then(|s| s.downcast_ref::<NostrAuthError>())`. Match
+  `NostrAuthError::BunkerSessionClosed` and handle it by re-reading `NostrAuthContext::auth`.
+- `get_public_key_async` returns the session's key, not the extension's current account.
+- A future can move between threads until its first poll. Without `ssr`, one that has suspended must
+  stay on its thread. Key, read-only and closed sessions finish in their first poll.
+- `nostr` helpers that also require `AsyncNip44`, such as NIP-17 and NIP-59 gift wrap, do not accept
+  `AuthResult`.
+
 ### NIP-44 encryption
 
 ```rust
@@ -474,7 +525,12 @@ All elements emit `data-nostr-*` attributes for styling:
   `js_sys::Date::now()` instead. With rustc 1.99.0 and 1.99.1, a wasm binary that reaches `Timestamp::now`
   without a provider fails at link time (`a time provider is required`). Other toolchains may
   behave the other way: a missing provider could link and then trap at runtime with no build
-  warning. Do not assume `EventBuilder` works on wasm without a provider.
+  warning. Do not assume `EventBuilder` works on wasm without a provider. This includes
+  `EventBuilder::finalize_async` and `nostr` helpers that build through it, and
+  `custom_created_at` did not avoid the link error with rustc 1.99.1, in a dev build or with
+  `opt-level = "z"` and `lto`.
+- `AuthResult` now implements `nostr`'s `AsyncGetPublicKey`, `AsyncSignEvent` and `Debug`. `Debug`
+  prints the variant and public key only.
 - A NIP-46 `auth_url` no longer returns an error containing the URL. The request stays pending and
   a mounted modal shows the link. Direct `BunkerSession` callers mount one closed modal, for example
   `<NostrAuthModal open=false on_auth=... />`; a provider already mounts its own. With no modal
