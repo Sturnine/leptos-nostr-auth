@@ -93,7 +93,7 @@ pub fn NostrAuthProvider(
     // use_local_storage is SSR-safe:
     //   server  → stored_session.get() == None; set/delete are no-ops
     //   client  → reads/writes real localStorage at storage_key
-    // PersistedSession requires PartialEq (derived in lib.rs) for the equality check
+    // PersistedSession requires PartialEq (derived in types.rs) for the equality check
     // that prevents spurious reactive updates.
     let (stored_session, set_stored_session, delete_stored_session) =
         use_local_storage::<Option<PersistedSession>, JsonSerdeCodec>(cfg.get_value().storage_key);
