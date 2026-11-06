@@ -23,6 +23,8 @@ mod passkey;
 mod raw_key;
 /// Read-only backend.
 mod read_only;
+/// `nostr` signer trait impls for `AuthResult`.
+mod signer_traits;
 
 pub use crate::types::AuthResult;
 pub use nip07::Nip07Handle;
@@ -56,6 +58,8 @@ mod server_tests {
     use core::future::Future;
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
+    use nostr::event::AsyncSignEvent;
+    use nostr::key::AsyncGetPublicKey;
 
     pub(super) fn ready<F: Future>(fut: F) -> F::Output {
         match pin!(fut).poll(&mut Context::from_waker(Waker::noop())) {
@@ -86,6 +90,9 @@ mod server_tests {
         assert_send(s.nip44_decrypt("a", "b"));
         assert_send(PasskeySession::create("rp", "name"));
         assert_send(PasskeySession::authenticate(None));
-        assert_send(AuthResult::Extension(h).sign_event("{}"));
+        let auth = AuthResult::Extension(h);
+        assert_send(auth.get_public_key_async());
+        assert_send(auth.sign_event_async(signer_traits::tests::unsigned(auth.public_key())));
+        assert_send(auth.sign_event("{}"));
     }
 }
