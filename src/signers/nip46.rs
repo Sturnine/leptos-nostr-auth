@@ -5,8 +5,10 @@ use crate::types::NostrAuthError;
 
 /// An established NIP-46 remote signing session.
 ///
-/// Maintains a persistent WebSocket to the relay — reused across `sign_event` calls
-/// so each signing request does not pay the full connection setup cost.
+/// One WebSocket carries the handshake and every later request. Every relay in the URI is kept;
+/// connection tries them in order until one works, and the one that worked moves to the front of
+/// [`BunkerSession::bunker_uri`]. There is no failover while a socket stays open, because retrying
+/// a `sign_event` elsewhere risks signing twice.
 ///
 /// `Clone` is shallow: every clone shares the same underlying WebSocket, message
 /// handler, and in-flight request table via `Rc<RefCell<_>>`. This is intentional —
@@ -55,11 +57,18 @@ impl BunkerSession {
     /// previously-authorized session without the bunker's one-time secret, the crate-internal
     /// `BunkerSession::reconnect` (used by session restore) is used instead.
     ///
+    /// A URI may list up to five relays after duplicates are removed. If the signer sends an
+    /// approval link, a mounted [`crate::modal::NostrAuthModal`] shows it, also while `open` is
+    /// false, and the request waits `timeout_secs` plus 300 s. A modal unmounted during that wait
+    /// does not shorten it. Closing the modal does not cancel a login: a dismissed login can still
+    /// complete up to that bound later and call `on_auth`.
+    ///
     /// # Errors
     ///
     /// Returns an error when called with SSR features, when connection fails,
     /// or when given a `nostrconnect://` URI (client-initiated pairing is not
-    /// yet supported).
+    /// yet supported). Returns [`NostrAuthError::BunkerAuthRequired`] when the signer asks for
+    /// approval and no modal is mounted to show the link when the timeout fires.
     pub async fn connect(uri: &str, timeout_secs: u32) -> Result<Self, NostrAuthError> {
         imp::connect(uri, timeout_secs).await
     }
@@ -70,9 +79,10 @@ impl BunkerSession {
     /// by the original [`BunkerSession::connect`] call — never the user's Nostr identity key,
     /// never the bunker's one-time secret. Per NIP-46, that secret is single-use and the remote
     /// signer is expected to already recognize this client's public key from the original
-    /// pairing, so no secret needs to be resent. If the remote signer has forgotten this client
-    /// (access revoked, or a non-compliant bunker that doesn't retain authorization), this call
-    /// fails and the caller should fall back to prompting the user to reconnect from scratch.
+    /// pairing, so only `get_public_key` is sent. Behaviour on a revoked client varies by signer:
+    /// one that answers `get_public_key` to anyone restores it as authenticated, and it fails at
+    /// the first signature. A signer that refuses makes this call fail, and the caller should fall
+    /// back to prompting the user to reconnect from scratch.
     ///
     /// Only called from `storage::restore_session`, which never runs on the server; the server
     /// stub exists so that caller compiles there.
@@ -104,7 +114,9 @@ impl BunkerSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when called with SSR features or when signing fails..
+    /// Returns an error when called with SSR features or when signing fails. Returns
+    /// [`NostrAuthError::BunkerAuthRequired`] when the signer asks for approval and no modal is
+    /// mounted to show the link.
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
         imp::sign_event(self, event_json).await
     }
@@ -113,7 +125,9 @@ impl BunkerSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when called with SSR features or when nip44 decryption fails.
+    /// Returns an error when called with SSR features, when `recipient_hex` is not a public key,
+    /// or when nip44 encryption fails. Returns [`NostrAuthError::BunkerAuthRequired`] when the
+    /// signer asks for approval and no modal is mounted to show the link.
     pub async fn nip44_encrypt(
         &self,
         recipient_hex: &str,
@@ -126,7 +140,9 @@ impl BunkerSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when called with SSR features or when nip44 decryption fails.
+    /// Returns an error when called with SSR features, when `sender_hex` is not a public key, or
+    /// when nip44 decryption fails. Returns [`NostrAuthError::BunkerAuthRequired`] when the signer
+    /// asks for approval and no modal is mounted to show the link.
     pub async fn nip44_decrypt(
         &self,
         sender_hex: &str,

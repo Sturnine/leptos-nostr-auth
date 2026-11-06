@@ -142,7 +142,7 @@ pub struct PersistedSession {
     pub public_key_hex: String,
     /// Which login method was used.
     pub method: PersistedMethod,
-    /// NIP-46: secret-stripped `bunker://` URI (remote pubkey + relay only) for reconnection.
+    /// NIP-46: secret-stripped `bunker://` URI (remote pubkey + relays only) for reconnection.
     pub bunker_uri: Option<String>,
     /// NIP-46: hex secret of the local pairing keypair used to reconnect without the
     /// bunker's one-time secret. Sensitive (bearer-token-equivalent) but is never the
@@ -235,7 +235,9 @@ pub struct NostrAuthConfig {
     pub close_on_escape: bool,
     /// Which login methods to expose (default: all)
     pub allowed_methods: Vec<LoginMethod>,
-    /// NIP-46 WebSocket connection timeout in seconds (default: `30`)
+    /// NIP-46 timeout in seconds (default: `30`), applied per relay and per step: each socket open
+    /// and each request gets the full value. A request whose signer sends an approval link waits
+    /// one extra 300 s, only while a mounted [`crate::modal::NostrAuthModal`] can show the link.
     pub bunker_timeout_secs: u32,
     /// WebAuthn relying party ID — MUST match your domain (default: `window.location.hostname`)
     ///
