@@ -28,6 +28,21 @@ pub use passkey::PasskeySession;
 pub use raw_key::RawKeySession;
 pub use read_only::ReadOnlyHandle;
 
+use nostr::event::{FinalizeEvent, UnsignedEvent};
+use nostr::key::Keys;
+
+use crate::types::NostrAuthError;
+
+/// Sign an unsigned event given as JSON with in-memory keys.
+fn sign_with_keys(keys: &Keys, event_json: &str) -> Result<String, NostrAuthError> {
+    let unsigned: UnsignedEvent = serde_json::from_str(event_json)
+        .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
+    let signed = unsigned
+        .finalize(keys)
+        .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
+    serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))
+}
+
 #[cfg(test)]
 #[cfg(feature = "ssr")]
 mod server_tests {
@@ -35,9 +50,6 @@ mod server_tests {
     use core::future::Future;
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
-    use nostr::key::Keys;
-
-    use crate::types::NostrAuthError;
 
     pub(super) fn ready<F: Future>(fut: F) -> F::Output {
         match pin!(fut).poll(&mut Context::from_waker(Waker::noop())) {

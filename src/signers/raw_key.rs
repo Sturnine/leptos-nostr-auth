@@ -1,5 +1,4 @@
-use nostr::event::{FinalizeEvent, UnsignedEvent};
-use nostr::key::{Keys, PublicKey, SecretKey};
+use nostr::key::{Keys, PublicKey};
 use nostr::nips::nip19::FromBech32;
 
 use crate::types::NostrAuthError;
@@ -13,8 +12,8 @@ use crate::types::NostrAuthError;
 pub struct RawKeySession {
     /// The authenticated user's public key.
     pub public_key: PublicKey,
-    /// In-memory secp256k1 secret key; zeroed on drop via `ZeroizeOnDrop`.
-    secret_key: SecretKey,
+    /// In-memory keypair; `Keys` erases its secret key on drop with a non-secure erase.
+    keys: Keys,
 }
 
 impl RawKeySession {
@@ -38,10 +37,10 @@ impl RawKeySession {
             }
         })?;
 
-        let keys = Keys::new(secret_key.clone());
+        let keys = Keys::new(secret_key);
         Ok(Self {
             public_key: keys.public_key(),
-            secret_key,
+            keys,
         })
     }
 
@@ -54,6 +53,8 @@ impl RawKeySession {
     /// Returns an error when parsing nsec fails.
     #[cfg(feature = "insecure_nsec_input")]
     pub fn from_nsec_or_hex(input: &str) -> Result<Self, NostrAuthError> {
+        use nostr::key::SecretKey;
+
         let input = input.trim();
         let secret_key = if let Ok(sk) = SecretKey::from_bech32(input) {
             sk
@@ -64,10 +65,10 @@ impl RawKeySession {
                 "Expected nsec1... (bech32) or 64-char hex private key".into(),
             ));
         };
-        let keys = Keys::new(secret_key.clone());
+        let keys = Keys::new(secret_key);
         Ok(Self {
             public_key: keys.public_key(),
-            secret_key,
+            keys,
         })
     }
 
@@ -77,13 +78,7 @@ impl RawKeySession {
     ///
     /// Returns an error if signing fails.
     pub fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
-        let unsigned: UnsignedEvent = serde_json::from_str(event_json)
-            .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
-        let keys = Keys::new(self.secret_key.clone());
-        let signed = unsigned
-            .finalize(&keys)
-            .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
-        serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))
+        super::sign_with_keys(&self.keys, event_json)
     }
 }
 
@@ -147,7 +142,7 @@ mod tests {
         let keys = Keys::generate();
         let s = RawKeySession {
             public_key: keys.public_key(),
-            secret_key: keys.secret_key().clone(),
+            keys,
         };
         assert!(matches!(
             s.sign_event("{"),

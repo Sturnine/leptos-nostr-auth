@@ -1,22 +1,17 @@
-use core::cell::RefCell;
 use js_sys::{Object, Promise, Reflect, Uint8Array};
 use nostr::types::Timestamp;
-use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 /// Create a Promise and extract its resolve/reject functions.
-pub(super) fn make_rpc_promise() -> (Promise, Option<js_sys::Function>, Option<js_sys::Function>) {
-    let resolve_cell: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
-    let reject_cell: Rc<RefCell<Option<js_sys::Function>>> = Rc::new(RefCell::new(None));
-    let rc = Rc::clone(&resolve_cell);
-    let rj = Rc::clone(&reject_cell);
-    let promise = Promise::new(&mut |resolve, reject| {
-        *rc.borrow_mut() = Some(resolve);
-        *rj.borrow_mut() = Some(reject);
-    });
-    let resolve_fn = resolve_cell.borrow().clone();
-    let reject_fn = reject_cell.borrow().clone();
-    (promise, resolve_fn, reject_fn)
+pub(super) fn make_rpc_promise() -> (Promise, js_sys::Function, js_sys::Function) {
+    let mut settle = None;
+    let promise = Promise::new(&mut |resolve, reject| settle = Some((resolve, reject)));
+    #[expect(
+        clippy::expect_used,
+        reason = "the Promise constructor runs its executor synchronously"
+    )]
+    let (resolve, reject) = settle.expect("Promise executor did not run");
+    (promise, resolve, reject)
 }
 
 /// Create a Promise that rejects with `"timeout"` after `timeout_secs` seconds.
@@ -102,4 +97,29 @@ pub(super) fn set(obj: &Object, key: &str, val: &JsValue) {
 )]
 pub(super) fn set_str(obj: &Object, key: &str, val: &str) {
     Reflect::set(obj, &key.into(), &JsValue::from_str(val)).unwrap();
+}
+
+#[cfg(test)]
+#[cfg(target_arch = "wasm32")]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod wasm_tests {
+    use super::*;
+    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    async fn rpc_promise_settles_through_its_functions() {
+        let (ok, resolve, _) = make_rpc_promise();
+        resolve
+            .call1(&JsValue::UNDEFINED, &JsValue::from_str("done"))
+            .unwrap();
+        let value = JsFuture::from(ok).await.unwrap();
+        assert_eq!(value.as_string().unwrap(), "done");
+        let (failed, _, reject) = make_rpc_promise();
+        reject
+            .call1(&JsValue::UNDEFINED, &JsValue::from_str("nope"))
+            .unwrap();
+        let error = JsFuture::from(failed).await.unwrap_err();
+        assert_eq!(error.as_string().unwrap(), "nope");
+    }
 }

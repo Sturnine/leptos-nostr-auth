@@ -465,14 +465,11 @@ mod imp {
             *self.connect_lock.borrow_mut() = None;
             match &result {
                 Ok(_) => {
-                    if let Some(f) = &lock_resolve {
-                        let _ = f.call1(&JsValue::UNDEFINED, &JsValue::UNDEFINED);
-                    }
+                    let _ = lock_resolve.call1(&JsValue::UNDEFINED, &JsValue::UNDEFINED);
                 }
                 Err(e) => {
-                    if let Some(f) = &lock_reject {
-                        let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&e.to_string()));
-                    }
+                    let _ =
+                        lock_reject.call1(&JsValue::UNDEFINED, &JsValue::from_str(&e.to_string()));
                 }
             }
 
@@ -519,18 +516,14 @@ mod imp {
                     {"kinds": [24133], "#p": [client_pk_hex]}
                 ]);
                 let _ = ws_for_open.send_with_str(&req_msg.to_string());
-                if let Some(f) = &open_resolve {
-                    let _ = f.call1(&JsValue::UNDEFINED, &JsValue::UNDEFINED);
-                }
+                let _ = open_resolve.call1(&JsValue::UNDEFINED, &JsValue::UNDEFINED);
             });
 
             let on_error_open = Closure::<dyn FnMut(_)>::new(move |_: web_sys::ErrorEvent| {
-                if let Some(f) = &open_reject {
-                    let _ = f.call1(
-                        &JsValue::UNDEFINED,
-                        &JsValue::from_str("WebSocket error during reconnect"),
-                    );
-                }
+                let _ = open_reject.call1(
+                    &JsValue::UNDEFINED,
+                    &JsValue::from_str("WebSocket error during reconnect"),
+                );
             });
 
             ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
@@ -594,14 +587,10 @@ mod imp {
                 req_id_owned,
                 Box::new(move |result: Result<String, String>| match result {
                     Ok(v) => {
-                        if let Some(f) = &resolve_fn {
-                            let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&v));
-                        }
+                        let _ = resolve_fn.call1(&JsValue::UNDEFINED, &JsValue::from_str(&v));
                     }
                     Err(e) => {
-                        if let Some(f) = &reject_fn {
-                            let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&e));
-                        }
+                        let _ = reject_fn.call1(&JsValue::UNDEFINED, &JsValue::from_str(&e));
                     }
                 }),
             );
@@ -873,14 +862,11 @@ mod imp {
             }
             match result {
                 Ok(result_str) => {
-                    if let Some(f) = &resolve_for_msg {
-                        let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&result_str));
-                    }
+                    let _ =
+                        resolve_for_msg.call1(&JsValue::UNDEFINED, &JsValue::from_str(&result_str));
                 }
                 Err(err) => {
-                    if let Some(f) = &reject_for_msg {
-                        let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str(&err));
-                    }
+                    let _ = reject_for_msg.call1(&JsValue::UNDEFINED, &JsValue::from_str(&err));
                 }
             }
         });
@@ -888,9 +874,7 @@ mod imp {
         let on_error = Closure::<dyn FnMut(_)>::new({
             let reject_fn = reject_fn.clone();
             move |_: web_sys::ErrorEvent| {
-                if let Some(f) = &reject_fn {
-                    let _ = f.call1(&JsValue::UNDEFINED, &JsValue::from_str("WebSocket error"));
-                }
+                let _ = reject_fn.call1(&JsValue::UNDEFINED, &JsValue::from_str("WebSocket error"));
             }
         });
 

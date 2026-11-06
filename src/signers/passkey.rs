@@ -1,5 +1,4 @@
-use nostr::event::{FinalizeEvent, UnsignedEvent};
-use nostr::key::{Keys, PublicKey, SecretKey};
+use nostr::key::{Keys, PublicKey};
 
 use crate::types::NostrAuthError;
 
@@ -11,8 +10,8 @@ use crate::types::NostrAuthError;
 pub struct PasskeySession {
     /// The authenticated user's public key.
     pub public_key: PublicKey,
-    /// In-memory-only secp256k1 secret key derived from the WebAuthn PRF output.
-    secret_key: SecretKey,
+    /// In-memory-only keypair derived from the WebAuthn PRF output.
+    keys: Keys,
     /// Raw credential ID bytes, as returned by the browser's WebAuthn API
     /// (`credential.rawId`). Not encoded — callers that persist this (see
     /// `PersistedSession::passkey_credential_id`) base64url-encode it themselves;
@@ -56,13 +55,7 @@ impl PasskeySession {
     ///
     /// Returns an error if signing fails.
     pub fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
-        let unsigned: UnsignedEvent = serde_json::from_str(event_json)
-            .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
-        let keys = Keys::new(self.secret_key.clone());
-        let signed = unsigned
-            .finalize(&keys)
-            .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
-        serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))
+        super::sign_with_keys(&self.keys, event_json)
     }
 }
 
@@ -279,12 +272,12 @@ mod imp {
         let secret_key = SecretKey::from_slice(&digest)
             .map_err(|e| NostrAuthError::PasskeyFailed(e.to_string()))?;
 
-        let keys = Keys::new(secret_key.clone());
+        let keys = Keys::new(secret_key);
         let public_key = keys.public_key();
 
         Ok(PasskeySession {
             public_key,
-            secret_key,
+            keys,
             credential_id,
         })
     }
@@ -333,7 +326,7 @@ mod tests {
         let keys = Keys::generate();
         let s = PasskeySession {
             public_key: keys.public_key(),
-            secret_key: keys.secret_key().clone(),
+            keys,
             credential_id: vec![1, 2, 3],
         };
         assert!(matches!(
@@ -342,7 +335,7 @@ mod tests {
         ));
         let unsigned = format!(
             r#"{{"pubkey":"{}","created_at":1700000000,"kind":1,"tags":[],"content":"hi"}}"#,
-            keys.public_key().to_hex()
+            s.public_key.to_hex()
         );
         let signed = s.sign_event(&unsigned).unwrap();
         Event::from_json(signed).unwrap().verify().unwrap();
@@ -370,7 +363,7 @@ mod tests {
             hex,
             "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd"
         );
-        let sk = SecretKey::from_slice(&digest).unwrap();
+        let sk = nostr::key::SecretKey::from_slice(&digest).unwrap();
         assert_eq!(
             Keys::new(sk).public_key().to_hex(),
             "f8d6557dfcca8c44b8b9d16d33e3faa77e05286f992067a5453441f8b13d582e"
