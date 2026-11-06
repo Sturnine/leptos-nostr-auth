@@ -110,6 +110,10 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 ///     }
 /// }
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "one reactive setup; splitting it would only pass its signals around"
+)]
 #[component]
 pub fn NostrAuthProvider(
     /// Optional configuration (default: all methods enabled, persistence on).

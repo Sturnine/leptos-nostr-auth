@@ -5,13 +5,17 @@ use crate::types::{AuthResult, LoginMethod, NostrAuthError, PersistedMethod, Per
 
 /// What the provider does about a stored session on mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RestorePlan {
+pub enum RestorePlan {
+    /// Persistence is off or nothing is stored.
     Nothing,
+    /// The stored method left `allowed_methods`. No prompt, no network, session kept.
     NotAllowed,
+    /// Start a restore.
     Restore,
 }
 
-pub(crate) fn restore_plan(
+/// Decide the mount action from the persist flag, the stored session and the allowed methods.
+pub fn restore_plan(
     persist: bool,
     stored: Option<&PersistedSession>,
     allowed: &[LoginMethod],
@@ -29,23 +33,28 @@ pub(crate) fn restore_plan(
 }
 
 /// Server HTML cannot know storage, so a hydrated first render must start false.
-pub(crate) fn initial_restoring(hydrating: bool, plan: RestorePlan) -> bool {
+pub fn initial_restoring(hydrating: bool, plan: RestorePlan) -> bool {
     !hydrating && plan == RestorePlan::Restore
 }
 
 /// What a successful login does to the stored session.
-pub(crate) enum LoginStorageAction {
+pub enum LoginStorageAction {
+    /// Leave storage alone.
     Keep,
-    /// `clear_on_failure` is set when something else is stored, because a failed write would leave
-    /// that other identity to return on reload.
+    /// Write the new session.
     Overwrite {
+        /// What to write.
         session: PersistedSession,
+        /// Another identity is stored, and a failed write would let it return on reload.
         clear_on_failure: bool,
     },
+    /// Delete what is stored.
     Clear,
 }
 
-pub(crate) fn login_storage_action(
+/// Apply the session rule to a successful login. Keys compare parsed, so an unparseable stored key
+/// counts as a different identity.
+pub fn login_storage_action(
     persist: bool,
     stored: Option<&PersistedSession>,
     next_public_key: &PublicKey,
@@ -68,7 +77,7 @@ pub(crate) fn login_storage_action(
 }
 
 /// Whether a `storage` event means another tab removed the stored session.
-pub(crate) fn is_logout_storage_event(
+pub fn is_logout_storage_event(
     persist: bool,
     is_local_area: bool,
     event_key: Option<&str>,
@@ -80,10 +89,7 @@ pub(crate) fn is_logout_storage_event(
     }
     // `key == None` must not consult `stored_session`: upstream's listener runs first, and the
     // microtask checkpoint between listeners of a real storage event has already refetched it.
-    match event_key {
-        None => true,
-        Some(key) => key == storage_key && new_value.is_none(),
-    }
+    event_key.is_none_or(|key| key == storage_key && new_value.is_none())
 }
 
 /// Attempt to restore a full `AuthResult` from a `PersistedSession`.
@@ -149,22 +155,26 @@ pub async fn restore_session(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
-pub(crate) mod tests {
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "tests assert by unwrapping and panicking"
+)]
+pub mod tests {
     use super::*;
     use codee::Decoder;
     use codee::string::JsonSerdeCodec;
     use core::future::Future;
     use core::pin::pin;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use core::task::{Context, Poll, Waker};
     use futures::future::{AbortHandle, Abortable};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     const USER: &str = "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2";
     const OTHER: &str = "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa";
 
-    pub(crate) fn first_poll<F: Future>(fut: F) -> Option<F::Output> {
+    pub fn first_poll<F: Future>(fut: F) -> Option<F::Output> {
         match pin!(fut).poll(&mut Context::from_waker(Waker::noop())) {
             Poll::Ready(out) => Some(out),
             Poll::Pending => None,
@@ -389,7 +399,7 @@ pub(crate) mod tests {
         for (s, n) in [
             (Some(&stored), Some(next.clone())),
             (Some(&stored), None),
-            (None, Some(next.clone())),
+            (None, Some(next)),
         ] {
             assert!(matches!(action(false, s, n), LoginStorageAction::Keep));
         }

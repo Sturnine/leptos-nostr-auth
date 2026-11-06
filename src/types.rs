@@ -204,6 +204,7 @@ pub enum PersistedMethod {
 }
 
 impl PersistedMethod {
+    /// The login method a stored session of this kind needs to be allowed.
     pub(crate) const fn login_method(&self) -> LoginMethod {
         match self {
             Self::Extension => LoginMethod::Extension,
