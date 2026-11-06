@@ -14,6 +14,9 @@ mod browser;
 mod nip07;
 /// NIP-46 remote signer (bunker) backend.
 mod nip46;
+/// JS-free NIP-46 protocol decisions, so that native `cargo test` covers them.
+#[cfg(not(feature = "ssr"))]
+mod nip46_protocol;
 /// Passkey (WebAuthn PRF) backend.
 mod passkey;
 /// In-memory raw key backend (ncryptsec and raw nsec).

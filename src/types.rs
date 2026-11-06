@@ -283,6 +283,12 @@ pub enum NostrAuthError {
     /// The bunker did not respond within the configured timeout.
     #[error("Bunker connection timed out")]
     BunkerTimeout,
+    /// The remote signer asked for approval through a link, and no mounted
+    /// [`crate::modal::NostrAuthModal`] could show it. The link is never part of this error.
+    #[error(
+        "Remote signer requires link approval, but no NostrAuthModal is mounted to show the link"
+    )]
+    BunkerAuthRequired,
     /// A WebAuthn / passkey operation failed.
     #[error("Passkey operation failed: {0}")]
     PasskeyFailed(String),
