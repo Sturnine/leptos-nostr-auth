@@ -19,7 +19,8 @@ pub struct Platform {
     pub os: Os,
     /// `window.nostr` is present (NIP-07 browser extension installed)
     pub has_nostr_extension: bool,
-    /// `navigator.credentials` exists (WebAuthn is available; PRF confirmed at runtime)
+    /// `window.PublicKeyCredential` exists. PRF is confirmed by `prf_capability` where the browser
+    /// reports it, and otherwise when a ceremony returns.
     pub supports_webauthn: bool,
 }
 
@@ -102,16 +103,9 @@ impl Platform {
 
             let os = os_from_ua_data(&navigator).unwrap_or_else(|| os_from_ua_string(&navigator));
 
-            // WebAuthn availability: navigator.credentials must exist.
-            // Actual PRF support is confirmed when credentials.create() returns PRF results.
-            let supports_webauthn = {
-                let creds = js_sys::Reflect::get(
-                    &JsValue::from(navigator),
-                    &JsValue::from_str("credentials"),
-                )
-                .ok();
-                matches!(creds, Some(ref v) if !v.is_undefined() && !v.is_null())
-            };
+            let supports_webauthn =
+                js_sys::Reflect::get(&window, &JsValue::from_str("PublicKeyCredential"))
+                    .is_ok_and(|v| !v.is_undefined() && !v.is_null());
 
             Self {
                 os,
@@ -132,6 +126,150 @@ impl Platform {
             os: Os::Other,
             has_nostr_extension: true,
             supports_webauthn: true,
+        }
+    }
+}
+
+/// The RP ID every ceremony uses: a non-empty configured value, else a non-empty hostname.
+pub(crate) fn pick_rp_id(configured: Option<&str>, hostname: Option<String>) -> String {
+    configured
+        .filter(|rp_id| !rp_id.is_empty())
+        .map(str::to_owned)
+        .or_else(|| hostname.filter(|host| !host.is_empty()))
+        .unwrap_or_else(|| "localhost".to_owned())
+}
+
+/// [`pick_rp_id`] with this page's hostname.
+pub(crate) fn effective_rp_id(configured: Option<&str>) -> String {
+    pick_rp_id(
+        configured,
+        web_sys::window().and_then(|w| w.location().hostname().ok()),
+    )
+}
+
+/// `hasBeenActive` of the given navigator; `None` when absent, throwing or not a bool.
+#[cfg(not(feature = "ssr"))]
+fn read_has_been_active(navigator: &JsValue) -> Option<bool> {
+    let activation = js_sys::Reflect::get(navigator, &JsValue::from_str("userActivation")).ok()?;
+    js_sys::Reflect::get(&activation, &JsValue::from_str("hasBeenActive"))
+        .ok()?
+        .as_bool()
+}
+
+// Sticky, not `isActive`: a press held past the 5 s transient window, or an earlier `window.open` in the handler, reads false inside a real click.
+/// Whether the user has interacted with this document; `None` when the browser cannot say.
+#[cfg(not(feature = "ssr"))]
+pub(crate) fn page_has_been_active() -> Option<bool> {
+    read_has_been_active(&JsValue::from(web_sys::window()?.navigator()))
+}
+
+/// Server stub for `page_has_been_active`.
+#[cfg(feature = "ssr")]
+pub(crate) const fn page_has_been_active() -> Option<bool> {
+    None
+}
+
+/// `show_login` may prompt unless the browser says the user has not interacted yet.
+pub(crate) fn prompt_allowed(been_active: Option<bool>) -> bool {
+    been_active != Some(false)
+}
+
+/// `extension:prf` from `PublicKeyCredential.getClientCapabilities()`; `None` when unknown.
+#[cfg(not(feature = "ssr"))]
+pub(crate) async fn prf_capability() -> Option<bool> {
+    use wasm_bindgen::JsCast as _;
+
+    let window = web_sys::window()?;
+    let class = js_sys::Reflect::get(&window, &JsValue::from_str("PublicKeyCredential")).ok()?;
+    let capabilities = js_sys::Reflect::get(&class, &JsValue::from_str("getClientCapabilities"))
+        .ok()?
+        .dyn_into::<js_sys::Function>()
+        .ok()?
+        .call0(&class)
+        .ok()?
+        .dyn_into::<js_sys::Promise>()
+        .ok()?;
+    let capabilities = wasm_bindgen_futures::JsFuture::from(capabilities)
+        .await
+        .ok()?;
+    js_sys::Reflect::get(&capabilities, &JsValue::from_str("extension:prf"))
+        .ok()?
+        .as_bool()
+}
+
+/// Server stub for `prf_capability`.
+#[cfg(feature = "ssr")]
+#[expect(
+    clippy::unused_async,
+    reason = "matches the browser signature, which awaits"
+)]
+pub(crate) async fn prf_capability() -> Option<bool> {
+    None
+}
+
+/// Hide passkeys only when WebAuthn is absent or the browser says PRF is unavailable.
+pub(crate) fn passkey_option_visible(has_public_key_credential: bool, prf: Option<bool>) -> bool {
+    has_public_key_credential && prf != Some(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pick_rp_id_table() {
+        let host = || Some("h".to_owned());
+        assert_eq!(pick_rp_id(Some("rp"), host()), "rp");
+        assert_eq!(pick_rp_id(Some("rp"), None), "rp");
+        assert_eq!(pick_rp_id(Some(""), host()), "h");
+        assert_eq!(pick_rp_id(None, host()), "h");
+        assert_eq!(pick_rp_id(None, Some(String::new())), "localhost");
+        assert_eq!(pick_rp_id(Some(""), Some(String::new())), "localhost");
+        assert_eq!(pick_rp_id(None, None), "localhost");
+    }
+
+    #[test]
+    fn passkey_option_visible_table() {
+        assert!(passkey_option_visible(true, Some(true)));
+        assert!(passkey_option_visible(true, None));
+        assert!(!passkey_option_visible(true, Some(false)));
+        assert!(!passkey_option_visible(false, Some(true)));
+        assert!(!passkey_option_visible(false, None));
+        assert!(!passkey_option_visible(false, Some(false)));
+    }
+
+    #[test]
+    fn prompt_allowed_table() {
+        assert!(prompt_allowed(Some(true)));
+        assert!(!prompt_allowed(Some(false)));
+        assert!(prompt_allowed(None));
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32", not(feature = "ssr")))]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod wasm_tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn activation_read_table() {
+        for (navigator, want) in [
+            ("({ userActivation: { hasBeenActive: true } })", Some(true)),
+            (
+                "({ userActivation: { hasBeenActive: false } })",
+                Some(false),
+            ),
+            ("({ userActivation: { hasBeenActive: 'no' } })", None),
+            (
+                "({ userActivation: { get hasBeenActive() { throw new Error('x'); } } })",
+                None,
+            ),
+            ("({ userActivation: null })", None),
+            ("({})", None),
+        ] {
+            let navigator = js_sys::eval(navigator).unwrap();
+            assert_eq!(read_has_been_active(&navigator), want);
         }
     }
 }
