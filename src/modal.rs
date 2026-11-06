@@ -630,8 +630,8 @@ fn StepBunker(
             match BunkerSession::connect(&uri_val, timeout).await {
                 Ok(session) => {
                     set_loading.set(false);
-                    // `run` panics on a disposed callback, and a wasm panic would abort with this
-                    // socket open. Dropping the value closes it.
+                    // `run` panics on a disposed callback, and a wasm panic stops all later work.
+                    // Dropping the value closes the session.
                     let _ = on_auth.try_run(AuthResult::Bunker(Box::new(session)));
                 }
                 Err(e) => {
