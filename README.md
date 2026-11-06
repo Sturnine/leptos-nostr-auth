@@ -416,7 +416,7 @@ All elements emit `data-nostr-*` attributes for styling:
 - On `wasm32-unknown-unknown`, `EventBuilder` and every other caller of `Timestamp::now` need
   `universal_time::define_time_provider!` in the consumer's binary. This crate defines no time
   provider, so it cannot collide with yours, and it builds events with `UnsignedEvent::new` and
-  `js_sys::Date::now()` instead. With rustc 1.99.0, a wasm binary that reaches `Timestamp::now`
+  `js_sys::Date::now()` instead. With rustc 1.99.0 and 1.99.1, a wasm binary that reaches `Timestamp::now`
   without a provider fails at link time (`a time provider is required`). Other toolchains may
   behave the other way: a missing provider could link and then trap at runtime with no build
   warning. Do not assume `EventBuilder` works on wasm without a provider.

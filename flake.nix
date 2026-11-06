@@ -45,7 +45,7 @@
           llvm = pkgs.llvmPackages;
           clangMajor = lib.versions.major llvm.clang-unwrapped.version;
 
-          wasmBindgenVersion = "0.2.121";
+          wasmBindgenVersion = "0.2.130";
           lockedWasmBindgen =
             (lib.findFirst (p: p.name == "wasm-bindgen") null (lib.importTOML ./Cargo.lock).package).version;
           wasmBindgenCli =
@@ -56,12 +56,12 @@
               src = pkgs.fetchCrate {
                 pname = "wasm-bindgen-cli";
                 version = wasmBindgenVersion;
-                hash = "sha256-ZOMgFNOcGkO66Jz/Z83eoIu+DIzo3Z/vq6Z5g6BDY/w=";
+                hash = "sha256-9Og1O/6/VC3sc5hBjoIWBErmLW2UHGMsTQO+6+m/dng=";
               };
               cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
                 inherit src;
                 inherit (src) pname version;
-                hash = "sha256-DPdCDPTAPBrbqLUqnCwQu1dePs9lGg85JCJOCIr9qjU=";
+                hash = "sha256-j81sUf1m5yXU4FJfGj7GV+hdqVCV8mRmNb0QIsMCjqw=";
               };
             };
 

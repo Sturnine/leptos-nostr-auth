@@ -27,6 +27,8 @@
 // where they cross an actual thread boundary API (see the `send_wrapper` dependency note in
 // Cargo.toml) — this lint has no remaining signal for this crate.
 #![allow(clippy::future_not_send)]
+// Layout queries on the modal's view tree exceed the default depth limit under `ssr`.
+#![recursion_limit = "256"]
 
 /// Context provider and reactive auth state.
 pub mod context;

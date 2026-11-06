@@ -3,7 +3,7 @@
 #![allow(clippy::exhaustive_structs)]
 use codee::string::JsonSerdeCodec;
 use leptos::prelude::*;
-use leptos_use::storage::use_local_storage;
+use leptos_use_storage::use_local_storage;
 use nostr::nips::nip19::ToBech32;
 
 use crate::modal::NostrAuthModal;
@@ -202,5 +202,51 @@ pub fn NostrAuthProvider(
             on_close=on_close_callback
             config=cfg.get_value()
         />
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod tests {
+    use super::*;
+    use crate::types::PersistedMethod;
+    use codee::{Decoder, Encoder};
+
+    const READ_ONLY_JSON: &str = r#"{"public_key_hex":"82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2","method":"ReadOnly","bunker_uri":null,"bunker_client_secret_hex":null,"passkey_credential_id":null}"#;
+    const BUNKER_JSON: &str = r#"{"public_key_hex":"aa","method":"Bunker","bunker_uri":"bunker://bb?relay=wss%3A%2F%2Frelay.example","bunker_client_secret_hex":"cc","passkey_credential_id":null}"#;
+
+    fn read_only() -> PersistedSession {
+        PersistedSession {
+            public_key_hex: "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2"
+                .to_owned(),
+            method: PersistedMethod::ReadOnly,
+            bunker_uri: None,
+            bunker_client_secret_hex: None,
+            passkey_credential_id: None,
+        }
+    }
+
+    fn bunker() -> PersistedSession {
+        PersistedSession {
+            public_key_hex: "aa".to_owned(),
+            method: PersistedMethod::Bunker,
+            bunker_uri: Some("bunker://bb?relay=wss%3A%2F%2Frelay.example".to_owned()),
+            bunker_client_secret_hex: Some("cc".to_owned()),
+            passkey_credential_id: None,
+        }
+    }
+
+    #[test]
+    fn persisted_session_json_format() {
+        let enc = |s| JsonSerdeCodec::encode(&Some(s)).unwrap();
+        assert_eq!(enc(read_only()), READ_ONLY_JSON);
+        assert_eq!(enc(bunker()), BUNKER_JSON);
+    }
+
+    #[test]
+    fn persisted_session_decodes_stored_literal() {
+        let dec = |s| <JsonSerdeCodec as Decoder<Option<PersistedSession>>>::decode(s).unwrap();
+        assert_eq!(dec(READ_ONLY_JSON), Some(read_only()));
+        assert_eq!(dec(BUNKER_JSON), Some(bunker()));
     }
 }
