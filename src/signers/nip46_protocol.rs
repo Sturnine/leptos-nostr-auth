@@ -407,6 +407,7 @@ impl RpcFailure {
     pub(super) fn into_signing_error(self) -> NostrAuthError {
         match self {
             Self::Malformed(text) => NostrAuthError::SigningFailed(text.to_owned()),
+            Self::Signer(text) => NostrAuthError::SigningFailed(text),
             other => other.into_shared_error(),
         }
     }
@@ -2066,7 +2067,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_mapping_differs_only_for_malformed() {
+    fn failure_mapping_differs_for_malformed_and_signer() {
         assert!(matches!(
             RpcFailure::Malformed("m").into_connect_error(),
             NostrAuthError::BunkerConnectionFailed(_)
@@ -2076,7 +2077,23 @@ mod tests {
             NostrAuthError::SigningFailed(_)
         ));
         let signer = RpcFailure::Signer("denied".into()).into_signing_error();
-        assert_eq!(signer.to_string(), "Bunker connection failed: denied");
+        assert_eq!(signer.to_string(), "Signing failed: denied");
+        let login = RpcFailure::Signer("denied".into()).into_connect_error();
+        assert_eq!(login.to_string(), "Bunker connection failed: denied");
+    }
+
+    #[test]
+    fn signer_text_timeout_stays_signer_text() {
+        let mut fx = Fx::new(NostrConnectMethod::SignEvent);
+        let event = fx.signed(&serde_json::json!({"id": ID, "error": "timeout"}).to_string());
+        let Err(failure) = only_outcome(fx.feed(&frame(&event))) else {
+            unreachable!("expected a failure");
+        };
+        assert!(matches!(&failure, RpcFailure::Signer(text) if text == "timeout"));
+        let NostrAuthError::SigningFailed(text) = failure.into_signing_error() else {
+            unreachable!("expected a signing failure");
+        };
+        assert_eq!(text, "timeout");
     }
 
     fn with_sibling() -> Fx {
