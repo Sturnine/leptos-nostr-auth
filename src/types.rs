@@ -83,7 +83,7 @@ impl AuthResult {
     ///   Extension or Bunker session on a server.
     /// - [`NostrAuthError::InvalidPublicKey`]: `peer` is not on the curve, on every other method and
     ///   before anything reaches a signer. From an extension it can also mean `getPublicKey`
-    ///   returned a malformed key.
+    ///   returned a malformed or off-curve key.
     /// - [`NostrAuthError::EncryptionFailed`]: a key session's failure, including empty plaintext,
     ///   or a signer's refusal or malformed response.
     /// - [`NostrAuthError::ExtensionNotFound`], [`NostrAuthError::ExtensionRejected`] and
@@ -229,7 +229,10 @@ impl core::fmt::Debug for AuthResult {
 /// revocable NIP-46 pairing key (`bunker_client_secret_hex`) when the active session is
 /// a bunker connection — see the "Session Restore" section in the README for the exact
 /// risk model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output carries
+/// them in full.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PersistedSession {
     /// Authenticated public key as lowercase hex.
@@ -244,6 +247,23 @@ pub struct PersistedSession {
     pub bunker_client_secret_hex: Option<String>,
     /// Passkey: base64url credential ID — used to call `credentials.get()`
     pub passkey_credential_id: Option<String>,
+}
+
+impl core::fmt::Debug for PersistedSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        const REDACTED: &str = "<redacted>";
+        f.debug_struct("PersistedSession")
+            .field("public_key_hex", &self.public_key_hex)
+            .field("method", &self.method)
+            // A public field decoded from localStorage: nothing enforces that it is secret-free.
+            .field("bunker_uri", &self.bunker_uri.as_ref().map(|_| REDACTED))
+            .field(
+                "bunker_client_secret_hex",
+                &self.bunker_client_secret_hex.as_ref().map(|_| REDACTED),
+            )
+            .field("passkey_credential_id", &self.passkey_credential_id)
+            .finish()
+    }
 }
 
 /// Which login method was used to establish a [`PersistedSession`].
@@ -387,7 +407,11 @@ pub enum NostrAuthError {
     /// The extension rejected the request (e.g. user denied permission).
     #[error("Extension request rejected: {0}")]
     ExtensionRejected(String),
-    /// The supplied public key string could not be parsed, or a typed key is not on the curve.
+    /// A public key could not be parsed or is not on the curve.
+    ///
+    /// As `NostrAuthContext::restore_error` it has two causes, told apart only by text, which is
+    /// not API: stored data that can never restore, or an extension currently returning no valid
+    /// key, where the same session restores once fixed. It does not prove the session is dead.
     #[error("Invalid public key format: {0}")]
     InvalidPublicKey(String),
     /// The supplied bunker URI was malformed.
@@ -408,7 +432,7 @@ pub enum NostrAuthError {
     /// This session was closed for good. Retrying cannot succeed; read the current session from `NostrAuthContext::auth`.
     #[error("Bunker session closed by logout or replacement")]
     BunkerSessionClosed,
-    /// The signer used a different key than this session, usually after an account switch in the extension. Log in again to switch. As `NostrAuthContext::restore_error`, the stored session is kept and retried next time, so switching the signer back to its key restores it.
+    /// The signer used a different key than this session, usually after an account switch in the extension: two valid keys that differ; a signer returning no valid key is reported as that signer's parse failure. Log in again to switch. As `NostrAuthContext::restore_error`, the stored session is kept and retried next time, so switching the signer back to its key restores it.
     #[error("Signer is using a different account than this session. Log in again to switch.")]
     SignerKeyMismatch,
     /// The stored session's login method is no longer in `NostrAuthConfig::allowed_methods`. The session is kept, and restores if the method is allowed again.
@@ -465,6 +489,34 @@ mod tests {
         assert_eq!(ext.method_name(), "Browser Extension");
         let ro = AuthResult::ReadOnly(ReadOnlyHandle { public_key });
         assert_eq!(ro.method_name(), "Read-Only");
+    }
+
+    #[test]
+    fn persisted_session_debug_redacts_secrets() {
+        const SENTINEL: &str = "SENTINELSECRET";
+        let full = PersistedSession {
+            public_key_hex: "ab".repeat(32),
+            method: PersistedMethod::Bunker,
+            bunker_uri: Some(format!("bunker://x?secret={SENTINEL}")),
+            bunker_client_secret_hex: Some(SENTINEL.to_owned()),
+            passkey_credential_id: Some("credential".to_owned()),
+        };
+        for text in [format!("{full:?}"), format!("{full:#?}")] {
+            assert!(!text.contains(SENTINEL), "{text}");
+            assert_eq!(text.matches("<redacted>").count(), 2, "{text}");
+            assert!(text.contains(&"ab".repeat(32)), "{text}");
+            assert!(text.contains("Bunker"), "{text}");
+            assert!(text.contains("credential"), "{text}");
+        }
+        assert!(format!("{full:?}").contains(r#"bunker_uri: Some("<redacted>")"#));
+        let empty = PersistedSession {
+            bunker_uri: None,
+            bunker_client_secret_hex: None,
+            ..full
+        };
+        let text = format!("{empty:?}");
+        assert!(text.contains("bunker_uri: None"), "{text}");
+        assert!(text.contains("bunker_client_secret_hex: None"), "{text}");
     }
 
     #[test]

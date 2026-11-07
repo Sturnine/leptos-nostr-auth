@@ -15,6 +15,9 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_use_event_listener::use_event_listener;
 use leptos_use_window::use_window;
+use wasm_bindgen::JsCast as _;
+use wasm_bindgen::prelude::{Closure, JsValue};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::{Os, Platform, effective_rp_id, passkey_option_visible, prf_capability};
 use crate::signers::{
@@ -157,6 +160,27 @@ fn to_method_list(
     set_error.set(None);
 }
 
+/// A text field's signal whose buffer is wiped when its owner is cleaned up. Handlers must not read
+/// it with `.get()`, whose clone is freed unwiped. `prop:value` does, which is a documented limit.
+fn secret_signal() -> (ReadSignal<String>, WriteSignal<String>) {
+    let (read, write) = signal(String::new());
+    on_cleanup(move || {
+        let _ = write.try_update_untracked(Zeroize::zeroize);
+    });
+    (read, write)
+}
+
+/// Move the buffer out of a secret signal, with no copy, emptying the field. It is wiped on drop,
+/// including when an aborted attempt drops its future.
+fn take_secret(set: WriteSignal<String>) -> Zeroizing<String> {
+    Zeroizing::new(set.try_update(core::mem::take).unwrap_or_default())
+}
+
+/// Empty a secret signal and wipe its buffer.
+fn clear_secret(set: WriteSignal<String>) {
+    drop(take_secret(set));
+}
+
 /// Reset the modal, then forward a finished login.
 fn deliver(
     attempt: Attempt,
@@ -189,6 +213,19 @@ fn deliver(
 ///     />
 /// }
 /// ```
+///
+/// # Typed secrets
+///
+/// The buffer of each input's signal is wiped with `zeroize` when a submit takes it, when a rejected
+/// value is cleared and when the step is left. That is the signal's buffer and nothing else. The DOM
+/// value, `event.target.value`, earlier keystrokes' strings and `prop:value` clones stay until they
+/// are collected, and nothing here can reach copies inside `nostr`. Emptying a field does not undo
+/// a paste, so a secret pasted in the wrong field should be treated as exposed.
+///
+/// The password, secret key and read-only inputs empty on every submit. A bunker URI stays after a
+/// failed login, in clear text with any secret, until the user leaves the step, unless it is
+/// [`NostrAuthError::InvalidBunkerUri`], which empties it. An ncryptsec string stays after
+/// [`NostrAuthError::WrongPassword`] and empties on [`NostrAuthError::InvalidNcryptsec`].
 #[expect(
     clippy::too_many_lines,
     reason = "one component body wires every login step"
@@ -754,7 +791,7 @@ fn StepBunker(
     platform: ReadSignal<Platform>,
     config: NostrAuthConfig,
 ) -> impl IntoView {
-    let (uri, set_uri) = signal(String::new());
+    let (uri, set_uri) = secret_signal();
     let (loading, set_loading) = signal(false);
     let timeout = config.bunker_timeout_secs;
 
@@ -762,7 +799,7 @@ fn StepBunker(
         if loading.get_untracked() {
             return;
         }
-        let uri_val = uri.get().trim().to_owned();
+        let uri_val = uri.with_untracked(|u| Zeroizing::new(u.trim().to_owned()));
         if uri_val.is_empty() {
             set_error.set(Some("Please paste a bunker:// URI.".into()));
             return;
@@ -776,6 +813,10 @@ fn StepBunker(
                     on_auth.run(AuthResult::Bunker(Box::new(session)));
                 }
                 Err(e) => {
+                    // Nothing was sent and a retry cannot succeed, and this may be a pasted nsec.
+                    if matches!(e, NostrAuthError::InvalidBunkerUri(_)) {
+                        clear_secret(set_uri);
+                    }
                     set_error.set(Some(e.to_string()));
                     set_loading.set(false);
                 }
@@ -793,6 +834,12 @@ fn StepBunker(
                 " URI from nsecBunker, Amber, or any NIP-46 signer."
             </p>
 
+            <div
+                data-nostr-tip=""
+            >
+                "A bunker URI can hold a one-time secret, so keep it off shared screens. If a retry fails, the secret may be used up: get a new URI from your signer."
+            </div>
+
             // Amber tip — Android only
             <Show when=move || matches!(platform.get().os, Os::Android)>
                 <div
@@ -805,6 +852,8 @@ fn StepBunker(
             <input
                 type="text"
                 placeholder="bunker://..."
+                autocomplete="off"
+                spellcheck="false"
                 data-nostr-input="bunker-uri"
                 aria-label="Bunker URI"
                 on:input=move |e| set_uri.set(event_target_value(&e))
@@ -911,10 +960,10 @@ fn StepReadOnly(
     on_auth: Callback<AuthResult>,
     set_error: WriteSignal<Option<String>>,
 ) -> impl IntoView {
-    let (input, set_input) = signal(String::new());
+    let (input, set_input) = secret_signal();
 
     let submit = move || {
-        let val = input.get();
+        let val = take_secret(set_input);
         match val.parse::<ReadOnlyHandle>() {
             Ok(handle) => on_auth.run(AuthResult::ReadOnly(handle)),
             Err(e) => set_error.set(Some(e.to_string())),
@@ -929,9 +978,17 @@ fn StepReadOnly(
                 "Read-only mode — you can browse but cannot post or send messages."
             </div>
 
+            <div
+                data-nostr-warning=""
+            >
+                "Never paste a secret key here. Only a public key belongs in this field. About half of all 64-character hex secret keys are also valid public keys, so a mistake cannot always be detected. Anything rejected is cleared from this field."
+            </div>
+
             <input
                 type="text"
                 placeholder="npub1... or nprofile1... or 64-char hex"
+                autocomplete="off"
+                spellcheck="false"
                 data-nostr-input="pubkey"
                 aria-label="Public key (npub, nprofile, or hex)"
                 on:input=move |e| set_input.set(event_target_value(&e))
@@ -952,52 +1009,73 @@ fn StepReadOnly(
 
 // ─── Step 2e: ncryptsec (NIP-49) ─────────────────────────────────────────────
 
+/// Give the browser a chance to paint before scrypt blocks the thread: two frames, or a 200 ms timer
+/// that browsers may throttle in a background tab. Best effort, no paint is guaranteed. A frame
+/// slower than the timer also starts scrypt before the paint.
+async fn yield_for_paint() {
+    // rAF never fires in a hidden tab, so a backgrounded login would otherwise stall until refocus.
+    const PAINT_WAIT_MS: i32 = 200;
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let second_frame = {
+            let resolve = resolve.clone();
+            Closure::once_into_js(move || {
+                let _ = resolve.call0(&JsValue::UNDEFINED);
+            })
+        };
+        let first_frame = {
+            let window = window.clone();
+            Closure::once_into_js(move || {
+                let _ = window.request_animation_frame(second_frame.unchecked_ref());
+            })
+        };
+        let _ = window.request_animation_frame(first_frame.unchecked_ref());
+        let _ =
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, PAINT_WAIT_MS);
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 #[component]
 fn StepNcryptsec(
     attempt: Attempt,
     on_auth: Callback<AuthResult>,
     set_error: WriteSignal<Option<String>>,
 ) -> impl IntoView {
-    let (ncryptsec, set_ncryptsec) = signal(String::new());
-    let (password, set_password) = signal(String::new());
+    let (ncryptsec, set_ncryptsec) = secret_signal();
+    let (password, set_password) = secret_signal();
     let (loading, set_loading) = signal(false);
 
     let decrypt = move || {
         if loading.get_untracked() {
             return;
         }
-        let nc = ncryptsec.get().trim().to_owned();
-        let pw = password.get();
+        let nc = ncryptsec.with_untracked(|v| Zeroizing::new(v.trim().to_owned()));
         if nc.is_empty() {
             set_error.set(Some("Please paste your ncryptsec1... key.".into()));
             return;
         }
-        if pw.is_empty() {
+        if password.with_untracked(String::is_empty) {
             set_error.set(Some("Please enter your password.".into()));
             return;
         }
+        let pw = take_secret(set_password);
         set_error.set(None);
         set_loading.set(true);
-        // scrypt is CPU-intensive — run in a task so the spinner renders first
         attempt.spawn(async move {
-            // Yield one frame so the spinner renders before scrypt blocks the thread.
-            #[expect(
-                clippy::unwrap_used,
-                reason = "a Promise executor cannot return a Result, and window exists whenever this module runs in a tab"
-            )]
-            let promise = js_sys::Promise::new(&mut |resolve, _| {
-                let _ = web_sys::window()
-                    .unwrap()
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 16);
-            });
-            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-
+            yield_for_paint().await;
             match RawKeySession::from_ncryptsec(&nc, &pw) {
                 Ok(session) => {
                     set_loading.set(false);
                     on_auth.run(AuthResult::Ncryptsec(session));
                 }
                 Err(e) => {
+                    // No password can open this value, and until it parses it may be a pasted nsec.
+                    if matches!(e, NostrAuthError::InvalidNcryptsec(_)) {
+                        clear_secret(set_ncryptsec);
+                    }
                     set_error.set(Some(e.to_string()));
                     set_loading.set(false);
                 }
@@ -1012,12 +1090,14 @@ fn StepNcryptsec(
                 <code>
                     "ncryptsec1..."
                 </code>
-                " encrypted key and enter your password to decrypt it."
+                " encrypted key and enter your password to decrypt it. A value no password can open is cleared from this field."
             </p>
 
             <input
                 type="text"
                 placeholder="ncryptsec1..."
+                autocomplete="off"
+                spellcheck="false"
                 data-nostr-input="ncryptsec"
                 aria-label="ncryptsec encrypted key"
                 on:input=move |e| set_ncryptsec.set(event_target_value(&e))
@@ -1027,6 +1107,8 @@ fn StepNcryptsec(
             <input
                 type="password"
                 placeholder="Password"
+                autocomplete="off"
+                spellcheck="false"
                 data-nostr-input="ncryptsec-password"
                 aria-label="ncryptsec decryption password"
                 on:input=move |e| set_password.set(event_target_value(&e))
@@ -1087,16 +1169,12 @@ fn StepRawNsec(
     on_auth: Callback<AuthResult>,
     set_error: WriteSignal<Option<String>>,
 ) -> impl IntoView {
-    let (nsec, set_nsec) = signal(String::new());
+    let (nsec, set_nsec) = secret_signal();
 
     let import = move || {
-        let val = nsec.get();
+        let val = take_secret(set_nsec);
         match RawKeySession::from_nsec_or_hex(&val) {
-            Ok(session) => {
-                // Zero the signal immediately
-                set_nsec.set(String::new());
-                on_auth.run(AuthResult::RawNsec(session));
-            }
+            Ok(session) => on_auth.run(AuthResult::RawNsec(session)),
             Err(e) => set_error.set(Some(e.to_string())),
         }
     };
@@ -1106,6 +1184,7 @@ fn StepRawNsec(
             <input
                 type="password"
                 autocomplete="off"
+                spellcheck="false"
                 placeholder="nsec1... or 64-char hex"
                 data-nostr-input="nsec"
                 aria-label="Secret key (nsec or hex)"
@@ -1277,6 +1356,124 @@ mod tests {
         assert!(!html.contains("iCloud"));
     }
 
+    #[cfg(feature = "ssr")]
+    fn in_owner(
+        view: impl FnOnce(WriteSignal<Option<String>>, Callback<AuthResult>) -> String,
+    ) -> String {
+        let owner = Owner::new();
+        owner.with(|| {
+            let (_, set_error) = signal(None::<String>);
+            view(set_error, Callback::new(|_: AuthResult| {}))
+        })
+    }
+
+    #[cfg(feature = "ssr")]
+    fn bunker_html() -> String {
+        in_owner(|set_error, on_auth| {
+            let (platform, _) = signal(Platform {
+                os: Os::Other,
+                has_nostr_extension: false,
+                supports_webauthn: true,
+            });
+            view! {
+                <StepBunker
+                    attempt=Attempt::new()
+                    on_auth=on_auth
+                    set_error=set_error
+                    platform=platform
+                    config=NostrAuthConfig::default()
+                />
+            }
+            .to_html()
+        })
+    }
+
+    #[cfg(feature = "ssr")]
+    fn ncryptsec_html() -> String {
+        in_owner(|set_error, on_auth| {
+            view! { <StepNcryptsec attempt=Attempt::new() on_auth=on_auth set_error=set_error /> }
+                .to_html()
+        })
+    }
+
+    #[cfg(feature = "ssr")]
+    fn read_only_html() -> String {
+        in_owner(|set_error, on_auth| {
+            view! { <StepReadOnly on_auth=on_auth set_error=set_error /> }.to_html()
+        })
+    }
+
+    #[cfg(feature = "ssr")]
+    fn assert_inputs_opt_out(html: &str, inputs: usize) {
+        let tags: Vec<&str> = html
+            .split("<input")
+            .skip(1)
+            .filter_map(|rest| rest.split('>').next())
+            .collect();
+        assert_eq!(tags.len(), inputs, "{html}");
+        for tag in tags {
+            assert!(tag.contains(r#"autocomplete="off""#), "{tag}");
+            assert!(tag.contains(r#"spellcheck="false""#), "{tag}");
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn secret_inputs_opt_out_of_autofill() {
+        assert_inputs_opt_out(&bunker_html(), 1);
+        assert_inputs_opt_out(&ncryptsec_html(), 2);
+        assert_inputs_opt_out(&read_only_html(), 1);
+    }
+
+    #[cfg(all(feature = "ssr", feature = "insecure_nsec_input"))]
+    #[test]
+    fn nsec_input_opts_out_of_autofill() {
+        let html = in_owner(|set_error, on_auth| {
+            view! { <StepRawNsec on_auth=on_auth set_error=set_error /> }.to_html()
+        });
+        assert_inputs_opt_out(&html, 1);
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn readonly_step_warns_against_secret_keys() {
+        let html = read_only_html();
+        assert!(html.contains("data-nostr-warning"), "{html}");
+        assert!(
+            html.contains(
+                "Never paste a secret key here. Only a public key belongs in this field. About half of all 64-character hex secret keys are also valid public keys, so a mistake cannot always be detected. "
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("Anything rejected is cleared from this field."),
+            "{html}"
+        );
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn bunker_step_warns_about_one_time_secret() {
+        let html = bunker_html();
+        assert!(html.contains("data-nostr-tip"), "{html}");
+        assert!(
+            html.contains(
+                "A bunker URI can hold a one-time secret, so keep it off shared screens. If a retry fails, the secret may be used up: get a new URI from your signer."
+            ),
+            "{html}"
+        );
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn ncryptsec_step_says_rejected_values_clear() {
+        let html = ncryptsec_html();
+        assert!(
+            html.contains("A value no password can open is cleared from this field."),
+            "{html}"
+        );
+    }
+
     #[test]
     fn deliver_survives_disposed_callback() {
         let owner = Owner::new();
@@ -1288,5 +1485,69 @@ mod tests {
             callback_owner.cleanup();
             deliver(Attempt::new(), set_step, set_error, on_auth, read_only());
         });
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_tests {
+    use super::*;
+    use crate::signers::memory_probe::{matches, sentinel};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn take_secret_wipes_buffer_on_drop() {
+        let (read, set) = signal(String::new());
+        let value = sentinel();
+        let expected = value.clone().into_bytes();
+        let addr = value.as_ptr().addr();
+        set.set(value);
+        assert_eq!(read.with_untracked(|s| s.as_ptr().addr()), addr);
+        let taken = take_secret(set);
+        assert_eq!(taken.as_ptr().addr(), addr);
+        assert_eq!(matches(addr, &expected), expected.len());
+        drop(taken);
+        assert!(matches(addr, &expected) <= 4);
+        assert!(read.with_untracked(String::is_empty));
+    }
+
+    #[wasm_bindgen_test]
+    fn clear_secret_wipes_buffer() {
+        let (read, set) = signal(String::new());
+        let value = sentinel();
+        let expected = value.clone().into_bytes();
+        let addr = value.as_ptr().addr();
+        set.set(value);
+        assert_eq!(matches(addr, &expected), expected.len());
+        clear_secret(set);
+        assert!(matches(addr, &expected) <= 4);
+        assert!(read.with_untracked(String::is_empty));
+    }
+
+    #[wasm_bindgen_test]
+    fn dropped_string_keeps_bytes_control() {
+        let value = core::hint::black_box(sentinel());
+        let expected = value.clone().into_bytes();
+        let addr = value.as_ptr().addr();
+        assert_eq!(matches(addr, &expected), expected.len());
+        drop(core::hint::black_box(value));
+        assert!(matches(addr, &expected) >= 48);
+    }
+
+    // Fails if reactive_graph disposes nodes before it runs cleanups.
+    #[wasm_bindgen_test]
+    fn secret_signal_wipes_on_cleanup() {
+        let owner = Owner::new();
+        let (addr, expected) = owner.with(|| {
+            let (read, set) = secret_signal();
+            let value = sentinel();
+            let expected = value.clone().into_bytes();
+            let addr = value.as_ptr().addr();
+            set.set(value);
+            assert_eq!(read.with_untracked(|s| s.as_ptr().addr()), addr);
+            (addr, expected)
+        });
+        assert_eq!(matches(addr, &expected), expected.len());
+        owner.cleanup();
+        assert!(matches(addr, &expected) <= 4);
     }
 }

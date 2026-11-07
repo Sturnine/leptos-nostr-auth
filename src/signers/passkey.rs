@@ -4,6 +4,10 @@ use crate::types::NostrAuthError;
 
 /// An active passkey session. The secret key is in-memory only; derived anew on each login.
 ///
+/// On drop, nostr overwrites this session's copy with `non_secure_erase`: best effort, not
+/// `zeroize`. The derivation's hash digest and hash state are not wiped, and NIP-44 calls leave
+/// derived keys and plaintext unwiped.
+///
 /// A synced passkey gives the same key on devices using this crate with the same RP ID. Whether a
 /// passkey syncs is up to its provider.
 #[derive(Clone)]
@@ -141,6 +145,7 @@ mod imp {
     use nostr::key::{Keys, SecretKey};
     use wasm_bindgen::prelude::*;
     use wasm_bindgen_futures::JsFuture;
+    use zeroize::Zeroizing;
 
     use super::PasskeySession;
     use crate::signers::browser::{js_err_msg, random_bytes, set, set_str};
@@ -367,8 +372,8 @@ mod imp {
     /// What a credential's PRF extension result says.
     #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
     enum PrfOutcome {
-        /// `prf.results` is present, with `first` as these bytes.
-        Output(Vec<u8>),
+        /// `prf.results` is present, with `first` as these bytes, wiped on drop.
+        Output(Zeroizing<Vec<u8>>),
         /// `prf.enabled` is true and there are no results, as `create` is allowed to return.
         EnabledWithoutOutput,
         /// Neither.
@@ -411,7 +416,9 @@ mod imp {
             NostrAuthError::PasskeyFailed(format!("no PRF first output: {}", js_err_msg(&e)))
         })?;
 
-        Ok(PrfOutcome::Output(Uint8Array::new(&first).to_vec()))
+        Ok(PrfOutcome::Output(Zeroizing::new(
+            Uint8Array::new(&first).to_vec(),
+        )))
     }
 
     /// Read `credential.rawId`.
@@ -490,6 +497,22 @@ mod imp {
         }
 
         #[wasm_bindgen_test]
+        fn prf_output_buffer_is_wiped() {
+            use crate::signers::memory_probe::matches;
+            let fake = credential(
+                "{ prf: { results: { first: Uint8Array.from({ length: 64 }, () => 1 + Math.floor(Math.random() * 255)).buffer } } }",
+            );
+            let PrfOutcome::Output(output) = prf_outcome(&fake).unwrap() else {
+                unreachable!("the fake holds an output");
+            };
+            let expected = output.to_vec();
+            let addr = output.as_ptr().addr();
+            assert_eq!(matches(addr, &expected), expected.len());
+            drop(output);
+            assert!(matches(addr, &expected) <= 4);
+        }
+
+        #[wasm_bindgen_test]
         fn abort_guard_sets_outer_signal_and_aborts_on_drop() {
             let options = Object::new();
             let guard = abort_guard(&options).unwrap();
@@ -505,8 +528,11 @@ mod imp {
         fn prf_outcome_table() {
             let expected: Vec<u8> = (0..32).collect();
             for (extensions, want) in [
-                (OUTPUT_0_TO_31, PrfOutcome::Output(expected)),
-                ("{ prf: { results: {} } }", PrfOutcome::Output(Vec::new())),
+                (OUTPUT_0_TO_31, PrfOutcome::Output(Zeroizing::new(expected))),
+                (
+                    "{ prf: { results: {} } }",
+                    PrfOutcome::Output(Zeroizing::new(Vec::new())),
+                ),
                 (
                     "{ prf: { enabled: true } }",
                     PrfOutcome::EnabledWithoutOutput,

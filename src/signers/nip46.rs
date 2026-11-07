@@ -151,7 +151,7 @@ impl BunkerSession {
         peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
-        super::check_peer(peer)?;
+        super::check_on_curve(peer)?;
         imp::nip44_encrypt(self, peer, plaintext).await
     }
 
@@ -165,7 +165,7 @@ impl BunkerSession {
         peer: &PublicKey,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
-        super::check_peer(peer)?;
+        super::check_on_curve(peer)?;
         imp::nip44_decrypt(self, peer, ciphertext).await
     }
 }

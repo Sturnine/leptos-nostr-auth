@@ -76,6 +76,10 @@ pub(super) fn parse_bunker_uri(uri: &str) -> Result<BunkerTarget, NostrAuthError
     else {
         return Err(NostrAuthError::InvalidBunkerUri("invalid URI".into()));
     };
+    // Upstream's URI parser uses `from_hex`, which accepts a key off the curve.
+    if super::check_on_curve(&remote).is_err() {
+        return Err(NostrAuthError::InvalidBunkerUri("invalid URI".into()));
+    }
     let mut relays: Vec<RelayUrl> = Vec::with_capacity(listed.len());
     for relay in listed {
         if !relays.contains(&relay) {
@@ -2002,6 +2006,14 @@ mod tests {
             let text = parse_bunker_uri(&bad).err().unwrap().to_string();
             assert!(!text.contains("hush"), "{text}");
         }
+    }
+
+    #[test]
+    fn bunker_uri_rejects_off_curve_remote() {
+        let bad = crate::signers::signer_traits::tests::off_curve();
+        let got = parse_bunker_uri(&uri(&bad, "relay=wss%3A%2F%2Fa.example&secret=hush"));
+        let text = got.err().unwrap().to_string();
+        assert_eq!(text, "Invalid bunker URI: invalid URI");
     }
 
     #[test]
