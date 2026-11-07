@@ -15,6 +15,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_use_event_listener::use_event_listener;
 use leptos_use_window::use_window;
+use wasm_bindgen::JsCast as _;
+use wasm_bindgen::prelude::{Closure, JsValue};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::{Os, Platform, effective_rp_id, passkey_option_visible, prf_capability};
@@ -1007,6 +1009,35 @@ fn StepReadOnly(
 
 // ─── Step 2e: ncryptsec (NIP-49) ─────────────────────────────────────────────
 
+/// Give the browser a chance to paint before scrypt blocks the thread: two frames, or a 200 ms timer
+/// that browsers may throttle in a background tab. Best effort, no paint is guaranteed. A frame
+/// slower than the timer also starts scrypt before the paint.
+async fn yield_for_paint() {
+    // rAF never fires in a hidden tab, so a backgrounded login would otherwise stall until refocus.
+    const PAINT_WAIT_MS: i32 = 200;
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let second_frame = {
+            let resolve = resolve.clone();
+            Closure::once_into_js(move || {
+                let _ = resolve.call0(&JsValue::UNDEFINED);
+            })
+        };
+        let first_frame = {
+            let window = window.clone();
+            Closure::once_into_js(move || {
+                let _ = window.request_animation_frame(second_frame.unchecked_ref());
+            })
+        };
+        let _ = window.request_animation_frame(first_frame.unchecked_ref());
+        let _ =
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, PAINT_WAIT_MS);
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 #[component]
 fn StepNcryptsec(
     attempt: Attempt,
@@ -1033,20 +1064,8 @@ fn StepNcryptsec(
         let pw = take_secret(set_password);
         set_error.set(None);
         set_loading.set(true);
-        // scrypt is CPU-intensive — run in a task so the spinner renders first
         attempt.spawn(async move {
-            // Yield one frame so the spinner renders before scrypt blocks the thread.
-            #[expect(
-                clippy::unwrap_used,
-                reason = "a Promise executor cannot return a Result, and window exists whenever this module runs in a tab"
-            )]
-            let promise = js_sys::Promise::new(&mut |resolve, _| {
-                let _ = web_sys::window()
-                    .unwrap()
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 16);
-            });
-            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-
+            yield_for_paint().await;
             match RawKeySession::from_ncryptsec(&nc, &pw) {
                 Ok(session) => {
                     set_loading.set(false);
