@@ -28,6 +28,8 @@ use crate::types::{AuthResult, NostrAuthConfig, NostrAuthError, PersistedSession
 #[non_exhaustive]
 pub struct NostrAuthContext {
     /// Current auth result; `None` when not logged in.
+    ///
+    /// `.get()` clones the session, including any in-memory key. `.with` avoids the copy.
     pub auth: Signal<Option<AuthResult>>,
     /// Convenience: the authenticated user's public key (bech32 npub and hex).
     pub public_key: Signal<Option<nostr::key::PublicKey>>,
@@ -283,16 +285,18 @@ pub fn NostrAuthProvider(
         }
     });
 
-    let public_key = Signal::derive(move || auth.get().map(|a| a.public_key()));
+    let public_key = Signal::derive(move || auth.with(|a| a.as_ref().map(AuthResult::public_key)));
 
     let npub = Signal::derive(move || {
-        auth.get().map(|a| {
-            let pk = a.public_key();
-            pk.to_bech32().unwrap_or_else(|_| pk.to_hex())
+        auth.with(|a| {
+            a.as_ref().map(|a| {
+                let pk = a.public_key();
+                pk.to_bech32().unwrap_or_else(|_| pk.to_hex())
+            })
         })
     });
 
-    let is_authenticated = Signal::derive(move || auth.get().is_some());
+    let is_authenticated = Signal::derive(move || auth.with(Option::is_some));
 
     let show_login = Callback::new(move |(): ()| {
         let may_prompt = !show_modal.get_untracked()
@@ -336,7 +340,8 @@ pub fn NostrAuthProvider(
         }
     });
 
-    let has_saved_session = Signal::derive(move || settled.get() && stored_session.get().is_some());
+    let has_saved_session =
+        Signal::derive(move || settled.get() && stored_session.with(Option::is_some));
 
     let logout = Callback::new({
         let delete = delete_stored_session.clone();
