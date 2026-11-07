@@ -1,6 +1,6 @@
 use nostr::key::PublicKey;
 
-use crate::signers::{BunkerSession, Nip07Handle, PasskeySession, ReadOnlyHandle};
+use crate::signers::{BunkerSession, Nip07Handle, PasskeySession, PendingPasskey, ReadOnlyHandle};
 use crate::types::{AuthResult, LoginMethod, NostrAuthError, PersistedMethod, PersistedSession};
 
 /// What the provider does about a stored session on mount.
@@ -12,6 +12,8 @@ pub enum RestorePlan {
     NotAllowed,
     /// Start a restore.
     Restore,
+    /// A stored passkey, which restores only from the login click. No prompt, session kept.
+    AwaitClick,
 }
 
 /// Decide the mount action from the persist flag, the stored session and the allowed methods.
@@ -22,10 +24,12 @@ pub fn restore_plan(
 ) -> RestorePlan {
     match stored {
         Some(session) if persist => {
-            if allowed.contains(&session.method.login_method()) {
-                RestorePlan::Restore
-            } else {
+            if !allowed.contains(&session.method.login_method()) {
                 RestorePlan::NotAllowed
+            } else if session.method == PersistedMethod::Passkey {
+                RestorePlan::AwaitClick
+            } else {
+                RestorePlan::Restore
             }
         }
         _ => RestorePlan::Nothing,
@@ -92,6 +96,53 @@ pub fn is_logout_storage_event(
     event_key.is_none_or(|key| key == storage_key && new_value.is_none())
 }
 
+/// The stored key and credential id of a passkey session.
+pub fn passkey_restore_target(
+    session: &PersistedSession,
+) -> Result<(PublicKey, Vec<u8>), NostrAuthError> {
+    let stored_pk = PublicKey::from_hex(&session.public_key_hex)
+        .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
+    let cred_id_b64 = session
+        .passkey_credential_id
+        .as_deref()
+        .ok_or_else(|| NostrAuthError::PasskeyFailed("no credential ID stored".into()))?;
+    let cred_id = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        cred_id_b64,
+    )
+    .map_err(|e| NostrAuthError::PasskeyFailed(e.to_string()))?;
+    Ok((stored_pk, cred_id))
+}
+
+/// A passkey restore whose `get` has already started.
+pub struct PendingRestore {
+    /// The ceremony in flight.
+    pending: PendingPasskey,
+    /// The key the ceremony must derive.
+    stored_pk: PublicKey,
+}
+
+impl PendingRestore {
+    /// Await the ceremony and check the derived key against the stored one.
+    pub async fn finish(self) -> Result<AuthResult, NostrAuthError> {
+        let session = self.pending.finish().await?;
+        if session.public_key != self.stored_pk {
+            return Err(NostrAuthError::SignerKeyMismatch);
+        }
+        Ok(AuthResult::Passkey(session))
+    }
+}
+
+/// Start a passkey restore now, so that its `get` runs inside the caller's click handler.
+pub fn begin_passkey_restore(
+    session: &PersistedSession,
+    rp_id: &str,
+) -> Result<PendingRestore, NostrAuthError> {
+    let (stored_pk, cred_id) = passkey_restore_target(session)?;
+    let pending = PasskeySession::begin_authenticate(rp_id, Some(&cred_id))?;
+    Ok(PendingRestore { pending, stored_pk })
+}
+
 /// Attempt to restore a full `AuthResult` from a `PersistedSession`.
 ///
 /// Save/load/clear are handled by the `use_local_storage` hook in `NostrAuthProvider`.
@@ -99,7 +150,7 @@ pub fn is_logout_storage_event(
 /// Each method has different restore semantics:
 /// - `Extension`: verify window.nostr still returns the same pubkey
 /// - `Bunker`: re-establish WebSocket connection using stored bunker URI
-/// - `Passkey`: call `navigator.credentials.get()` → PRF → rederive key
+/// - `Passkey`: fails closed, never prompting; see [`begin_passkey_restore`]
 /// - `ReadOnly`: restore directly from hex pubkey (no re-auth needed)
 pub async fn restore_session(
     session: &PersistedSession,
@@ -133,20 +184,11 @@ pub async fn restore_session(
             Ok(AuthResult::Bunker(Box::new(session)))
         }
         PersistedMethod::Passkey => {
-            let cred_id_b64 = session
-                .passkey_credential_id
-                .as_deref()
-                .ok_or_else(|| NostrAuthError::PasskeyFailed("no credential ID stored".into()))?;
-            let cred_id = base64::Engine::decode(
-                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-                cred_id_b64,
-            )
-            .map_err(|e| NostrAuthError::PasskeyFailed(e.to_string()))?;
-            let ps = PasskeySession::authenticate(Some(cred_id)).await?;
-            if ps.public_key != stored_pk {
-                return Err(NostrAuthError::SignerKeyMismatch);
-            }
-            Ok(AuthResult::Passkey(ps))
+            // Reached only by a plan bug. A prompt here would have no user gesture.
+            passkey_restore_target(session)?;
+            Err(NostrAuthError::PasskeyFailed(
+                "a passkey restores only from the login click".into(),
+            ))
         }
         PersistedMethod::ReadOnly => Ok(AuthResult::ReadOnly(ReadOnlyHandle {
             public_key: stored_pk,
@@ -321,6 +363,51 @@ pub mod tests {
         }
     }
 
+    fn passkey_session(pk: &str, id: Option<&str>) -> PersistedSession {
+        PersistedSession {
+            passkey_credential_id: id.map(str::to_owned),
+            ..session(pk, PersistedMethod::Passkey)
+        }
+    }
+
+    #[test]
+    fn passkey_target_bad_key() {
+        assert!(matches!(
+            passkey_restore_target(&passkey_session("zz", Some("AAEC"))),
+            Err(NostrAuthError::InvalidPublicKey(_))
+        ));
+    }
+
+    #[test]
+    fn passkey_target_missing_id() {
+        assert!(matches!(
+            passkey_restore_target(&passkey_session(USER, None)),
+            Err(NostrAuthError::PasskeyFailed(_))
+        ));
+    }
+
+    #[test]
+    fn passkey_target_bad_base64() {
+        assert!(matches!(
+            passkey_restore_target(&passkey_session(USER, Some("!!!"))),
+            Err(NostrAuthError::PasskeyFailed(_))
+        ));
+    }
+
+    #[test]
+    fn passkey_target_decodes_base64url() {
+        let (pk, id) = passkey_restore_target(&passkey_session(USER, Some("-_-_"))).unwrap();
+        assert_eq!(pk, user_key());
+        assert_eq!(id, [0xfb, 0xff, 0xbf]);
+    }
+
+    // A browser call would panic on the default native run, so its kill counts only there.
+    #[test]
+    fn restore_session_never_prompts_for_passkey() {
+        let e = restore_err(&passkey_session(USER, Some("AAEC")));
+        assert!(e.to_string().contains("login click"));
+    }
+
     #[test]
     fn undecodable_json_is_an_error() {
         assert!(
@@ -417,10 +504,12 @@ pub mod tests {
                 restore_plan(true, Some(&s), &without),
                 RestorePlan::NotAllowed
             );
-            assert_eq!(
-                restore_plan(true, Some(&s), &LoginMethod::all()),
+            let want = if method == PersistedMethod::Passkey {
+                RestorePlan::AwaitClick
+            } else {
                 RestorePlan::Restore
-            );
+            };
+            assert_eq!(restore_plan(true, Some(&s), &LoginMethod::all()), want);
         }
     }
 
@@ -446,6 +535,8 @@ pub mod tests {
             (true, RestorePlan::Restore, false),
             (true, RestorePlan::NotAllowed, false),
             (true, RestorePlan::Nothing, false),
+            (false, RestorePlan::AwaitClick, false),
+            (true, RestorePlan::AwaitClick, false),
         ] {
             assert_eq!(initial_restoring(hydrating, plan), want);
         }

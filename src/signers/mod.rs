@@ -35,6 +35,7 @@ pub(crate) use nip46::{
     current_auth_url, dismiss_auth_prompt, register_auth_presenter, unregister_auth_presenter,
 };
 pub use passkey::PasskeySession;
+pub(crate) use passkey::PendingPasskey;
 pub use raw_key::RawKeySession;
 pub use read_only::ReadOnlyHandle;
 
@@ -89,7 +90,7 @@ mod server_tests {
         assert_send(s.nip44_encrypt("a", "b"));
         assert_send(s.nip44_decrypt("a", "b"));
         assert_send(PasskeySession::create("rp", "name"));
-        assert_send(PasskeySession::authenticate(None));
+        assert_send(PasskeySession::authenticate("rp", None));
         let auth = AuthResult::Extension(h);
         assert_send(auth.get_public_key_async());
         assert_send(auth.sign_event_async(signer_traits::tests::unsigned(auth.public_key())));

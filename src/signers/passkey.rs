@@ -4,8 +4,8 @@ use crate::types::NostrAuthError;
 
 /// An active passkey session. The secret key is in-memory only; derived anew on each login.
 ///
-/// The passkey (and by extension, your Nostr identity) syncs via iCloud Keychain on Apple
-/// devices, or Google Password Manager / Windows Hello on other platforms.
+/// A synced passkey gives the same key on devices using this crate with the same RP ID. Whether a
+/// passkey syncs is up to its provider.
 #[derive(Clone)]
 pub struct PasskeySession {
     /// The authenticated user's public key.
@@ -22,18 +22,24 @@ pub struct PasskeySession {
 impl PasskeySession {
     /// Create a brand-new Nostr identity backed by a passkey.
     ///
-    /// On macOS/iOS: triggers Touch ID / Face ID sheet. The resulting passkey
-    /// syncs via iCloud Keychain to all the user's Apple devices.
+    /// The ceremony starts at first poll, so spawning this from a click does not run it inside the
+    /// click. `rp_id` goes to the browser as given.
+    ///
+    /// When the authenticator reports PRF as enabled with no output, this follows up with a `get`
+    /// for the new credential. If that fails the credential still exists, and the error says to use
+    /// it rather than create another.
+    ///
     /// # Errors
     ///
     /// Returns an error if the passkey creation fails.
     pub async fn create(rp_id: &str, rp_name: &str) -> Result<Self, NostrAuthError> {
-        imp::create(rp_id, rp_name).await
+        imp::begin_create(rp_id, rp_name)?.finish().await
     }
 
-    /// Authenticate with an existing passkey.
+    /// Authenticate with an existing passkey under `rp_id`, which goes to the browser as given.
     ///
-    /// On macOS/iOS: triggers Touch ID / Face ID sheet.
+    /// The ceremony starts at first poll, so spawning this from a click does not run it inside the
+    /// click.
     /// The same passkey + same PRF salt always produces the same Nostr key (deterministic).
     ///
     /// Pass `Some(credential_id)` to restrict the browser prompt to one specific
@@ -45,8 +51,29 @@ impl PasskeySession {
     /// # Errors
     ///
     /// Returns an error when called with SSR features or when passkey authentication fails.
-    pub async fn authenticate(credential_id: Option<Vec<u8>>) -> Result<Self, NostrAuthError> {
-        imp::authenticate(credential_id.as_deref()).await
+    pub async fn authenticate(
+        rp_id: &str,
+        credential_id: Option<Vec<u8>>,
+    ) -> Result<Self, NostrAuthError> {
+        imp::begin_authenticate(rp_id, credential_id.as_deref())?
+            .finish()
+            .await
+    }
+
+    /// Start a `get` now, so that it runs inside the caller's click handler.
+    pub(crate) fn begin_authenticate(
+        rp_id: &str,
+        credential_id: Option<&[u8]>,
+    ) -> Result<PendingPasskey, NostrAuthError> {
+        imp::begin_authenticate(rp_id, credential_id)
+    }
+
+    /// Start a `create` now, so that it runs inside the caller's click handler.
+    pub(crate) fn begin_create(
+        rp_id: &str,
+        rp_name: &str,
+    ) -> Result<PendingPasskey, NostrAuthError> {
+        imp::begin_create(rp_id, rp_name)
     }
 
     /// Sign a Nostr event using the in-memory derived key.
@@ -69,6 +96,8 @@ impl PasskeySession {
     }
 }
 
+pub use imp::Pending as PendingPasskey;
+
 /// Browser implementation.
 #[cfg(not(feature = "ssr"))]
 mod imp {
@@ -82,15 +111,70 @@ mod imp {
     use crate::signers::browser::{js_err_msg, random_bytes, set, set_str};
     use crate::types::NostrAuthError;
 
-    /// Fixed PRF salt (same as Roadflare iOS: `SHA256("nostr-key-v1")` raw bytes passed as salt).
-    /// This constant is the UTF-8 bytes of "nostr-key-v1" — WebAuthn PRF hashes them internally.
-    const PRF_SALT: &[u8] = b"nostr-key-v1";
+    /// The raw UTF-8 bytes of `"nostr-key-v1"`, not hashed here: the WebAuthn client hashes them with
+    /// its own context. Changing them changes every user's identity.
+    pub(super) const PRF_SALT: &[u8] = b"nostr-key-v1";
 
-    /// Run the WebAuthn creation ceremony and derive the key.
-    pub(super) async fn create(
-        rp_id: &str,
-        rp_name: &str,
-    ) -> Result<PasskeySession, NostrAuthError> {
+    /// A ceremony already started, whose result is not yet read.
+    ///
+    /// The promise is converted when the ceremony starts. An attempt aborted before its first poll
+    /// would otherwise leave a rejection with no handler.
+    pub struct Pending {
+        /// The ceremony's promise.
+        credential: JsFuture,
+        /// The RP ID for a `create`'s follow-up. `None` on a `get`.
+        create_rp_id: Option<String>,
+    }
+
+    impl Pending {
+        /// Await the ceremony and derive the session.
+        pub async fn finish(self) -> Result<PasskeySession, NostrAuthError> {
+            let credential = await_credential(self.credential).await?;
+            let Some(rp_id) = self.create_rp_id else {
+                return derive_from_credential(&credential);
+            };
+            match prf_outcome(&credential)? {
+                PrfOutcome::Output(_) => derive_from_credential(&credential),
+                PrfOutcome::EnabledWithoutOutput => {
+                    let raw_id = credential_id_of(&credential)?;
+                    follow_up_get(&rp_id, &raw_id)
+                        .await
+                        .map_err(follow_up_error)
+                }
+                PrfOutcome::Unavailable => Err(NostrAuthError::PasskeyNotSupported),
+            }
+        }
+    }
+
+    /// Read the key of a credential just created that gave no PRF output.
+    async fn follow_up_get(rp_id: &str, raw_id: &[u8]) -> Result<PasskeySession, NostrAuthError> {
+        let pending = begin_authenticate(rp_id, Some(raw_id))?;
+        let credential = await_credential(pending.credential).await?;
+        derive_from_credential(&credential)
+    }
+
+    /// The credential now exists, so a failed follow-up must not invite another `create`.
+    fn follow_up_error(error: NostrAuthError) -> NostrAuthError {
+        let inner = match error {
+            NostrAuthError::PasskeyNotSupported => return error,
+            NostrAuthError::PasskeyFailed(inner) => inner,
+            other => other.to_string(),
+        };
+        NostrAuthError::PasskeyFailed(format!(
+            "passkey created, but its key could not be read: {inner}. Use the existing passkey instead of creating another"
+        ))
+    }
+
+    /// Await a ceremony's promise.
+    async fn await_credential(credential: JsFuture) -> Result<JsValue, NostrAuthError> {
+        credential.await.map_err(|e| {
+            web_sys::console::error_1(&e);
+            NostrAuthError::PasskeyFailed(js_err_msg(&e))
+        })
+    }
+
+    /// Start the WebAuthn creation ceremony.
+    pub(super) fn begin_create(rp_id: &str, rp_name: &str) -> Result<Pending, NostrAuthError> {
         let window = web_sys::window()
             .ok_or_else(|| NostrAuthError::PasskeyFailed("no window object".into()))?;
         let credentials = window.navigator().credentials();
@@ -129,9 +213,7 @@ mod imp {
         let params = Array::of1(&param);
         set(&pk_opts, "pubKeyCredParams", &params);
 
-        // authenticatorSelection: prefer platform, resident key required
         let auth_sel = Object::new();
-        set_str(&auth_sel, "authenticatorAttachment", "platform");
         set_str(&auth_sel, "residentKey", "required");
         set_str(&auth_sel, "userVerification", "required");
         set(&pk_opts, "authenticatorSelection", &auth_sel);
@@ -153,18 +235,17 @@ mod imp {
             .create_with_options(&options.unchecked_into())
             .map_err(|e| NostrAuthError::PasskeyFailed(format!("{e:?}")))?;
 
-        let credential = JsFuture::from(promise).await.map_err(|e| {
-            web_sys::console::error_1(&e);
-            NostrAuthError::PasskeyFailed(js_err_msg(&e))
-        })?;
-
-        derive_from_credential(&credential)
+        Ok(Pending {
+            credential: JsFuture::from(promise),
+            create_rp_id: Some(rp_id.to_owned()),
+        })
     }
 
-    /// Run the WebAuthn assertion ceremony and derive the key.
-    pub(super) async fn authenticate(
+    /// Start the WebAuthn assertion ceremony.
+    pub(super) fn begin_authenticate(
+        rp_id: &str,
         credential_id: Option<&[u8]>,
-    ) -> Result<PasskeySession, NostrAuthError> {
+    ) -> Result<Pending, NostrAuthError> {
         let window = web_sys::window()
             .ok_or_else(|| NostrAuthError::PasskeyFailed("no window object".into()))?;
         let credentials = window.navigator().credentials();
@@ -174,6 +255,7 @@ mod imp {
 
         let challenge = Uint8Array::from(random_bytes(32).as_slice());
         set(&pk_opts, "challenge", &challenge);
+        set_str(&pk_opts, "rpId", rp_id);
         set_str(&pk_opts, "userVerification", "required");
 
         let extensions = Object::new();
@@ -218,27 +300,26 @@ mod imp {
             .get_with_options(&options.unchecked_into())
             .map_err(|e| NostrAuthError::PasskeyFailed(format!("{e:?}")))?;
 
-        let credential = JsFuture::from(promise).await.map_err(|e| {
-            web_sys::console::error_1(&e);
-            NostrAuthError::PasskeyFailed(js_err_msg(&e))
-        })?;
-
-        derive_from_credential(&credential)
+        Ok(Pending {
+            credential: JsFuture::from(promise),
+            create_rp_id: None,
+        })
     }
 
-    /// Derive the Nostr keypair from a WebAuthn credential's PRF output.
-    ///
-    /// Flow (mirrors Roadflare iOS):
-    ///   PRF output (32 bytes) → SHA-256 → secp256k1 private key
-    fn derive_from_credential(credential: &JsValue) -> Result<PasskeySession, NostrAuthError> {
-        // Extract credential ID
-        let raw_id = Reflect::get(credential, &"rawId".into())
-            .map_err(|e| NostrAuthError::PasskeyFailed(format!("no rawId: {}", js_err_msg(&e))))?;
-        let cred_id_u8 = Uint8Array::new(&raw_id);
-        let credential_id = cred_id_u8.to_vec();
+    /// What a credential's PRF extension result says.
+    #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+    enum PrfOutcome {
+        /// `prf.results` is present, with `first` as these bytes.
+        Output(Vec<u8>),
+        /// `prf.enabled` is true and there are no results, as `create` is allowed to return.
+        EnabledWithoutOutput,
+        /// Neither.
+        Unavailable,
+    }
 
-        // Navigate: credential.getClientExtensionResults().prf.results.first
-        let get_exts = Reflect::get(credential, &"getClientExtensionResults".into())
+    /// Read `credential.getClientExtensionResults().prf`.
+    fn prf_outcome(credential: &JsValue) -> Result<PrfOutcome, NostrAuthError> {
+        let extensions = Reflect::get(credential, &"getClientExtensionResults".into())
             .and_then(|f| {
                 f.dyn_ref::<js_sys::Function>()
                     .ok_or(JsValue::UNDEFINED)?
@@ -251,38 +332,46 @@ mod imp {
                 ))
             })?;
 
-        #[expect(
-            clippy::map_err_ignore,
-            reason = "any failure here means no PRF support, which the returned error already conveys"
-        )]
-        let prf_results = Reflect::get(&get_exts, &"prf".into())
-            .and_then(|p| Reflect::get(&p, &"results".into()))
-            .map_err(|_| NostrAuthError::PasskeyNotSupported)?;
+        let Ok(prf) = Reflect::get(&extensions, &"prf".into()) else {
+            return Ok(PrfOutcome::Unavailable);
+        };
+        let Ok(results) = Reflect::get(&prf, &"results".into()) else {
+            return Ok(PrfOutcome::Unavailable);
+        };
 
-        if prf_results.is_undefined() || prf_results.is_null() {
-            return Err(NostrAuthError::PasskeyNotSupported);
+        if results.is_undefined() || results.is_null() {
+            let enabled =
+                Reflect::get(&prf, &"enabled".into()).is_ok_and(|v| v.as_bool() == Some(true));
+            return Ok(if enabled {
+                PrfOutcome::EnabledWithoutOutput
+            } else {
+                PrfOutcome::Unavailable
+            });
         }
 
-        let first = Reflect::get(&prf_results, &"first".into()).map_err(|e| {
+        let first = Reflect::get(&results, &"first".into()).map_err(|e| {
             NostrAuthError::PasskeyFailed(format!("no PRF first output: {}", js_err_msg(&e)))
         })?;
 
-        let prf_bytes = Uint8Array::new(&first).to_vec();
+        Ok(PrfOutcome::Output(Uint8Array::new(&first).to_vec()))
+    }
 
-        if prf_bytes.len() != 32 {
-            return Err(NostrAuthError::PasskeyFailed(format!(
-                "PRF output must be 32 bytes, got {}",
-                prf_bytes.len()
-            )));
-        }
+    /// Read `credential.rawId`.
+    fn credential_id_of(credential: &JsValue) -> Result<Vec<u8>, NostrAuthError> {
+        let raw_id = Reflect::get(credential, &"rawId".into())
+            .map_err(|e| NostrAuthError::PasskeyFailed(format!("no rawId: {}", js_err_msg(&e))))?;
+        Ok(Uint8Array::new(&raw_id).to_vec())
+    }
 
-        // SHA-256 of the PRF output → secp256k1 private key (deterministic, Roadflare pattern)
-        let digest = sha256_bytes(&prf_bytes);
+    /// Derive the Nostr keypair from a WebAuthn credential's PRF output.
+    fn derive_from_credential(credential: &JsValue) -> Result<PasskeySession, NostrAuthError> {
+        let credential_id = credential_id_of(credential)?;
 
-        let secret_key = SecretKey::from_slice(&digest)
-            .map_err(|e| NostrAuthError::PasskeyFailed(e.to_string()))?;
+        let PrfOutcome::Output(prf_bytes) = prf_outcome(credential)? else {
+            return Err(NostrAuthError::PasskeyNotSupported);
+        };
 
-        let keys = Keys::new(secret_key);
+        let keys = keys_from_prf_output(&prf_bytes)?;
         let public_key = keys.public_key();
 
         Ok(PasskeySession {
@@ -292,10 +381,73 @@ mod imp {
         })
     }
 
+    /// PRF output (32 bytes) → SHA-256 → secp256k1 private key. Changing this changes every user's
+    /// identity.
+    pub(super) fn keys_from_prf_output(prf_bytes: &[u8]) -> Result<Keys, NostrAuthError> {
+        if prf_bytes.len() != 32 {
+            return Err(NostrAuthError::PasskeyFailed(format!(
+                "PRF output must be 32 bytes, got {}",
+                prf_bytes.len()
+            )));
+        }
+
+        let digest = sha256_bytes(prf_bytes);
+
+        let secret_key = SecretKey::from_slice(&digest)
+            .map_err(|e| NostrAuthError::PasskeyFailed(e.to_string()))?;
+
+        Ok(Keys::new(secret_key))
+    }
+
     /// Compute SHA-256 synchronously.
     pub(super) fn sha256_bytes(input: &[u8]) -> [u8; 32] {
         use bitcoin_hashes::sha256;
         sha256::Hash::hash(input).to_byte_array()
+    }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+    mod wasm_tests {
+        use super::*;
+        use wasm_bindgen_test::wasm_bindgen_test;
+
+        fn credential(extensions: &str) -> JsValue {
+            let source = format!(
+                "({{ rawId: new Uint8Array([251, 255, 191]).buffer, getClientExtensionResults() {{ return {extensions}; }} }})"
+            );
+            js_sys::eval(&source).unwrap()
+        }
+
+        const OUTPUT_0_TO_31: &str =
+            "{ prf: { results: { first: Uint8Array.from({ length: 32 }, (_, i) => i).buffer } } }";
+
+        #[wasm_bindgen_test]
+        fn derive_from_fake_credential() {
+            let session = derive_from_credential(&credential(OUTPUT_0_TO_31)).unwrap();
+            assert_eq!(
+                session.public_key.to_hex(),
+                "f8d6557dfcca8c44b8b9d16d33e3faa77e05286f992067a5453441f8b13d582e"
+            );
+            assert_eq!(session.credential_id, [0xfb, 0xff, 0xbf]);
+        }
+
+        #[wasm_bindgen_test]
+        fn prf_outcome_table() {
+            let expected: Vec<u8> = (0..32).collect();
+            for (extensions, want) in [
+                (OUTPUT_0_TO_31, PrfOutcome::Output(expected)),
+                ("{ prf: { results: {} } }", PrfOutcome::Output(Vec::new())),
+                (
+                    "{ prf: { enabled: true } }",
+                    PrfOutcome::EnabledWithoutOutput,
+                ),
+                ("{ prf: { enabled: false } }", PrfOutcome::Unavailable),
+                ("{ prf: {} }", PrfOutcome::Unavailable),
+                ("{}", PrfOutcome::Unavailable),
+            ] {
+                assert_eq!(prf_outcome(&credential(extensions)).unwrap(), want);
+            }
+        }
     }
 }
 
@@ -306,18 +458,30 @@ mod imp {
     use crate::signers::NOT_ON_SERVER;
     use crate::types::NostrAuthError;
 
-    /// Server stub for `create`.
-    pub(super) async fn create(
-        _rp_id: &str,
-        _rp_name: &str,
-    ) -> Result<PasskeySession, NostrAuthError> {
+    /// Server stub for the browser's in-flight ceremony.
+    pub struct Pending;
+
+    impl Pending {
+        /// Server stub for `finish`.
+        #[expect(
+            clippy::unused_async,
+            reason = "matches the browser signature, which awaits"
+        )]
+        pub async fn finish(self) -> Result<PasskeySession, NostrAuthError> {
+            Err(NostrAuthError::PasskeyFailed(NOT_ON_SERVER.into()))
+        }
+    }
+
+    /// Server stub for `begin_create`.
+    pub(super) fn begin_create(_rp_id: &str, _rp_name: &str) -> Result<Pending, NostrAuthError> {
         Err(NostrAuthError::PasskeyFailed(NOT_ON_SERVER.into()))
     }
 
-    /// Server stub for `authenticate`.
-    pub(super) async fn authenticate(
+    /// Server stub for `begin_authenticate`.
+    pub(super) fn begin_authenticate(
+        _rp_id: &str,
         _credential_id: Option<&[u8]>,
-    ) -> Result<PasskeySession, NostrAuthError> {
+    ) -> Result<Pending, NostrAuthError> {
         Err(NostrAuthError::PasskeyFailed(NOT_ON_SERVER.into()))
     }
 }
@@ -328,8 +492,6 @@ mod tests {
     use super::*;
     use crate::types::AuthResult;
     use nostr::event::Event;
-
-    // Expected values were computed outside the crate (shasum, Python hashlib and a pure-Python secp256k1 multiply).
 
     #[test]
     fn passkey_signs_rejects_malformed_json_and_names_method() {
@@ -365,19 +527,50 @@ mod tests {
 
     #[cfg(not(feature = "ssr"))]
     #[test]
+    fn prf_salt_bytes() {
+        assert_eq!(
+            super::imp::PRF_SALT,
+            [
+                0x6e, 0x6f, 0x73, 0x74, 0x72, 0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x76, 0x31
+            ]
+        );
+    }
+
+    // Method for both vectors: output -> SHA-256 -> secp256k1 secret, computed outside the crate (Python hashlib and a pure-Python multiply, checked with openssl).
+    #[cfg(not(feature = "ssr"))]
+    #[test]
     fn prf_derivation_vector() {
         let input: Vec<u8> = (0..32).collect();
-        let digest = super::imp::sha256_bytes(&input);
-        let hex = bitcoin_hashes::sha256::Hash::from_byte_array(digest).to_string();
+        let keys = super::imp::keys_from_prf_output(&input).unwrap();
         assert_eq!(
-            hex,
+            keys.secret_key().to_secret_hex(),
             "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd"
         );
-        let sk = nostr::key::SecretKey::from_slice(&digest).unwrap();
         assert_eq!(
-            Keys::new(sk).public_key().to_hex(),
+            keys.public_key().to_hex(),
             "f8d6557dfcca8c44b8b9d16d33e3faa77e05286f992067a5453441f8b13d582e"
         );
+    }
+
+    #[cfg(not(feature = "ssr"))]
+    #[test]
+    fn prf_vector_sevens() {
+        let keys = super::imp::keys_from_prf_output(&[7; 32]).unwrap();
+        assert_eq!(
+            keys.public_key().to_hex(),
+            "5bf96bc947e9439cc6ab833bcd0e2dd8c155fdea32a6f787b70a5209206ed105"
+        );
+    }
+
+    #[cfg(not(feature = "ssr"))]
+    #[test]
+    fn prf_output_wrong_length() {
+        for len in [31, 33] {
+            assert!(matches!(
+                super::imp::keys_from_prf_output(&vec![7; len]),
+                Err(NostrAuthError::PasskeyFailed(_))
+            ));
+        }
     }
 }
 
@@ -391,6 +584,6 @@ mod server_tests {
     fn passkey_server_stubs() {
         let want = "Passkey operation failed: not available on server";
         assert_eq!(text(ready(PasskeySession::create("rp", "name"))), want);
-        assert_eq!(text(ready(PasskeySession::authenticate(None))), want);
+        assert_eq!(text(ready(PasskeySession::authenticate("rp", None))), want);
     }
 }

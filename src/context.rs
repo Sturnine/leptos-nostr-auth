@@ -12,9 +12,11 @@ use leptos_use_window::use_window;
 use nostr::nips::nip19::ToBech32;
 
 use crate::modal::NostrAuthModal;
+use crate::platform::{effective_rp_id, page_has_been_active, prompt_allowed};
 use crate::storage::{
-    LoginStorageAction, RestorePlan, initial_restoring, is_logout_storage_event,
-    login_storage_action, restore_plan, restore_session,
+    LoginStorageAction, RestorePlan, begin_passkey_restore, initial_restoring,
+    is_logout_storage_event, login_storage_action, passkey_restore_target, restore_plan,
+    restore_session,
 };
 use crate::types::{AuthResult, NostrAuthConfig, NostrAuthError, PersistedSession};
 
@@ -34,11 +36,13 @@ pub struct NostrAuthContext {
     pub npub: Signal<Option<String>>,
     /// `true` when a user is logged in.
     pub is_authenticated: Signal<bool>,
-    /// `true` while a persisted session is being restored from localStorage on mount.
+    /// `true` while a persisted session is being restored: from localStorage on mount, or for a
+    /// passkey, from the login click.
     ///
-    /// False on the first hydrated render, because server HTML cannot know storage. It can stay
-    /// true for a long time, or without bound with an extension that never answers, so do not hide
-    /// the login button behind it. A login, a logout or a logout in another tab ends it at once.
+    /// False on the first hydrated render, because server HTML cannot know storage, and false at
+    /// load for a stored passkey, which restores only from the login click. It can stay true for a
+    /// long time, or without bound with an extension that never answers, so do not hide the login
+    /// button behind it. A login, a logout or a logout in another tab ends it at once.
     pub is_restoring: Signal<bool>,
     /// `true` when localStorage holds a decodable session, restored or not, whether or not
     /// `persist_session` is on. Use it with `is_authenticated` to offer a "forget saved session"
@@ -48,12 +52,20 @@ pub struct NostrAuthContext {
     /// restorable stored, it reads true with nothing saved until logout, reload or a refetch from
     /// another tab's change.
     pub has_saved_session: Signal<bool>,
-    /// Why the stored session did not restore on this load. It is kept and retried on the next
-    /// load. Cleared by a login, a logout or a logout in another tab.
+    /// Why the stored session did not restore. It is kept and retried on the next load, or for a
+    /// passkey, on the next login click. `None` for a passkey awaiting that click, since nothing has
+    /// failed; stored passkey data that can never restore is reported at load. Cleared by a login,
+    /// a logout, a logout in another tab or a new attempt.
     ///
     /// Treat the text as untrusted display text: it can carry words from an extension or a relay.
     pub restore_error: Signal<Option<NostrAuthError>>,
-    /// Open the login modal programmatically.
+    /// Open the login modal, or restore a stored passkey.
+    ///
+    /// Call `show_login` from a user gesture, such as a click handler, with nothing deferred before
+    /// it, so that restoring a passkey takes one tap. Before the user's first interaction with the
+    /// page it opens the login modal and never prompts. After that the crate does not check that
+    /// the call is in a gesture: a call from a timer or Effect can prompt where the browser allows
+    /// it. A failed or cancelled prompt keeps the session and opens the modal.
     pub show_login: Callback<()>,
     /// Log out: clears auth state, removes the localStorage session and closes a bunker session
     /// for good, including for clones kept elsewhere.
@@ -97,7 +109,8 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 
 /// Wraps your application root to provide reactive Nostr authentication state.
 ///
-/// Automatically attempts to restore a cached session from localStorage on mount.
+/// Automatically attempts to restore a cached session from localStorage on mount, except a stored
+/// passkey, which restores only from [`NostrAuthContext::show_login`] and never prompts on load.
 /// Renders [`NostrAuthModal`] internally so you don't need to add it yourself.
 ///
 /// # Example
@@ -212,6 +225,22 @@ pub fn NostrAuthProvider(
         false,
     );
 
+    let land_restore = move |result: Result<AuthResult, NostrAuthError>| {
+        match result {
+            Ok(result) => {
+                replace_auth(auth, set_auth, Some(result));
+                set_restore_error.set(None);
+            }
+            Err(e) => {
+                web_sys::console::info_1(
+                    &format!("leptos-nostr-auth: session restore failed: {e}").into(),
+                );
+                set_restore_error.set(Some(e));
+            }
+        }
+        set_restoring.set(false);
+    };
+
     // Reads storage afresh, because a logout during the consumer's first render runs before this.
     // get_untracked() avoids re-running when a login saves the session.
     Effect::new(move |_| {
@@ -229,22 +258,17 @@ pub fn NostrAuthProvider(
                 restore_handle.set_value(Some(handle));
                 set_restoring.set(true);
                 spawn_local(async move {
-                    match Abortable::new(restore_session(&session, timeout), registration).await {
-                        Ok(Ok(result)) => {
-                            replace_auth(auth, set_auth, Some(result));
-                            set_restore_error.set(None);
-                            set_restoring.set(false);
-                        }
-                        Ok(Err(e)) => {
-                            web_sys::console::info_1(
-                                &format!("leptos-nostr-auth: session restore failed: {e}").into(),
-                            );
-                            set_restore_error.set(Some(e));
-                            set_restoring.set(false);
-                        }
-                        Err(_aborted) => {}
+                    if let Ok(result) =
+                        Abortable::new(restore_session(&session, timeout), registration).await
+                    {
+                        land_restore(result);
                     }
                 });
+            }
+            (RestorePlan::AwaitClick, Some(session)) => {
+                if let Err(e) = passkey_restore_target(&session) {
+                    set_restore_error.set(Some(e));
+                }
             }
             (RestorePlan::NotAllowed, _) => {
                 set_restore_error.set(Some(NostrAuthError::RestoreMethodNotAllowed));
@@ -264,7 +288,47 @@ pub fn NostrAuthProvider(
 
     let is_authenticated = Signal::derive(move || auth.get().is_some());
 
-    let show_login = Callback::new(move |(): ()| set_show_modal.set(true));
+    let show_login = Callback::new(move |(): ()| {
+        let may_prompt = !show_modal.get_untracked()
+            && !restoring.get_untracked()
+            && auth.with_untracked(Option::is_none)
+            && prompt_allowed(page_has_been_active());
+        let session = stored_session.get_untracked().filter(|session| {
+            may_prompt
+                && cfg.with_value(|c| {
+                    restore_plan(c.persist_session, Some(session), &c.allowed_methods)
+                }) == RestorePlan::AwaitClick
+        });
+        let Some(session) = session else {
+            set_show_modal.set(true);
+            return;
+        };
+
+        // `get` goes first: Safari counts it as user-initiated only inside the click's own stack.
+        let begun = cfg
+            .with_value(|c| begin_passkey_restore(&session, &effective_rp_id(c.rp_id.as_deref())));
+        match begun {
+            Ok(pending) => {
+                let (handle, registration) = AbortHandle::new_pair();
+                restore_handle.set_value(Some(handle));
+                set_restore_error.set(None);
+                set_restoring.set(true);
+                spawn_local(async move {
+                    if let Ok(result) = Abortable::new(pending.finish(), registration).await {
+                        let failed = result.is_err();
+                        land_restore(result);
+                        if failed {
+                            set_show_modal.set(true);
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                land_restore(Err(e));
+                set_show_modal.set(true);
+            }
+        }
+    });
 
     let has_saved_session = Signal::derive(move || settled.get() && stored_session.get().is_some());
 
