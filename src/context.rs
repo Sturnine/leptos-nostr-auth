@@ -395,19 +395,6 @@ pub fn NostrAuthProvider(
     };
 
     view! {
-        // Show a subtle loading indicator while restoring (optional — UX polish)
-        <Show when=move || restoring.get()>
-            <div
-                aria-live="polite"
-                aria-label="Restoring session…"
-                data-nostr-restoring=""
-                style="position:fixed;bottom:1rem;right:1rem;z-index:9997;"
-            >
-                <span data-nostr-spinner="" />
-                "Restoring session…"
-            </div>
-        </Show>
-
         {children()}
 
         <Provider value=link>
@@ -468,22 +455,6 @@ mod tests {
         assert_eq!(BASELINE, READ_ONLY_JSON);
         let restored = crate::storage::tests::first_poll(restore_session(&dec, 1));
         assert!(matches!(restored, Some(Ok(AuthResult::ReadOnly(_)))));
-    }
-
-    #[cfg(feature = "ssr")]
-    #[test]
-    fn provider_renders_no_restoring_marker() {
-        let owner = Owner::new();
-        let html = owner.with(|| {
-            view! {
-                <NostrAuthProvider>
-                    <p>"inside"</p>
-                </NostrAuthProvider>
-            }
-            .to_html()
-        });
-        assert!(html.contains("inside"));
-        assert!(!html.contains("data-nostr-restoring"));
     }
 
     #[test]
