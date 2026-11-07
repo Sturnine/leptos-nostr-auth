@@ -229,7 +229,10 @@ impl core::fmt::Debug for AuthResult {
 /// revocable NIP-46 pairing key (`bunker_client_secret_hex`) when the active session is
 /// a bunker connection — see the "Session Restore" section in the README for the exact
 /// risk model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output carries
+/// them in full.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PersistedSession {
     /// Authenticated public key as lowercase hex.
@@ -244,6 +247,23 @@ pub struct PersistedSession {
     pub bunker_client_secret_hex: Option<String>,
     /// Passkey: base64url credential ID — used to call `credentials.get()`
     pub passkey_credential_id: Option<String>,
+}
+
+impl core::fmt::Debug for PersistedSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        const REDACTED: &str = "<redacted>";
+        f.debug_struct("PersistedSession")
+            .field("public_key_hex", &self.public_key_hex)
+            .field("method", &self.method)
+            // A public field decoded from localStorage: nothing enforces that it is secret-free.
+            .field("bunker_uri", &self.bunker_uri.as_ref().map(|_| REDACTED))
+            .field(
+                "bunker_client_secret_hex",
+                &self.bunker_client_secret_hex.as_ref().map(|_| REDACTED),
+            )
+            .field("passkey_credential_id", &self.passkey_credential_id)
+            .finish()
+    }
 }
 
 /// Which login method was used to establish a [`PersistedSession`].
@@ -465,6 +485,34 @@ mod tests {
         assert_eq!(ext.method_name(), "Browser Extension");
         let ro = AuthResult::ReadOnly(ReadOnlyHandle { public_key });
         assert_eq!(ro.method_name(), "Read-Only");
+    }
+
+    #[test]
+    fn persisted_session_debug_redacts_secrets() {
+        const SENTINEL: &str = "SENTINELSECRET";
+        let full = PersistedSession {
+            public_key_hex: "ab".repeat(32),
+            method: PersistedMethod::Bunker,
+            bunker_uri: Some(format!("bunker://x?secret={SENTINEL}")),
+            bunker_client_secret_hex: Some(SENTINEL.to_owned()),
+            passkey_credential_id: Some("credential".to_owned()),
+        };
+        for text in [format!("{full:?}"), format!("{full:#?}")] {
+            assert!(!text.contains(SENTINEL), "{text}");
+            assert_eq!(text.matches("<redacted>").count(), 2, "{text}");
+            assert!(text.contains(&"ab".repeat(32)), "{text}");
+            assert!(text.contains("Bunker"), "{text}");
+            assert!(text.contains("credential"), "{text}");
+        }
+        assert!(format!("{full:?}").contains(r#"bunker_uri: Some("<redacted>")"#));
+        let empty = PersistedSession {
+            bunker_uri: None,
+            bunker_client_secret_hex: None,
+            ..full
+        };
+        let text = format!("{empty:?}");
+        assert!(text.contains("bunker_uri: None"), "{text}");
+        assert!(text.contains("bunker_client_secret_hex: None"), "{text}");
     }
 
     #[test]
