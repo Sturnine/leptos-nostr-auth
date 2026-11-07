@@ -64,7 +64,7 @@ impl Attempt {
         Self(StoredValue::new(None))
     }
 
-    /// Abort the login in flight and report whether there was one. A failed login counts as ended.
+    /// Reports whether a login was running. A failed login counts as ended.
     pub(crate) fn cancel(self) -> bool {
         let handle = self.0.try_update_value(Option::take).flatten();
         handle.map(|handle| handle.abort()).is_some()
@@ -196,7 +196,8 @@ fn deliver(
 /// are collected, and nothing here can reach copies inside `nostr`. Emptying a field does not undo
 /// a paste, so a secret pasted in the wrong field should be treated as exposed.
 ///
-/// The password, secret key and read-only inputs empty on every submit. A bunker URI stays after a
+/// The secret key and read-only inputs empty on every submit. The password input does too, except
+/// on a submit refused for an empty ncryptsec field, which keeps it. A bunker URI stays after a
 /// failed login, in clear text with any secret, until the user leaves the step, unless it is
 /// [`NostrAuthError::InvalidBunkerUri`], which empties it. An ncryptsec string stays after
 /// [`NostrAuthError::WrongPassword`] and empties on [`NostrAuthError::InvalidNcryptsec`].
@@ -224,9 +225,7 @@ pub fn NostrAuthModal(
     register_auth_presenter();
     on_cleanup(unregister_auth_presenter);
 
-    // Starts as server_default (all methods visible, no platform bias) → Effect
-    // updates to real browser capabilities after hydration so the UI narrows reactively.
-    // Effects don't run on the server, so SSR always renders the full method list.
+    // The server renders every method, and this Effect narrows the list after hydration.
     let (platform, set_platform) = signal(Platform::server_default());
     Effect::new(move |previous: Option<()>| {
         // Read first: `previous.is_none() || open.get()` would never subscribe on the first run.
@@ -891,7 +890,7 @@ fn StepPasskey(
                 <button
                     on:click=move |_| {
                         let rp = rp_id.with_value(|rp_id| effective_rp_id(rp_id.as_deref()));
-                        // None → discoverable login: browser presents all stored passkeys
+                        // `None`: a discoverable login, where the browser offers every stored passkey.
                         await_ceremony(PasskeySession::begin_authenticate(&rp, None));
                     }
                 >

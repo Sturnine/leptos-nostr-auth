@@ -28,7 +28,7 @@ impl RpcTimer {
     #[expect(
         clippy::unwrap_used,
         clippy::cast_possible_truncation,
-        reason = "window exists whenever this module runs in a tab, and timeout_secs is a small config value, far below i32::MAX milliseconds"
+        reason = "window exists whenever this module runs in a tab, setTimeout does not throw for a function callback, and timeout_secs is a small config value, far below i32::MAX milliseconds"
     )]
     pub(super) fn start(timeout_secs: u32) -> Self {
         let (fired, resolve, _) = make_rpc_promise();

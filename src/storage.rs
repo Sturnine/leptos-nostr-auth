@@ -49,8 +49,7 @@ pub enum LoginStorageAction {
     Clear,
 }
 
-/// Apply the session rule to a successful login. Keys compare parsed, so an unparseable stored key
-/// counts as a different identity.
+/// Keys compare parsed, so an unparseable stored key counts as a different identity.
 pub fn login_storage_action(
     persist: bool,
     stored: Option<&PersistedSession>,
@@ -130,15 +129,8 @@ pub fn begin_passkey_restore(
     Ok(PendingRestore { pending, stored_pk })
 }
 
-/// Attempt to restore a full `AuthResult` from a `PersistedSession`.
-///
-/// Save/load/clear are handled by the `use_local_storage` hook in `NostrAuthProvider`.
-///
-/// Each method has different restore semantics:
-/// - `Extension`: verify window.nostr still returns the same pubkey
-/// - `Bunker`: re-establish WebSocket connection using stored bunker URI
-/// - `Passkey`: fails closed, never prompting; see [`begin_passkey_restore`]
-/// - `ReadOnly`: restore directly from hex pubkey (no re-auth needed)
+/// Restore a stored session. A passkey fails closed, never prompting; see
+/// [`begin_passkey_restore`].
 pub async fn restore_session(
     session: &PersistedSession,
     bunker_timeout_secs: u32,

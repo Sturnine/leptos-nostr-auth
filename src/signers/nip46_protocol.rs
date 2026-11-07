@@ -43,7 +43,7 @@ pub(super) struct BunkerTarget {
     pub(super) secret: Option<String>,
 }
 
-/// Parse a `bunker://` URI. Error texts are fixed, so they cannot quote the secret.
+/// Error texts are fixed, so they cannot quote the secret.
 pub(super) fn parse_bunker_uri(uri: &str) -> Result<BunkerTarget, NostrAuthError> {
     if uri.starts_with("nostrconnect://") {
         return Err(NostrAuthError::InvalidBunkerUri(
@@ -411,8 +411,8 @@ pub(super) struct AttemptLog {
 }
 
 impl AttemptLog {
-    /// Record a failed attempt. Returns the failure if it ends the handshake now, so no earlier
-    /// relay's reason can replace it.
+    /// Returns the failure if it ends the handshake now, so no earlier relay's reason can replace
+    /// it.
     pub(super) fn record(&mut self, failure: RpcFailure) -> Option<RpcFailure> {
         if !failure.advances_to_next_relay() {
             return Some(failure);
@@ -675,7 +675,7 @@ impl<W> Inflight<W> {
         self.suspect && !self.entries.values().any(|entry| entry.auth_seen)
     }
 
-    /// Handle one relay frame. A dropped frame yields no effects and the request stays pending.
+    /// A dropped frame yields no effects and the request stays pending.
     pub(super) fn on_frame(&mut self, data: &str, peer: &Peer) -> Vec<Effect<W>> {
         let Ok(message) = RelayMessage::from_json(data) else {
             return Vec::new();
@@ -797,7 +797,7 @@ impl<W> Inflight<W> {
         )
     }
 
-    /// Finish a request. Removing it makes a replayed response inert.
+    /// Removing the entry makes a replayed response inert.
     fn settle(&mut self, id: &str, outcome: Result<ResponseResult, RpcFailure>) -> Vec<Effect<W>> {
         self.entries.remove(id).map_or_else(Vec::new, |entry| {
             vec![Effect::Settle {
@@ -1030,7 +1030,7 @@ mod tests {
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn wasm_nip46_event_signs_with_browser_clock() {
+    fn wasm_nip46_event_signs_with_js_date_clock() {
         let client = Keys::generate();
         let remote = Keys::generate().public_key();
         let message = request_message("1".into(), &NostrConnectRequest::GetPublicKey);

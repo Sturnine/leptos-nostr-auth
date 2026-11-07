@@ -51,7 +51,7 @@ pub(crate) fn check_on_curve(key: &PublicKey) -> Result<(), NostrAuthError> {
         .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))
 }
 
-/// Parse a hex key and refuse it if it is off the curve. The error quotes no input.
+/// The error quotes no input.
 pub(crate) fn public_key_from_hex(hex: &str) -> Result<PublicKey, NostrAuthError> {
     let key =
         PublicKey::from_hex(hex).map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
@@ -80,8 +80,7 @@ fn decrypt_with_keys(
         .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
 }
 
-// Reads linear memory through a JS view, including freed memory, which is outside Rust's memory
-// model: empirical evidence about one named buffer, nothing more.
+// Reads freed memory through a JS view: evidence about one named buffer, nothing more.
 #[cfg(all(test, target_arch = "wasm32"))]
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 pub(crate) mod memory_probe {

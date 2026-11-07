@@ -17,16 +17,17 @@ impl Nip07Handle {
     ///
     /// Returns [`NostrAuthError::ExtensionNotFound`] when called with SSR features, or when
     /// `window.nostr` or `getPublicKey` is missing. Returns
-    /// [`NostrAuthError::ExtensionRejected`] when a present method refuses or throws. Returns
-    /// [`NostrAuthError::InvalidPublicKey`] when the extension returned a malformed or off-curve
-    /// key.
+    /// [`NostrAuthError::ExtensionRejected`] when a present method refuses, throws or resolves to a
+    /// non-string. Returns
+    /// [`NostrAuthError::InvalidPublicKey`] when the extension returned a string that is a
+    /// malformed or off-curve key.
     pub async fn get_public_key() -> Result<Self, NostrAuthError> {
         imp::get_public_key().await
     }
 
     /// Sign a Nostr event via the extension. The request and the returned event follow the contract
-    /// on [`crate::AuthResult::sign_event`], so an extension on another account fails after its own
-    /// prompt.
+    /// on [`crate::AuthResult::sign_event`], so an extension on another account fails, possibly
+    /// after its own prompt.
     ///
     /// # Errors
     ///
@@ -176,8 +177,8 @@ mod imp {
         Ok(Nip07Handle { public_key })
     }
 
-    /// Sign an event through the extension. A value that cannot be stringified has no text, which
-    /// `checked_event` refuses without quoting anything from JS.
+    /// A value that cannot be stringified has no text, which `checked_event` refuses without
+    /// quoting anything from JS.
     pub(super) async fn sign_event(
         handle: &Nip07Handle,
         event_json: &str,

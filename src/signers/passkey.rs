@@ -8,6 +8,9 @@ use crate::types::NostrAuthError;
 /// `zeroize`. The derivation's hash digest and hash state are not wiped, and NIP-44 calls leave
 /// derived keys and plaintext unwiped.
 ///
+/// A same-origin script can hook `navigator.credentials.get` and read the PRF output before this
+/// crate does, so the key is only as safe as the page.
+///
 /// A synced passkey gives the same key on devices using this crate with the same RP ID. Whether a
 /// passkey syncs is up to its provider.
 #[derive(Clone)]
@@ -232,7 +235,7 @@ mod imp {
             .ok_or_else(|| NostrAuthError::PasskeyFailed("no window object".into()))?;
         let credentials = window.navigator().credentials();
 
-        // Build a random user ID (not linked to the Nostr key — just for WebAuthn bookkeeping)
+        // Not linked to the Nostr key: WebAuthn bookkeeping only.
         let user_id = random_bytes(16);
         let user_id_u8 = Uint8Array::from(user_id.as_slice());
 
@@ -254,7 +257,7 @@ mod imp {
         let challenge = Uint8Array::from(random_bytes(32).as_slice());
         set(&pk_opts, "challenge", &challenge);
 
-        // pubKeyCredParams: ES256 (-7)
+        // ES256
         let param = Object::new();
         set_str(&param, "type", "public-key");
         Reflect::set(&param, &"alg".into(), &(-7_i32).into())

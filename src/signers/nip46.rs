@@ -46,8 +46,10 @@ impl BunkerSession {
     /// A URI may list up to five relays after duplicates are removed. If the signer sends an
     /// approval link, a mounted [`crate::modal::NostrAuthModal`] shows it, also while `open` is
     /// false, and that request waits one extra 300 s. A login with `n` relays can take up to
-    /// `(2n+1) * timeout_secs + 600` seconds. A modal unmounted during that wait does not shorten
-    /// it. A lost socket ends a wait at once, including one for approval, which then needs a retry.
+    /// `(2n+1) * timeout_secs + 600` seconds. For a direct call, a modal unmounted during that wait
+    /// does not shorten it. A lost socket ends a wait, including one for approval, which then needs
+    /// a retry, as soon as the browser reports the close. A relay's close frame with TCP held open
+    /// can wait for the browser's grace period or a new request, bounded by the request's deadline.
     /// `NostrAuthModal` cancels its login by dropping this future when the user leaves it, or when a
     /// logout or session removal cancels it under the provider's modal. That closes the socket and
     /// clears the approval link. A signer may already have consumed a one-time secret, so a retry
@@ -89,11 +91,8 @@ impl BunkerSession {
         imp::reconnect(uri_without_secret, timeout_secs, client_secret_hex).await
     }
 
-    /// Hex-encoded secret of this session's local NIP-46 pairing keypair.
-    ///
-    /// Persisted so [`BunkerSession::reconnect`] can restore the same client identity the
-    /// bunker already authorized. This is **not** the user's Nostr secret key — see
-    /// [`BunkerSession::reconnect`] docs for the exact risk model.
+    /// Persisted so [`BunkerSession::reconnect`] can restore the client the bunker already
+    /// authorized. This is not the user's Nostr secret key, but it is a live credential.
     pub(crate) fn client_secret_hex(&self) -> String {
         self.client_keys.secret_key().to_secret_hex()
     }
@@ -111,8 +110,10 @@ impl BunkerSession {
     /// Reuses the persistent WebSocket if it is open; reconnects automatically if not, unless the
     /// session was closed.
     ///
-    /// A lost socket ends the request at once with [`NostrAuthError::BunkerConnectionFailed`],
-    /// including one waiting for approval, which then needs a retry. A pending request with no
+    /// A lost socket ends the request with [`NostrAuthError::BunkerConnectionFailed`], including
+    /// one waiting for approval, which then needs a retry, as soon as the browser reports the
+    /// close. A relay's close frame with TCP held open can wait for the browser's grace period or a
+    /// new request, bounded by the request's deadline. A pending request with no
     /// approval link can fail the same way once another request on the socket has timed out and a
     /// new one arrives, because the new one reconnects.
     ///
@@ -130,6 +131,8 @@ impl BunkerSession {
     }
 
     /// NIP-44 encrypt via the remote signer (NIP-46 `nip44_encrypt` method).
+    ///
+    /// A lost socket ends the request the same way as on [`sign_event`](Self::sign_event).
     ///
     /// # Errors
     ///
@@ -151,6 +154,8 @@ impl BunkerSession {
     }
 
     /// NIP-44 decrypt via the remote signer (NIP-46 `nip44_decrypt` method).
+    ///
+    /// A lost socket ends the request the same way as on [`sign_event`](Self::sign_event).
     ///
     /// # Errors
     ///
@@ -878,7 +883,7 @@ mod imp {
 
     pub(super) const fn close(_session: &BunkerSession) {}
 
-    /// Server stub for `current_auth_url`. No state may cross requests.
+    /// No state may cross requests.
     pub(super) const fn current_auth_url() -> Option<String> {
         None
     }

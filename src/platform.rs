@@ -100,12 +100,8 @@ impl Platform {
         }
     }
 
-    /// Used on the server and as the pre-hydration initial state on the client.
-    ///
-    /// All visibility flags are `true` so the server renders the complete method list.
-    /// `os` is `Other` for neutral ordering (no Apple-first layout, no Amber tip).
-    /// After hydration, `Effect::new()` calls `detect()` and updates the platform
-    /// signal, reactively narrowing the list to real capabilities.
+    /// Every method visible and no OS bias, so server HTML stays neutral until `detect` runs after
+    /// hydration.
     pub(crate) const fn server_default() -> Self {
         Self {
             os: Os::Other,
