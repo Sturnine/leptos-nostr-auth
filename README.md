@@ -87,7 +87,7 @@ hydrate = ["leptos-nostr-auth/hydrate", ...]
 ssr    = ["leptos-nostr-auth/ssr", ...]
 ```
 
-The library is SSR-safe: all browser-only code is `cfg`-gated so no `window` or `crypto` access occurs on the server. Session restore is a no-op on the server; it runs only after hydration in the browser.
+The library is SSR-safe: browser-only code is `cfg`-gated or runs only in handlers and Effects, so no `window` or `crypto` access occurs on the server. Session restore is a no-op on the server; it runs only after hydration in the browser.
 
 See the `with-axum-ssr` example for a complete cargo-leptos project layout.
 
@@ -109,7 +109,7 @@ You must select exactly one rendering mode feature:
 leptos-nostr-auth = { version = "0.2", features = ["csr", "insecure_nsec_input"] }
 ```
 
-Shows a raw `nsec1...` / hex private key input behind a two-click security warning. **Not recommended** for production — any XSS on the page can steal the key. Use a browser extension, passkey, or ncryptsec instead.
+Shows a raw `nsec1...` / hex private key input behind a two-click security warning. **Not recommended** for production — any XSS on the page can steal the key. Prefer a browser extension or a bunker, where the key stays out of the page. Passkey and ncryptsec sessions avoid pasting a key, but they also hold the raw key in wasm memory: see [Security limits](#security-limits).
 
 ## Release Profile
 
@@ -223,10 +223,12 @@ Two runnable examples are included in the `examples/` directory:
 
 | Example | Rendering | Styling | Run |
 |---|---|---|---|
-| `basic-csr` | CSR (Trunk) | Headless (`data-nostr-*`) | `trunk serve` |
-| `with-axum-ssr` | SSR + Hydrate (cargo-leptos) | Headless | `cargo leptos serve` |
+| `basic-csr` | CSR (Trunk) | Headless (`data-nostr-*`) | `trunk serve`, then open `http://localhost:3000` |
+| `with-axum-ssr` | SSR + Hydrate (cargo-leptos) | Headless | `cargo leptos serve`, then open `http://localhost:3000` |
 
-All examples demonstrate: login button, session restore indicator, sign event button, logout.
+Both examples show a login button, a restore indicator, a forget-session button and logout. `basic-csr` also signs events.
+
+Open `localhost`, not `127.0.0.1`. Both examples set `rp_id` to `localhost`, and WebAuthn refuses an IP address as an RP ID, so creating a passkey on `127.0.0.1` throws `SecurityError`.
 
 ## Raw Modal (without context provider)
 
@@ -234,16 +236,16 @@ All examples demonstrate: login button, session restore indicator, sign event bu
 let (show, set_show) = signal(false);
 
 view! {
-    <button on:click=move |_| set_show(true)>"Login"</button>
+    <button on:click=move |_| set_show.set(true)>"Login"</button>
     <NostrAuthModal
-        open=show.into()
-        on_auth=Callback::new(move |result: AuthResult| {
+        open=show
+        on_auth=move |result: AuthResult| {
             // result: AuthResult::Extension | Bunker | Passkey | ReadOnly | Ncryptsec | RawNsec
             let pubkey = result.public_key();
             // The modal goes back to its method list; closing it is yours.
-            set_show(false);
-        })
-        on_close=Callback::new(move |()| set_show(false))
+            set_show.set(false);
+        }
+        on_close=move |()| set_show.set(false)
     />
 }
 ```
@@ -255,7 +257,7 @@ view! {
 | Variant | Signing | Notes |
 |---|---|---|
 | `Extension(Nip07Handle)` | Yes | NIP-07 browser extension |
-| `Bunker(BunkerSession)` | Yes | NIP-46 remote signer / Nostr Connect |
+| `Bunker(Box<BunkerSession>)` | Yes | NIP-46 remote signer / Nostr Connect |
 | `Passkey(PasskeySession)` | Yes | WebAuthn PRF-derived key, biometric |
 | `ReadOnly(ReadOnlyHandle)` | No | Public key only |
 | `Ncryptsec(RawKeySession)` | Yes | NIP-49 password-decrypted, in-memory |
@@ -321,17 +323,7 @@ A return that is not a full event, including an object holding only `sig`, is re
 `SigningFailed`. It is not completed from the request. Match the variant, since the `SigningFailed`
 texts may change.
 
-**Switching accounts in the extension.** The extension shows its own prompt, then the call fails with
-`SignerKeyMismatch`, whose text is "Signer is using a different account than this session. Log in
-again to switch." The crate does not log out, so a signer cannot end a session by returning a bad
-event, and switching the extension back makes the same session work again. On reload the mismatch
-fails restore with `SignerKeyMismatch` in `restore_error`, for every method. A signer returning no valid
-key is not a mismatch: an extension reports `InvalidPublicKey` and a bunker `BunkerConnectionFailed`.
-The session stays stored,
-logged out, and is retried on next load, or for a passkey on the next login click, so switching back
-restores it. Extension
-`nip44_encrypt` and `nip44_decrypt` call `getPublicKey` first and fail the same way, which costs one
-extra extension call each, and a switch between the two calls is not detected.
+**Switching accounts in the extension.** The extension may show its own prompt, then the call fails with `SignerKeyMismatch`, whose text is "Signer is using a different account than this session. Log in again to switch." The crate does not log out, so a signer cannot end a session by returning a bad event, and switching the extension back makes the same session work again. On reload the mismatch fails restore with `SignerKeyMismatch` in `restore_error`, for every method. A signer returning no valid key is not a mismatch: an extension reports `InvalidPublicKey`, or `ExtensionRejected` if the value is not a string, and a bunker `BunkerConnectionFailed`. The session stays stored, logged out, and is retried on next load, or for a passkey on the next login click, so switching back restores it. Extension `nip44_encrypt` and `nip44_decrypt` call `getPublicKey` first and fail the same way, which costs one extra extension call each, and a switch between the two calls is not detected.
 
 An extension that keeps the supplied `pubkey` while signing with a switched account reports an
 invalid signature through `SigningFailed`, not `SignerKeyMismatch`, because its return names the
@@ -421,7 +413,7 @@ let plaintext = auth_result.nip44_decrypt(&peer, &ciphertext).await?;
 | Key session on a server | Works |
 | Extension throws, rejects or returns a non-string | `EncryptionFailed(text)` |
 | Missing `window`, `nostr`, `nip44` or method | `ExtensionNotFound` |
-| `getPublicKey` rejected or thrown; malformed or off-curve; another account | `ExtensionRejected`; `InvalidPublicKey`; `SignerKeyMismatch` |
+| `getPublicKey` rejected, thrown or non-string; a malformed or off-curve string; another account | `ExtensionRejected`; `InvalidPublicKey`; `SignerKeyMismatch` |
 | Bunker signer refuses or answers with something malformed | `EncryptionFailed(text)` |
 | Bunker closed, for a valid peer | `BunkerSessionClosed` |
 | Bunker timeout, approval, socket or relay failure | `BunkerTimeout`, `BunkerAuthRequired`, `BunkerConnectionFailed` |
@@ -450,7 +442,7 @@ A failed or cancelled prompt never clears the session. Only a logout or a succes
 | Stored passkey at page load | Kept | Logged out, with no prompt. `restore_error` stays `None`, since nothing has failed. The login click restores it |
 | Failed or cancelled restore, any method | Kept | Logged out; retried on next load, once per page load, with no timers. A passkey retries on the next login click instead, and its failure also opens the modal |
 | Another key on restore, any method | Kept | The other key is never adopted. `restore_error` is `SignerKeyMismatch`. Switching the signer back restores it |
-| Extension returns an invalid key on restore | Kept | `restore_error` is `InvalidPublicKey`. Restores once the extension returns the stored key |
+| Extension returns a string that is not a valid key on restore | Kept | `restore_error` is `InvalidPublicKey`. Restores once the extension returns the stored key |
 | Stored data can never restore (bad hex, missing fields, bad base64) | Kept | Logged out, with no prompt or network call. `restore_error` says why |
 | Stored method removed from `allowed_methods` | Kept | Logged out, with no prompt or network call. `restore_error` is `RestoreMethodNotAllowed` |
 | Stored JSON cannot be decoded | Kept | Reads as nothing stored. `logout` removes it |
@@ -475,15 +467,7 @@ With `persist_session: false` the crate writes nothing on login, starts no resto
 | ncryptsec | **Not persisted** — user must decrypt again (password not stored) |
 | Raw nsec | **Not persisted** — user must paste again |
 
-**Bunker sessions**: restoring a bunker session does **not** replay your bunker's original
-pairing secret (which per [NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) is
-single-use and should already be considered spent). Instead, the library persists the small
-local "pairing keypair" generated the first time you connected — the same key your bunker
-already recognizes and has authorized. This key is disposable and unrelated to your Nostr
-identity key, but it is still a live credential: anyone who can read your app's localStorage
-(e.g. via an XSS bug elsewhere on your page) can use it to request signatures until you revoke
-that client from your bunker/signer app. This is the same exposure class as a browser session
-cookie, not a leaked private key.
+**Bunker sessions**: restoring a bunker session does **not** replay your bunker's original pairing secret (which per [NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) is single-use and should already be considered spent). Instead, the library persists the local pairing keypair generated the first time you connected, the key your bunker already recognizes and has authorized. This key is unrelated to your Nostr identity key, but it is a live credential, held in clear in localStorage. Anyone who reads it, including any script on your page, can use it from any machine for whatever the signer allows this client, including `sign_event` and `nip44_decrypt`, until you revoke that client in your bunker or signer app. `logout` does not revoke it: it deletes this browser's copy and closes the session, and a copy taken earlier keeps working. Unlike an `HttpOnly` session cookie, it cannot be hidden from scripts.
 
 Restore sends `get_public_key`, not `connect`, so signers that require a secret still restore.
 Behaviour on a revoked client varies by signer: one that answers `get_public_key` to anyone
@@ -514,12 +498,14 @@ timeout. A login, a logout, a logout in another tab or an unmount ends it at onc
 
 ```rust
 // Beside the button, not instead of it
-<Show when=move || auth.is_restoring.get()>
-    <p>"Restoring session…"</p>
-</Show>
-<Show when=move || !auth.is_authenticated.get()>
-    <button on:click=...>"Login"</button>
-</Show>
+view! {
+    <Show when=move || auth.is_restoring.get()>
+        <p>"Restoring session…"</p>
+    </Show>
+    <Show when=move || !auth.is_authenticated.get()>
+        <button on:click=move |_| auth.show_login.run(())>"Login"</button>
+    </Show>
+}
 ```
 
 `is_restoring` is false on the first hydrated render, because server HTML cannot know storage, and
@@ -554,6 +540,37 @@ To disable persistence:
 NostrAuthConfig { persist_session: false, ..Default::default() }
 ```
 
+## Security limits
+
+### `is_authenticated` is not proof of identity
+
+`is_authenticated` and `public_key` say what this page believes, and a script on the page can change what it believes. A read-only session is a pasted `npub` with nothing behind it, so anyone can log in as any key that way. An app server must not trust these values: have the client sign a challenge, and verify the signature on the server.
+
+### Secret keys in the page
+
+Passkey, ncryptsec and raw nsec sessions hold the raw secret key in wasm memory for as long as the session lives. A same-origin script can read that memory, or hook `navigator.credentials.get` and read the PRF output before the crate does, which gives it the key. Extension and bunker sessions keep the identity key out of the page, but a script there can still ask them to sign or decrypt.
+
+### What is wiped, and what is not
+
+The crate wipes these. Wasm tests read memory back for the helpers, the PRF buffer and `Keys`. That each input uses the helpers is by reading:
+
+- The `String` buffer in a login step's signal, with `zeroize`, when a submit takes it, when a rejected value is cleared and when the step is left. This covers the bunker URI, ncryptsec string, password, secret key and read-only inputs.
+- The submit copies of the bunker URI and ncryptsec string.
+- The bytes read from the passkey's PRF output.
+- A `Keys` value's own secret bytes, on drop. This is `nostr`'s `non_secure_erase`, which is best effort and not `zeroize`.
+
+Nothing here reaches these:
+
+- JS strings: `event.target.value`, the DOM input's value and the credential's `ArrayBuffer`. Emptying a field takes the value off the screen and wipes the signal's buffer. It does not undo a paste, and a script on the page could already have read it, so treat a secret pasted in the wrong field as exposed.
+- Earlier keystrokes' strings and `prop:value` clones, so a copy of a pasted value can sit in freed memory.
+- The hash digest and hash state in the passkey derivation.
+- Key bytes the compiler moved or copied, the bunker one-time secret in `nostr`'s URI parsing and in this crate's parsed target and handshake, and `nostr`'s decoded bech32 bytes.
+- The bunker pairing key's hex strings, made for the stored session, and its copy in localStorage.
+- Key-session NIP-44: the per-call conversation key, message keys, plaintext buffers and returned plaintext.
+- Clones you hold, including one from `auth.get()`, and any memory snapshot taken before the wipe.
+
+This describes named buffers. It does not show that no other copy exists. Logout ends use of a key; it does not prove the memory is clean.
+
 ## Context API
 
 ```rust
@@ -564,7 +581,7 @@ pub struct NostrAuthContext {
     pub public_key: Signal<Option<nostr::key::PublicKey>>,
     /// Authenticated user's npub (bech32) or hex pubkey as a `String`.
     pub npub: Signal<Option<String>>,
-    /// `true` when logged in.
+    /// `true` when logged in. Not proof of identity: see "Security limits".
     pub is_authenticated: Signal<bool>,
     /// `true` while a persisted session is being restored: from localStorage on mount, or for a
     /// passkey, from the login click. False on the first hydrated render and at load for a stored
@@ -608,6 +625,7 @@ if let Some(auth) = try_use_nostr_auth() {
 All fallible operations return `NostrAuthError`:
 
 ```rust
+#[non_exhaustive]
 pub enum NostrAuthError {
     // NIP-07 extension
     ExtensionNotFound,
@@ -709,7 +727,7 @@ All elements emit `data-nostr-*` attributes for styling:
   pubkey, and an off-curve pubkey it accepts, is now `InvalidBunkerUri("invalid URI")`. A bad pubkey was `InvalidPublicKey`.
 - A raw `+` in a URI secret now decodes to a space. Hex and UUID secrets are unaffected.
 - A persisted relay URL that `nostr`'s `RelayUrl` rejects (not `ws`/`wss`, or a second `://`) now
-  fails restore, which deletes that session.
+  fails restore, and the session is kept like any other failed restore.
 - A `bunker://` URI may list at most five relays after duplicates are removed. More are refused.
 - `AuthResult` now has `nip44_encrypt` and `nip44_decrypt`, async, on every login method, and
   implements `AsyncNip44`. `PasskeySession` and `RawKeySession` gain sync `nip44_*`. New
@@ -727,9 +745,7 @@ All elements emit `data-nostr-*` attributes for styling:
   reconnect; before, a kept clone reconnected. Retrying cannot succeed. Read the current session from
   `NostrAuthContext::auth` instead of keeping a signer across login changes. A failed login closes
   nothing. `to_persisted_session` and the public fields still read.
-- A lost relay socket now fails pending requests at once with
-  `BunkerConnectionFailed("relay connection lost")`, including requests waiting for approval, which
-  need a retry.
+- A lost relay socket now fails pending requests with `BunkerConnectionFailed("relay connection lost")` as soon as the browser reports the close, including requests waiting for approval, which need a retry. A relay's close frame with TCP held open can wait for the browser's grace period or a new request, bounded by the request's deadline.
 - A pending request can fail with that same error once another request on the socket has timed out
   and a new request arrives, because the new request reconnects. A request waiting on a verified
   approval link keeps the socket instead.
@@ -771,8 +787,7 @@ All elements emit `data-nostr-*` attributes for styling:
 - New `NostrAuthContext::has_saved_session` and `restore_error`, and new
   `NostrAuthError::RestoreMethodNotAllowed`. A stored session whose method left `allowed_methods` no
   longer restores or prompts. A mismatch on restore reports `SignerKeyMismatch` for every method.
-  A signer returning no valid key is not a mismatch: an extension returning a malformed or off-curve
-  key reports `InvalidPublicKey`, where an off-curve one reported `SignerKeyMismatch` before.
+  A signer returning no valid key is not a mismatch: an extension returning a malformed or off-curve key string reports `InvalidPublicKey`, where an off-curve one reported `SignerKeyMismatch` before.
 - A login or logout now cancels a restore in flight, and its result is discarded. Before, a late
   result could log a user back in or delete a session a login had just saved.
 - A login with a method that cannot persist, as a different identity, now clears the stored session,
@@ -786,11 +801,8 @@ All elements emit `data-nostr-*` attributes for styling:
   login button behind it: it can stay true for a long time, or without bound with an extension that
   never answers.
 - Extension `nip44_encrypt` and `nip44_decrypt` now call `getPublicKey` first and return
-  `SignerKeyMismatch` on a switch. A missing `nip44` is `ExtensionNotFound`. A throwing or rejecting
-  `getPublicKey` here is `ExtensionRejected(msg)`, and a malformed or off-curve key from it is
-  `InvalidPublicKey`, where an off-curve key was `SignerKeyMismatch` before.
-  A throwing or rejecting `nip44`, or a non-string return, is `EncryptionFailed(msg)`. All of these
-  methods' failures were `SigningFailed` before.
+  `SignerKeyMismatch` on a switch. A missing `nip44` is `ExtensionNotFound`. A throwing or rejecting `getPublicKey` here, or one resolving to a non-string, is `ExtensionRejected(msg)`, and a malformed or off-curve string from it is `InvalidPublicKey`, where an off-curve key was `SignerKeyMismatch` before.
+  A throwing or rejecting `nip44`, or a non-string return, is `EncryptionFailed(msg)`. Before, these methods returned only `SigningFailed`.
 - A stored passkey no longer prompts on page load. `show_login` starts a passkey prompt when a passkey session is stored, unless the user has not interacted with the page yet.
 - `PasskeySession::authenticate` now takes `rp_id` first: `authenticate(rp_id, credential_id)`. It always sends `rpId`.
 - `create` no longer filters on `authenticatorAttachment`, so security keys and cross-device passkeys are offered. An authenticator without PRF reaches `create`, gets `PasskeyNotSupported` and leaves a credential behind on each retry. The variant's text is now "This browser or authenticator does not support the WebAuthn PRF extension".
@@ -812,18 +824,19 @@ All elements emit `data-nostr-*` attributes for styling:
 - `PersistedSession`'s `Debug` now prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output is unchanged.
 - `ReadOnlyHandle::from_str` and the read-only step now reject off-curve hex, `npub` and `nprofile`, with new error text. About half of all hex secret keys are also valid public keys. Those are still accepted, shown and persisted as a public key.
 - A stored session with an off-curve key no longer restores. `restore_error` is `InvalidPublicKey` and the session is kept under the session rule, so it stays in localStorage until logout or a new login.
-- An extension returning an off-curve key from `getPublicKey`, or an unparseable one, now gets `InvalidPublicKey("the extension returned an invalid public key")` at login, from `nip44_*` and on restore. On `nip44_*` and restore an off-curve key was `SignerKeyMismatch`, so an app prompting for an account switch on that variant will not prompt here. `nip44` is not called. The session is kept, and restores once the extension returns the stored key. `sign_event` is unchanged, and still reports `SignerKeyMismatch` for that account after the extension's own prompt. `InvalidPublicKey` in `restore_error` is therefore not proof that a session is dead: do not offer to forget it on the variant alone.
-- The password, secret key and read-only inputs now empty on submit. A mistyped `npub` or `nprofile` must be pasted again. Emptying wipes the signal's buffer only: the DOM value, `event.target.value` and `prop:value` clones remain until collected, and a script on the page could already have read the paste. A secret pasted in the read-only field should be treated as exposed.
-- A bunker URI now stays after a failed login, in clear text with any secret, until the user leaves the step, including under a restore landing on that step or a removal in another tab with no login running. Retrying a URI whose secret was spent fails with the signer's text and needs a new URI. Whether a signer spends a secret on a failed attempt is unknown. `InvalidBunkerUri` empties the field, so a typo there is gone.
-- An `ncryptsec` string now stays only after `WrongPassword`, where anyone who reads it can attack it offline at its scrypt cost. `InvalidNcryptsec`, including a pasted `nsec1...` and the `log_n` refusal, empties the field, and the error says why.
+- An extension returning a string from `getPublicKey` that is off-curve or unparseable now gets `InvalidPublicKey("the extension returned an invalid public key")` at login, from `nip44_*` and on restore. A non-string stays `ExtensionRejected("expected string pubkey")`. On `nip44_*` and restore an off-curve key was `SignerKeyMismatch`, so an app prompting for an account switch on that variant will not prompt here. `nip44` is not called. The session is kept, and restores once the extension returns the stored key. `sign_event` is unchanged, and still reports `SignerKeyMismatch` for that account after any prompt from the extension. `InvalidPublicKey` in `restore_error` is therefore not proof that a session is dead: do not offer to forget it on the variant alone.
+- The secret key and read-only inputs now empty on every submit, and the password input on every submit except one refused for an empty `ncryptsec` field. A mistyped `npub` or `nprofile` must be pasted again. Emptying wipes the signal's buffer only: the DOM value, `event.target.value`, earlier keystrokes' strings and `prop:value` clones remain until collected, and a script on the page could already have read the paste. A secret pasted in the read-only field should be treated as exposed. See [What is wiped](#what-is-wiped-and-what-is-not).
+- A bunker URI stays after a failed login, as it did before, in clear text with any secret, until the user leaves the step, including under a restore landing on that step or a removal in another tab with no login running. Retrying a URI whose secret was spent fails with the signer's text and needs a new URI. Whether a signer spends a secret on a failed attempt is unknown. What changed: `InvalidBunkerUri` now empties the field, so a typo there is gone. A secret pasted in this field should be treated as exposed.
+- An `ncryptsec` string now stays only after `WrongPassword`, where anyone who reads it can attack it offline at its scrypt cost. `InvalidNcryptsec`, including a pasted `nsec1...` and the `log_n` refusal, empties the field, and the error says why. A secret pasted in this field should be treated as exposed.
 - The read-only step has a new warning box on the `data-nostr-warning` hook, ending "Anything rejected is cleared from this field."
 - The bunker step has a new one-time-secret hint on the `data-nostr-tip` hook, on every platform, so CSS for that hook now applies off Android too.
 - The ncryptsec step has a new sentence: "A value no password can open is cleared from this field."
 - The bunker, ncryptsec, password, secret key and read-only inputs now carry `autocomplete="off"` and `spellcheck="false"`. Browsers may ignore `autocomplete="off"`.
 - ncryptsec decrypt now starts after two frames, or a 200 ms timer that browsers may throttle in a background tab; best effort, no paint is guaranteed. It started after a 16 ms timer before. scrypt still blocks the main thread.
+- `NostrAuthModal`'s `on_auth` and `on_close` now accept closures, as in `on_auth=move |result: AuthResult| ...`. A closure passed this way must be `Send + Sync + 'static`, like one given to `Callback::new`. `Callback::new(|x| ...)` or `Callback::new(|_| ...)` on these props no longer infers its parameter type, so write it: `|x: AuthResult|` or `|_: AuthResult|` on `on_auth`, and `|(): ()|` on `on_close`. `Callback` values and annotated closures need no change.
 
 ## Development
 
 `nix develop` (or `direnv allow` once) enters a shell with the toolchain pinned by
-`rust-toolchain.toml`. `nix flake check` runs clippy, docs and formatting checks; `nix fmt`
+`rust-toolchain.toml`. `nix flake check` runs clippy with warnings denied on the native, `ssr`, `hydrate` and `csr` builds (the last three also with `insecure_nsec_input`), docs, the native, `ssr` and wasm tests, example builds, `cargo audit` and formatting; `nix fmt`
 formats Rust, Nix and TOML.
