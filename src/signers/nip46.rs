@@ -52,8 +52,10 @@ impl BunkerSession {
     /// false, and that request waits one extra 300 s. A login with `n` relays can take up to
     /// `(2n+1) * timeout_secs + 600` seconds. A modal unmounted during that wait does not shorten
     /// it. A lost socket ends a wait at once, including one for approval, which then needs a retry.
-    /// Closing the modal does not cancel a login: a dismissed login can still complete up to that
-    /// bound later and call `on_auth`.
+    /// `NostrAuthModal` cancels its login by dropping this future when the user leaves it, or when a
+    /// logout or session removal cancels it under the provider's modal. That closes the socket and
+    /// clears the approval link. A signer may already have consumed a one-time secret, so a retry
+    /// can need a new URI.
     ///
     /// # Errors
     ///

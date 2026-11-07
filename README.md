@@ -8,12 +8,11 @@ Drop-in login modal supporting every Nostr authentication method. Headless — b
 
 | Method | When shown |
 |---|---|
-| Browser Extension (NIP-07) | Alby, nos2x, Nostr KeyX detected |
+| Browser Extension (NIP-07) | Alby, nos2x, Nostr KeyX, detected each time the modal opens |
 | Nostr Connect / Bunker (NIP-46) | Always |
 | Passkey (WebAuthn PRF) | macOS/iOS: **top position** (Face ID/Touch ID); others: if WebAuthn available |
 | Read-Only (npub) | Always |
 | Encrypted Key / ncryptsec (NIP-49) | Always |
-| Amber deep-link | Android user-agent only |
 | Raw nsec paste | Only with `insecure_nsec_input` feature (opt-in) |
 
 Passkeys use the WebAuthn PRF extension with a fixed salt (`"nostr-key-v1"`) to deterministically derive the same secp256k1 key from the same passkey. A synced passkey gives the same key on devices using this crate with the same RP ID. No passwords, no clipboard.
@@ -238,11 +237,13 @@ view! {
     <button on:click=move |_| set_show(true)>"Login"</button>
     <NostrAuthModal
         open=show.into()
-        on_auth=move |result| {
+        on_auth=Callback::new(move |result: AuthResult| {
             // result: AuthResult::Extension | Bunker | Passkey | ReadOnly | Ncryptsec | RawNsec
             let pubkey = result.public_key();
-        }
-        on_close=move |_| set_show(false)
+            // The modal goes back to its method list; closing it is yours.
+            set_show(false);
+        })
+        on_close=Callback::new(move |()| set_show(false))
     />
 }
 ```
@@ -414,6 +415,7 @@ A failed or cancelled prompt never clears the session. Only a logout or a succes
 | Case | Stored session | Result |
 |---|---|---|
 | `logout` | Deleted | Logged out; also works while logged out |
+| `logout` with the modal open | Deleted | The modal closes and any login in it is cancelled; typed input is discarded |
 | Stored passkey at page load | Kept | Logged out, with no prompt. `restore_error` stays `None`, since nothing has failed. The login click restores it |
 | Failed or cancelled restore, any method | Kept | Logged out; retried on next load, once per page load, with no timers. A passkey retries on the next login click instead, and its failure also opens the modal |
 | Another key on restore, any method | Kept | The other key is never adopted. `restore_error` is `SignerKeyMismatch`. Switching the signer back restores it |
@@ -495,15 +497,17 @@ stored passkey leaves it false until the login click.
 
 An extension that asks on every call prompts on every load until the user forgets the session.
 
-A cancelled restore clears a bunker approval link at once and closes its socket. A browser or
-extension prompt stays on screen until it is answered, because the crate cannot dismiss it.
+A cancelled restore clears a bunker approval link at once and closes its socket. A cancelled restore
+or login, or a dropped public `create` or `authenticate`, takes a passkey prompt down where the
+browser honours it. An extension prompt stays until answered, with its result discarded.
 
-If a restore finishes while the login modal is open, the modal stays open over the logged-in page. Closing it keeps the restored session. Finishing a login there replaces it, by the same rules as any new login.
+If a restore finishes while the login modal is on its method list, the modal closes. On a login step it stays open over the logged-in page: closing it keeps the restored session, and finishing a login there replaces it, by the same rules as any new login. A modal you mount yourself is not affected.
 
 ### Other tabs
 
 Any removal of the stored session logs out other tabs, through the browser's `storage` event, and drops their in-memory keys. There is no reason signal. A bunker session there closes for good. This covers another tab's `logout`, its login as a different identity with a method that cannot persist, and its quota-failure clear. Limits:
 
+- A removal cancels a login running in this tab's modal and closes the modal, with no reason shown, and a bunker login's one-time secret may be spent, so a retry can need a new URI. With no login running the modal stays open with what was typed, and submitting it is a new login.
 - A persistable login elsewhere leaves this tab logged in, but a non-persistable one logs it out. This tab also logs out if that login is the identity it already holds.
 - Removing a key that is not there fires no `storage` event. If nothing is stored, a logout in another tab does not reach this one, and this tab keeps its in-memory keys.
 - `localStorage.clear()` in another tab logs this tab out if the browser fires a `storage` event for it, even if no session of ours was stored, because the event does not say what was removed. An in-memory ncryptsec or nsec login ends too, and a bunker session closes for good. Use `removeItem` for your own keys. Chromium fires no event when the origin's storage was already empty.
@@ -547,7 +551,8 @@ pub struct NostrAuthContext {
     /// the call is in a gesture: a call from a timer or Effect can prompt where the browser allows
     /// it. A failed or cancelled prompt keeps the session and opens the modal.
     pub show_login: Callback<()>,
-    /// Log out, clear the stored session and close a bunker session for good.
+    /// Log out, clear the stored session and close a bunker session for good. It also closes the
+    /// login modal and cancels a login in it.
     pub logout: Callback<()>,
 }
 ```
@@ -617,12 +622,20 @@ All elements emit `data-nostr-*` attributes for styling:
 ```css
 [data-nostr-backdrop]        { /* modal overlay */ }
 [data-nostr-modal]           { /* modal box */ }
+[data-nostr-modal-header]    { /* modal header row */ }
+[data-nostr-modal-body]      { /* modal content */ }
 [data-nostr-modal-title]     { /* "Connect to Nostr" heading */ }
+[data-nostr-methods]         { /* method list */ }
 [data-nostr-method]          { /* login method button */ }
 [data-nostr-method-icon]     { /* method icon wrapper */ }
 [data-nostr-method-title]    { /* method name */ }
 [data-nostr-method-subtitle] { /* method description */ }
 [data-nostr-badge]           { /* "Recommended" badge */ }
+[data-nostr-divider]         { /* "More options" divider */ }
+[data-nostr-advanced]        { /* "Advanced" disclosure */ }
+[data-nostr-step]            { /* one login step, named by its value */ }
+[data-nostr-tip]             { /* platform tip */ }
+[data-nostr-info]            { /* information note */ }
 [data-nostr-error]           { /* error message */ }
 [data-nostr-warning]         { /* security warning */ }
 [data-nostr-input]           { /* text inputs */ }
@@ -729,7 +742,6 @@ All elements emit `data-nostr-*` attributes for styling:
   hydrated render and for a stored passkey, which leaves it false until the login click. Stop hiding the
   login button behind it: it can stay true for a long time, or without bound with an extension that
   never answers.
-- A restore landing while the login modal is open leaves the modal open.
 - Extension `nip44_encrypt` and `nip44_decrypt` now call `getPublicKey` first and return
   `SignerKeyMismatch` on a switch. A missing `nip44` is `ExtensionNotFound`. A throwing or rejecting
   `getPublicKey` here is `ExtensionRejected(msg)`, and a malformed key from it is `InvalidPublicKey`;
@@ -740,6 +752,17 @@ All elements emit `data-nostr-*` attributes for styling:
 - `create` now completes through a follow-up `get` when the authenticator reports `prf.enabled` with no output. If that fails, the error says to use the existing passkey.
 - The passkey option is hidden when `PublicKeyCredential` is absent, or `getClientCapabilities()` reports `extension:prf` as false. An unknown capability keeps it.
 - A passkey created under a configured `rp_id` now logs in on a subdomain. A site with no configured `rp_id` sees no change.
+- The modal always reopens on its method list, including after a login with a modal you keep open.
+- Close, Escape, backdrop, Back, a parent closing `open`, and unmount cancel a login. A late approval or failure never reaches `on_auth` or the error line. A login's approval link clears when it is cancelled. A cancelled bunker login may have spent its one-time secret, so a retry can need a new URI.
+- `logout` also closes the provider's modal and cancels a login in it, discarding typed input. `logout` then `show_login` reopens on the list.
+- A session removal in another tab cancels a login running in this tab's modal and closes it, with no reason shown. With no login running the modal stays open with what was typed, and submitting it is a new login.
+- A restore landing closes the provider's modal only on its method list. On a login step it stays open. A modal you mount yourself is not affected.
+- Escape with a modal closed no longer fires `on_close`.
+- The Amber method button is gone; use Nostr Connect. The Android tip stays in that step.
+- The built-in restore indicator and its `[data-nostr-restoring]` hook are gone. Render your own from `is_restoring`.
+- The extension is re-detected each time the modal opens.
+- Dropping the future of `PasskeySession::create` or `authenticate` now aborts the browser prompt, where the browser honours it. Keep polling it, or spawn it, to keep the prompt up.
+- The Apple passkey subtitle no longer claims iCloud sync.
 - `rpId` is now always sent, so changing `rp_id` strands credentials made under the old value, including ones made under the hostname before `rp_id` was set. Reverting the config recovers them.
 
 ## Development
