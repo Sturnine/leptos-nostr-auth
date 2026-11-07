@@ -2,12 +2,13 @@
 members = ["."]
 
 [[workspace.metadata.leptos]]
-name                = "with-axum-ssr"
-bin-package         = "with-axum-ssr"
-lib-package         = "with-axum-ssr"
-site-root           = "target/site"
-site-pkg-dir        = "pkg"
-style-file          = "style/main.css"
+name         = "with-axum-ssr"
+bin-package  = "with-axum-ssr"
+lib-package  = "with-axum-ssr"
+site-root    = "target/site"
+site-pkg-dir = "pkg"
+style-file   = "style/main.css"
+# Must be an IP. Open http://localhost:3000: WebAuthn refuses an IP as an RP ID.
 site-addr           = "127.0.0.1:3000"
 reload-port         = 3001
 bin-features        = ["ssr"]

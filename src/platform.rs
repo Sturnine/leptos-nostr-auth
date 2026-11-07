@@ -1,31 +1,22 @@
 #[cfg(not(feature = "ssr"))]
 use wasm_bindgen::JsValue;
 
-/// Detected operating system family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Os {
-    /// Android user-agent.
     Android,
-    /// macOS or iOS/iPadOS user-agent.
     Apple,
-    /// Any other platform (Linux, Windows, unknown).
     Other,
 }
 
-/// Runtime platform capabilities detected once at startup.
 #[derive(Clone, Copy, Debug)]
 pub struct Platform {
-    /// Detected OS family.
     pub os: Os,
-    /// `window.nostr` is present (NIP-07 browser extension installed)
     pub has_nostr_extension: bool,
     /// `window.PublicKeyCredential` exists. PRF is confirmed by `prf_capability` where the browser
     /// reports it, and otherwise when a ceremony returns.
     pub supports_webauthn: bool,
 }
 
-/// Try `navigator.userAgentData.platform` (Client Hints, Chrome/Edge only).
-/// Returns `None` if the API is absent (Firefox, Safari) or returns an empty string.
 #[cfg(not(feature = "ssr"))]
 fn os_from_ua_data(navigator: &web_sys::Navigator) -> Option<Os> {
     let ua_data = js_sys::Reflect::get(
@@ -53,7 +44,6 @@ fn os_from_ua_data(navigator: &web_sys::Navigator) -> Option<Os> {
     })
 }
 
-/// Fallback: parse `navigator.userAgent` string (all browsers).
 #[cfg(not(feature = "ssr"))]
 fn os_from_ua_string(navigator: &web_sys::Navigator) -> Os {
     let ua = navigator.user_agent().unwrap_or_default().to_lowercase();
@@ -71,11 +61,6 @@ fn os_from_ua_string(navigator: &web_sys::Navigator) -> Os {
 }
 
 impl Platform {
-    /// Detect platform capabilities from browser APIs.
-    ///
-    /// In SSR mode returns `server_default()` immediately (no browser APIs available).
-    /// Call inside `Effect::new()` and write to a reactive signal so the UI narrows
-    /// down from the full server-rendered list after hydration.
     #[cfg_attr(
         feature = "ssr",
         expect(
@@ -115,12 +100,8 @@ impl Platform {
         }
     }
 
-    /// Used on the server and as the pre-hydration initial state on the client.
-    ///
-    /// All visibility flags are `true` so the server renders the complete method list.
-    /// `os` is `Other` for neutral ordering (no Apple-first layout, no Amber tip).
-    /// After hydration, `Effect::new()` calls `detect()` and updates the platform
-    /// signal, reactively narrowing the list to real capabilities.
+    /// Every method visible and no OS bias, so server HTML stays neutral until `detect` runs after
+    /// hydration.
     pub(crate) const fn server_default() -> Self {
         Self {
             os: Os::Other,
@@ -147,7 +128,6 @@ pub fn effective_rp_id(configured: Option<&str>) -> String {
     )
 }
 
-/// `hasBeenActive` of the given navigator; `None` when absent, throwing or not a bool.
 #[cfg(not(feature = "ssr"))]
 fn read_has_been_active(navigator: &JsValue) -> Option<bool> {
     let activation = js_sys::Reflect::get(navigator, &JsValue::from_str("userActivation")).ok()?;

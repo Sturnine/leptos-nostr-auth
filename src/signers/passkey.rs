@@ -8,13 +8,15 @@ use crate::types::NostrAuthError;
 /// `zeroize`. The derivation's hash digest and hash state are not wiped, and NIP-44 calls leave
 /// derived keys and plaintext unwiped.
 ///
+/// A same-origin script can hook `navigator.credentials.get` and read the PRF output before this
+/// crate does, so the key is only as safe as the page.
+///
 /// A synced passkey gives the same key on devices using this crate with the same RP ID. Whether a
 /// passkey syncs is up to its provider.
 #[derive(Clone)]
 pub struct PasskeySession {
     /// The authenticated user's public key.
     pub public_key: PublicKey,
-    /// In-memory-only keypair derived from the WebAuthn PRF output.
     keys: Keys,
     /// Raw credential ID bytes, as returned by the browser's WebAuthn API
     /// (`credential.rawId`). Not encoded — callers that persist this (see
@@ -124,7 +126,6 @@ impl PasskeySession {
         super::decrypt_with_keys(&self.keys, peer, ciphertext)
     }
 
-    /// Wraps known keys for tests outside this module.
     #[cfg(test)]
     pub(crate) fn for_tests(keys: Keys, credential_id: Vec<u8>) -> Self {
         Self {
@@ -137,7 +138,6 @@ impl PasskeySession {
 
 pub use imp::Pending as PendingPasskey;
 
-/// Browser implementation.
 #[cfg(not(feature = "ssr"))]
 mod imp {
     use base64::Engine as _;
@@ -177,7 +177,6 @@ mod imp {
     /// The promise is converted when the ceremony starts. An attempt aborted before its first poll
     /// would otherwise leave a rejection with no handler.
     pub struct Pending {
-        /// The ceremony's promise.
         credential: JsFuture,
         /// The RP ID for a `create`'s follow-up. `None` on a `get`.
         create_rp_id: Option<String>,
@@ -224,7 +223,6 @@ mod imp {
         ))
     }
 
-    /// Await a ceremony's promise.
     async fn await_credential(credential: JsFuture) -> Result<JsValue, NostrAuthError> {
         credential.await.map_err(|e| {
             web_sys::console::error_1(&e);
@@ -232,27 +230,23 @@ mod imp {
         })
     }
 
-    /// Start the WebAuthn creation ceremony.
     pub(super) fn begin_create(rp_id: &str, rp_name: &str) -> Result<Pending, NostrAuthError> {
         let window = web_sys::window()
             .ok_or_else(|| NostrAuthError::PasskeyFailed("no window object".into()))?;
         let credentials = window.navigator().credentials();
 
-        // Build a random user ID (not linked to the Nostr key — just for WebAuthn bookkeeping)
+        // Not linked to the Nostr key: WebAuthn bookkeeping only.
         let user_id = random_bytes(16);
         let user_id_u8 = Uint8Array::from(user_id.as_slice());
 
-        // Build the creation options object using js-sys Reflect
         let options = Object::new();
         let pk_opts = Object::new();
 
-        // rp
         let rp = Object::new();
         set_str(&rp, "id", rp_id);
         set_str(&rp, "name", rp_name);
         set(&pk_opts, "rp", &rp);
 
-        // user
         let user = Object::new();
         Reflect::set(&user, &"id".into(), &user_id_u8)
             .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
@@ -260,11 +254,10 @@ mod imp {
         set_str(&user, "displayName", "Nostr Identity");
         set(&pk_opts, "user", &user);
 
-        // challenge
         let challenge = Uint8Array::from(random_bytes(32).as_slice());
         set(&pk_opts, "challenge", &challenge);
 
-        // pubKeyCredParams: ES256 (-7)
+        // ES256
         let param = Object::new();
         set_str(&param, "type", "public-key");
         Reflect::set(&param, &"alg".into(), &(-7_i32).into())
@@ -277,7 +270,6 @@ mod imp {
         set_str(&auth_sel, "userVerification", "required");
         set(&pk_opts, "authenticatorSelection", &auth_sel);
 
-        // extensions: prf with our fixed salt
         let extensions = Object::new();
         let prf = Object::new();
         let prf_eval = Object::new();
@@ -302,7 +294,6 @@ mod imp {
         })
     }
 
-    /// Start the WebAuthn assertion ceremony.
     pub(super) fn begin_authenticate(
         rp_id: &str,
         credential_id: Option<&[u8]>,
@@ -331,7 +322,6 @@ mod imp {
         set(&prf, "eval", &prf_eval);
 
         if let Some(credential_id) = credential_id {
-            // Restrict assertion to the stored credential
             let cred_descriptor = Object::new();
             set_str(&cred_descriptor, "type", "public-key");
             let cred_id_u8 = Uint8Array::from(credential_id);
@@ -369,18 +359,15 @@ mod imp {
         })
     }
 
-    /// What a credential's PRF extension result says.
     #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
     enum PrfOutcome {
         /// `prf.results` is present, with `first` as these bytes, wiped on drop.
         Output(Zeroizing<Vec<u8>>),
         /// `prf.enabled` is true and there are no results, as `create` is allowed to return.
         EnabledWithoutOutput,
-        /// Neither.
         Unavailable,
     }
 
-    /// Read `credential.getClientExtensionResults().prf`.
     fn prf_outcome(credential: &JsValue) -> Result<PrfOutcome, NostrAuthError> {
         let extensions = Reflect::get(credential, &"getClientExtensionResults".into())
             .and_then(|f| {
@@ -421,14 +408,12 @@ mod imp {
         )))
     }
 
-    /// Read `credential.rawId`.
     fn credential_id_of(credential: &JsValue) -> Result<Vec<u8>, NostrAuthError> {
         let raw_id = Reflect::get(credential, &"rawId".into())
             .map_err(|e| NostrAuthError::PasskeyFailed(format!("no rawId: {}", js_err_msg(&e))))?;
         Ok(Uint8Array::new(&raw_id).to_vec())
     }
 
-    /// Derive the Nostr keypair from a WebAuthn credential's PRF output.
     fn derive_from_credential(credential: &JsValue) -> Result<PasskeySession, NostrAuthError> {
         let credential_id = credential_id_of(credential)?;
 
@@ -547,7 +532,6 @@ mod imp {
     }
 }
 
-/// Server stubs.
 #[cfg(feature = "ssr")]
 mod imp {
     use super::PasskeySession;
@@ -568,12 +552,10 @@ mod imp {
         }
     }
 
-    /// Server stub for `begin_create`.
     pub(super) fn begin_create(_rp_id: &str, _rp_name: &str) -> Result<Pending, NostrAuthError> {
         Err(NostrAuthError::PasskeyFailed(NOT_ON_SERVER.into()))
     }
 
-    /// Server stub for `begin_authenticate`.
     pub(super) fn begin_authenticate(
         _rp_id: &str,
         _credential_id: Option<&[u8]>,

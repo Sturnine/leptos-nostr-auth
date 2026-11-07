@@ -1,6 +1,3 @@
-//! Basic headless example — no CSS classes injected by the library.
-//! Style via `data-nostr-*` attributes in your own CSS.
-
 use leptos::prelude::*;
 use leptos_nostr_auth::nostr::event::{FinalizeEventAsync, Kind, UnsignedEvent};
 use leptos_nostr_auth::nostr::key::{AsyncGetPublicKey, PublicKey};
@@ -91,7 +88,6 @@ fn HomePage() -> impl IntoView {
                     </code>
                 </p>
 
-                // Signing demo — only available for non-read-only sessions
                 <Show
                     when=move || auth.auth.get().is_some_and(|a| a.can_sign())
                     fallback=|| view! { <p class="meta">"(Read-only — cannot sign)"</p> }
@@ -105,7 +101,7 @@ fn HomePage() -> impl IntoView {
                                 wasm_bindgen_futures::spawn_local(async move {
                                     match auth_result.sign_event(&event_json).await {
                                         Ok(signed) => {
-                                            let preview = &signed[..signed.len().min(80)];
+                                            let preview: String = signed.chars().take(80).collect();
                                             set_sign_output.set(format!("Signed: {preview}…"));
                                         }
                                         Err(e) => set_sign_output.set(format!("Error: {e}")),

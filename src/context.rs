@@ -31,13 +31,13 @@ pub struct NostrAuthContext {
     ///
     /// `.get()` clones the session, including any in-memory key. `.with` avoids the copy.
     pub auth: Signal<Option<AuthResult>>,
-    /// Convenience: the authenticated user's public key (bech32 npub and hex).
+    /// The authenticated user's public key.
     pub public_key: Signal<Option<nostr::key::PublicKey>>,
-    /// Convenience: the authenticated user's npub (bech32) or hex pubkey as a `String`.
-    ///
-    /// Avoids the common `.to_bech32().unwrap_or_else(|_| .to_hex())` boilerplate.
+    /// The authenticated user's npub, or hex if bech32 encoding fails.
     pub npub: Signal<Option<String>>,
-    /// `true` when a user is logged in.
+    /// `true` when a user is logged in. This is not proof of identity: a read-only session is a
+    /// pasted npub, and a script on the page can read or change this, so a server must verify a
+    /// signature instead.
     pub is_authenticated: Signal<bool>,
     /// `true` while a persisted session is being restored: from localStorage on mount, or for a
     /// passkey, from the login click.
@@ -76,12 +76,12 @@ pub struct NostrAuthContext {
     pub logout: Callback<()>,
 }
 
-/// Replace the current session, closing the old one for good.
 fn replace_auth(
     auth: ReadSignal<Option<AuthResult>>,
     set_auth: WriteSignal<Option<AuthResult>>,
     next: Option<AuthResult>,
 ) {
+    // `with_untracked` would panic on a disposed signal, where `set` below does not.
     let _ = auth.try_with_untracked(|old| {
         if let Some(old) = old {
             old.close_session();
@@ -118,14 +118,19 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 /// Renders [`NostrAuthModal`] internally so you don't need to add it yourself.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// use leptos::prelude::*;
+/// use leptos_nostr_auth::NostrAuthProvider;
+///
+/// #[component]
 /// fn App() -> impl IntoView {
 ///     view! {
 ///         <NostrAuthProvider>
-///             <HomePage />
+///             <p>"Your app"</p>
 ///         </NostrAuthProvider>
 ///     }
 /// }
+/// # fn main() {}
 /// ```
 #[expect(
     clippy::too_many_lines,

@@ -5,20 +5,16 @@ use crate::signers::{
 };
 use crate::types::{AuthResult, LoginMethod, NostrAuthError, PersistedMethod, PersistedSession};
 
-/// What the provider does about a stored session on mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestorePlan {
-    /// Persistence is off or nothing is stored.
     Nothing,
     /// The stored method left `allowed_methods`. No prompt, no network, session kept.
     NotAllowed,
-    /// Start a restore.
     Restore,
     /// A stored passkey, which restores only from the login click. No prompt, session kept.
     AwaitClick,
 }
 
-/// Decide the mount action from the persist flag, the stored session and the allowed methods.
 pub fn restore_plan(
     persist: bool,
     stored: Option<&PersistedSession>,
@@ -43,23 +39,17 @@ pub fn initial_restoring(hydrating: bool, plan: RestorePlan) -> bool {
     !hydrating && plan == RestorePlan::Restore
 }
 
-/// What a successful login does to the stored session.
 pub enum LoginStorageAction {
-    /// Leave storage alone.
     Keep,
-    /// Write the new session.
     Overwrite {
-        /// What to write.
         session: PersistedSession,
         /// Another identity is stored, and a failed write would let it return on reload.
         clear_on_failure: bool,
     },
-    /// Delete what is stored.
     Clear,
 }
 
-/// Apply the session rule to a successful login. Keys compare parsed, so an unparseable stored key
-/// counts as a different identity.
+/// Keys compare parsed, so an unparseable stored key counts as a different identity.
 pub fn login_storage_action(
     persist: bool,
     stored: Option<&PersistedSession>,
@@ -82,7 +72,6 @@ pub fn login_storage_action(
     }
 }
 
-/// Whether a `storage` event means another tab removed the stored session.
 pub fn is_logout_storage_event(
     persist: bool,
     is_local_area: bool,
@@ -98,7 +87,6 @@ pub fn is_logout_storage_event(
     event_key.is_none_or(|key| key == storage_key && new_value.is_none())
 }
 
-/// The stored key and credential id of a passkey session.
 pub fn passkey_restore_target(
     session: &PersistedSession,
 ) -> Result<(PublicKey, Vec<u8>), NostrAuthError> {
@@ -117,14 +105,11 @@ pub fn passkey_restore_target(
 
 /// A passkey restore whose `get` has already started.
 pub struct PendingRestore {
-    /// The ceremony in flight.
     pending: PendingPasskey,
-    /// The key the ceremony must derive.
     stored_pk: PublicKey,
 }
 
 impl PendingRestore {
-    /// Await the ceremony and check the derived key against the stored one.
     pub async fn finish(self) -> Result<AuthResult, NostrAuthError> {
         let session = self.pending.finish().await?;
         if session.public_key != self.stored_pk {
@@ -144,15 +129,8 @@ pub fn begin_passkey_restore(
     Ok(PendingRestore { pending, stored_pk })
 }
 
-/// Attempt to restore a full `AuthResult` from a `PersistedSession`.
-///
-/// Save/load/clear are handled by the `use_local_storage` hook in `NostrAuthProvider`.
-///
-/// Each method has different restore semantics:
-/// - `Extension`: verify window.nostr still returns the same pubkey
-/// - `Bunker`: re-establish WebSocket connection using stored bunker URI
-/// - `Passkey`: fails closed, never prompting; see [`begin_passkey_restore`]
-/// - `ReadOnly`: restore directly from hex pubkey (no re-auth needed)
+/// Restore a stored session. A passkey fails closed, never prompting; see
+/// [`begin_passkey_restore`].
 pub async fn restore_session(
     session: &PersistedSession,
     bunker_timeout_secs: u32,
@@ -663,6 +641,22 @@ mod wasm_tests {
                 &got,
                 Err(NostrAuthError::InvalidPublicKey(m))
                     if m == "the extension returned an invalid public key"
+            ),
+            "{got:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn extension_non_string_on_restore_is_rejected() {
+        js_sys::eval(
+            "globalThis.window = { nostr: { getPublicKey: function () { return Promise.resolve(null); } } };",
+        )
+        .unwrap();
+        let got = restore_session(&extension_session(), 1).await.map(|_| ());
+        assert!(
+            matches!(
+                &got,
+                Err(NostrAuthError::ExtensionRejected(m)) if m == "expected string pubkey"
             ),
             "{got:?}"
         );

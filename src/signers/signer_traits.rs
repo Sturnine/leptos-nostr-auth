@@ -16,7 +16,6 @@ fn send_future<'a, T: 'a, F: Future<Output = T> + 'a>(
     Box::pin(async move { send_wrapper::SendWrapper::new(make()).await })
 }
 
-/// Server futures need no wrapper.
 #[cfg(feature = "ssr")]
 fn send_future<'a, T: 'a, F: Future<Output = T> + Send + 'a>(
     make: impl FnOnce() -> F,
@@ -368,6 +367,7 @@ pub(in crate::signers) mod tests {
         let stranger = Keys::generate().public_key();
         for auth in [&nc, &pk] {
             failed(ready(auth.nip44_decrypt(&peer, "SENTINEL!!")), "");
+            failed(ready(auth.nip44_decrypt(&peer, "Ag!!")), "");
             failed(ready(auth.nip44_decrypt(&stranger, &good)), "invalid HMAC");
             failed(ready(auth.nip44_decrypt(&peer, "")), "");
             failed(ready(auth.nip44_encrypt(&peer, "")), "message empty");
@@ -448,6 +448,14 @@ pub(in crate::signers) mod tests {
             source,
             Some(NostrAuthError::EncryptionUnavailable)
         ));
+
+        let ro = read_only();
+        let unbuilt = ready(
+            GiftWrapBuilder::new(reader.public_key(), unsigned(ro.public_key()))
+                .finalize_async(&ro),
+        )
+        .unwrap_err();
+        assert_eq!(unbuilt.kind(), ErrorKind::Crypto);
     }
 
     #[test]

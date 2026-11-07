@@ -1,7 +1,8 @@
 [build]
 target = "index.html"
 
+# Open http://localhost:3000: WebAuthn refuses an IP as an RP ID.
 [serve]
-address = "127.0.0.1"
-port    = 3000
-open    = false
+addresses = ["127.0.0.1"]
+port      = 3000
+open      = false

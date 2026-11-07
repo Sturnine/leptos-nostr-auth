@@ -3,29 +3,20 @@
 // Effects never run on the server, and the stubs make them compile. Pure logic that only the
 // browser path calls belongs in `imp`, or it is dead code under `ssr`.
 
-/// Message returned by every server stub.
 #[cfg(feature = "ssr")]
 const NOT_ON_SERVER: &str = "not available on server";
 
-/// Browser-only helpers shared by the backends.
 #[cfg(not(feature = "ssr"))]
 mod browser;
-/// The input and returned-event contract every signing path shares.
 mod event_contract;
-/// NIP-07 browser extension backend.
 mod nip07;
-/// NIP-46 remote signer (bunker) backend.
 mod nip46;
 /// JS-free NIP-46 protocol decisions, so that native `cargo test` covers them.
 #[cfg(not(feature = "ssr"))]
 mod nip46_protocol;
-/// Passkey (WebAuthn PRF) backend.
 mod passkey;
-/// In-memory raw key backend (ncryptsec and raw nsec).
 mod raw_key;
-/// Read-only backend.
 mod read_only;
-/// `nostr` signer trait impls for `AuthResult`.
 mod signer_traits;
 
 pub use crate::types::AuthResult;
@@ -45,7 +36,6 @@ use nostr::nips::nip44;
 
 use crate::types::NostrAuthError;
 
-/// Sign an unsigned event given as JSON with in-memory keys.
 fn sign_with_keys(keys: &Keys, event_json: &str) -> Result<String, NostrAuthError> {
     let signed = event_contract::prepare(event_json, keys.public_key())?
         .finalize(keys)
@@ -61,7 +51,7 @@ pub(crate) fn check_on_curve(key: &PublicKey) -> Result<(), NostrAuthError> {
         .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))
 }
 
-/// Parse a hex key and refuse it if it is off the curve. The error quotes no input.
+/// The error quotes no input.
 pub(crate) fn public_key_from_hex(hex: &str) -> Result<PublicKey, NostrAuthError> {
     let key =
         PublicKey::from_hex(hex).map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
@@ -69,7 +59,6 @@ pub(crate) fn public_key_from_hex(hex: &str) -> Result<PublicKey, NostrAuthError
     Ok(key)
 }
 
-/// NIP-44 v2 encrypt with in-memory keys.
 fn encrypt_with_keys(
     keys: &Keys,
     peer: &PublicKey,
@@ -80,7 +69,6 @@ fn encrypt_with_keys(
         .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
 }
 
-/// NIP-44 decrypt with in-memory keys.
 fn decrypt_with_keys(
     keys: &Keys,
     peer: &PublicKey,
@@ -92,8 +80,7 @@ fn decrypt_with_keys(
         .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
 }
 
-// Reads linear memory through a JS view, including freed memory, which is outside Rust's memory
-// model: empirical evidence about one named buffer, nothing more.
+// Reads freed memory through a JS view: evidence about one named buffer, nothing more.
 #[cfg(all(test, target_arch = "wasm32"))]
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 pub(crate) mod memory_probe {

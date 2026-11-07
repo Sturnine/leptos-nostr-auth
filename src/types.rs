@@ -56,7 +56,8 @@ impl AuthResult {
     /// Read-only sessions return an error. Also, returns an error if signing fails. A closed
     /// bunker session returns [`NostrAuthError::BunkerSessionClosed`]. A returned event from
     /// another key returns [`NostrAuthError::SignerKeyMismatch`], usually after an account switch
-    /// in the extension. Other refused requests and returns are
+    /// in the extension. A missing `window.nostr` or `signEvent` returns
+    /// [`NostrAuthError::ExtensionNotFound`]. Other refused requests and returns are
     /// [`NostrAuthError::SigningFailed`], and malformed input is
     /// [`NostrAuthError::Serialization`]. Match the variant, not the text.
     pub async fn sign_event(&self, event_json: &str) -> Result<String, NostrAuthError> {
@@ -129,7 +130,6 @@ impl AuthResult {
         }
     }
 
-    /// Close a bunker session for good, for every clone. Other variants hold no connection.
     pub(crate) fn close_session(&self) {
         if let Self::Bunker(s) = self {
             s.close();
@@ -150,7 +150,6 @@ impl AuthResult {
         self.login_method().name()
     }
 
-    /// The `LoginMethod` that produces this result.
     const fn login_method(&self) -> LoginMethod {
         match self {
             Self::Extension(_) => LoginMethod::Extension,
@@ -176,7 +175,7 @@ impl AuthResult {
             Self::Bunker(s) => Some(PersistedSession {
                 public_key_hex: s.public_key.to_hex(),
                 method: PersistedMethod::Bunker,
-                // Already secret-free — see `BunkerSession::connect_with_keys`.
+                // `persisted_uri` already removed the secret.
                 bunker_uri: Some(s.bunker_uri.clone()),
                 bunker_client_secret_hex: Some(s.client_secret_hex()),
                 passkey_credential_id: None,
@@ -198,7 +197,6 @@ impl AuthResult {
                 bunker_client_secret_hex: None,
                 passkey_credential_id: None,
             }),
-            // ncryptsec and raw nsec: key is not persisted (no safe way to store it)
             Self::Ncryptsec(_) => None,
             #[cfg(feature = "insecure_nsec_input")]
             Self::RawNsec(_) => None,
@@ -225,10 +223,9 @@ impl core::fmt::Debug for AuthResult {
 
 /// What gets written to localStorage.
 ///
-/// Never contains the user's Nostr identity secret key. **Does** contain a disposable,
-/// revocable NIP-46 pairing key (`bunker_client_secret_hex`) when the active session is
-/// a bunker connection — see the "Session Restore" section in the README for the exact
-/// risk model.
+/// Never contains the user's Nostr identity secret key. **Does** contain a live NIP-46 pairing key
+/// (`bunker_client_secret_hex`) for a bunker session, which `logout` does not revoke. See "Session
+/// Restore" in the README.
 ///
 /// `Debug` prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output carries
 /// them in full.
@@ -241,9 +238,8 @@ pub struct PersistedSession {
     pub method: PersistedMethod,
     /// NIP-46: secret-stripped `bunker://` URI (remote pubkey + relays only) for reconnection.
     pub bunker_uri: Option<String>,
-    /// NIP-46: hex secret of the local pairing keypair used to reconnect without the
-    /// bunker's one-time secret. Sensitive (bearer-token-equivalent) but is never the
-    /// user's Nostr identity key — see `BunkerSession::reconnect` docs.
+    /// NIP-46: hex secret of the local pairing keypair, used to reconnect without the bunker's
+    /// one-time secret. A live credential, though never the user's Nostr identity key.
     pub bunker_client_secret_hex: Option<String>,
     /// Passkey: base64url credential ID — used to call `credentials.get()`
     pub passkey_credential_id: Option<String>,
@@ -281,7 +277,6 @@ pub enum PersistedMethod {
 }
 
 impl PersistedMethod {
-    /// The login method a stored session of this kind needs to be allowed.
     pub(crate) const fn login_method(&self) -> LoginMethod {
         match self {
             Self::Extension => LoginMethod::Extension,
@@ -342,8 +337,11 @@ impl LoginMethod {
 /// Configuration for [`crate::modal::NostrAuthModal`] and [`crate::context::NostrAuthProvider`].
 ///
 /// Construct with struct update syntax from [`Default`]:
-/// ```rust,ignore
+/// ```rust
+/// use leptos_nostr_auth::NostrAuthConfig;
+///
 /// let config = NostrAuthConfig { rp_id: Some("myapp.com".to_owned()), ..Default::default() };
+/// assert_eq!(config.rp_id.as_deref(), Some("myapp.com"));
 /// ```
 #[derive(Clone)]
 #[expect(
@@ -404,7 +402,8 @@ pub enum NostrAuthError {
     /// `window.nostr` or the requested method was not found.
     #[error("Browser extension (window.nostr) not found")]
     ExtensionNotFound,
-    /// The extension rejected the request (e.g. user denied permission).
+    /// The extension rejected the request (e.g. user denied permission), or `getPublicKey` resolved
+    /// to a non-string.
     #[error("Extension request rejected: {0}")]
     ExtensionRejected(String),
     /// A public key could not be parsed or is not on the curve.

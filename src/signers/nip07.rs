@@ -17,16 +17,17 @@ impl Nip07Handle {
     ///
     /// Returns [`NostrAuthError::ExtensionNotFound`] when called with SSR features, or when
     /// `window.nostr` or `getPublicKey` is missing. Returns
-    /// [`NostrAuthError::ExtensionRejected`] when a present method refuses or throws. Returns
-    /// [`NostrAuthError::InvalidPublicKey`] when the extension returned a malformed or off-curve
-    /// key.
+    /// [`NostrAuthError::ExtensionRejected`] when a present method refuses, throws or resolves to a
+    /// non-string. Returns
+    /// [`NostrAuthError::InvalidPublicKey`] when the extension returned a string that is a
+    /// malformed or off-curve key.
     pub async fn get_public_key() -> Result<Self, NostrAuthError> {
         imp::get_public_key().await
     }
 
     /// Sign a Nostr event via the extension. The request and the returned event follow the contract
-    /// on [`crate::AuthResult::sign_event`], so an extension on another account fails after its own
-    /// prompt.
+    /// on [`crate::AuthResult::sign_event`], so an extension on another account fails, possibly
+    /// after its own prompt.
     ///
     /// # Errors
     ///
@@ -76,7 +77,6 @@ impl Nip07Handle {
     }
 }
 
-/// Browser implementation.
 #[cfg(not(feature = "ssr"))]
 mod imp {
     use js_sys::Reflect;
@@ -90,7 +90,6 @@ mod imp {
     use crate::signers::public_key_from_hex;
     use crate::types::NostrAuthError;
 
-    /// Text for a rejection that carries no readable message.
     const STATIC_REJECTION: &str = "extension rejected the request";
 
     /// Tells a signer at fault from stored data that can never restore, within one variant.
@@ -162,7 +161,6 @@ mod imp {
             .map_err(|e| refused(rejection_text(&e)))
     }
 
-    /// Request the public key from the extension.
     pub(super) async fn get_public_key() -> Result<Nip07Handle, NostrAuthError> {
         let js_pk = settle(
             nostr_get_public_key(),
@@ -179,8 +177,8 @@ mod imp {
         Ok(Nip07Handle { public_key })
     }
 
-    /// Sign an event through the extension. A value that cannot be stringified has no text, which
-    /// `checked_event` refuses without quoting anything from JS.
+    /// A value that cannot be stringified has no text, which `checked_event` refuses without
+    /// quoting anything from JS.
     pub(super) async fn sign_event(
         handle: &Nip07Handle,
         event_json: &str,
@@ -210,7 +208,6 @@ mod imp {
         }
     }
 
-    /// NIP-44 encrypt through the extension.
     pub(super) async fn nip44_encrypt(
         handle: &Nip07Handle,
         peer: &PublicKey,
@@ -227,7 +224,6 @@ mod imp {
         .ok_or_else(|| NostrAuthError::EncryptionFailed("expected string ciphertext".into()))
     }
 
-    /// NIP-44 decrypt through the extension.
     pub(super) async fn nip44_decrypt(
         handle: &Nip07Handle,
         peer: &PublicKey,
@@ -245,7 +241,6 @@ mod imp {
     }
 }
 
-/// Server stubs.
 #[cfg(feature = "ssr")]
 mod imp {
     use nostr::key::PublicKey;
@@ -254,12 +249,10 @@ mod imp {
     use crate::signers::NOT_ON_SERVER;
     use crate::types::NostrAuthError;
 
-    /// Server stub for `get_public_key`.
     pub(super) async fn get_public_key() -> Result<Nip07Handle, NostrAuthError> {
         Err(NostrAuthError::ExtensionNotFound)
     }
 
-    /// Server stub for `sign_event`.
     pub(super) async fn sign_event(
         _handle: &Nip07Handle,
         _event_json: &str,
@@ -267,7 +260,6 @@ mod imp {
         Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
     }
 
-    /// Server stub for `nip44_encrypt`.
     pub(super) async fn nip44_encrypt(
         _handle: &Nip07Handle,
         _peer: &PublicKey,
@@ -276,7 +268,6 @@ mod imp {
         Err(NostrAuthError::EncryptionUnavailable)
     }
 
-    /// Server stub for `nip44_decrypt`.
     pub(super) async fn nip44_decrypt(
         _handle: &Nip07Handle,
         _peer: &PublicKey,
@@ -738,6 +729,39 @@ mod wasm_tests {
                         "{got:?}"
                     );
                 }
+            }
+            assert_eq!(count("enc"), 0.0);
+            assert_eq!(count("dec"), 0.0);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn non_string_pubkey_is_rejected() {
+        const TEXT: &str = "expected string pubkey";
+        let (_, h) = session();
+        for gpk in [
+            "async () => null",
+            "async () => undefined",
+            "() => null",
+            "async () => 7",
+            "async () => ({ SENTINEL: 'SENTINEL' })",
+        ] {
+            shim(&format!(
+                "globalThis.__n = {{ enc: 0, dec: 0 }}; globalThis.window = {{ nostr: {{ getPublicKey: {gpk}, nip44: {{ encrypt() {{ globalThis.__n.enc += 1; return 'x'; }}, decrypt() {{ globalThis.__n.dec += 1; return 'x'; }} }} }} }};"
+            ));
+            let login = Nip07Handle::get_public_key().await.map(|_| ());
+            assert!(
+                matches!(&login, Err(NostrAuthError::ExtensionRejected(m)) if m == TEXT),
+                "{login:?}"
+            );
+            for got in [
+                h.nip44_encrypt(&peer(), "x").await,
+                h.nip44_decrypt(&peer(), "x").await,
+            ] {
+                assert!(
+                    matches!(&got, Err(NostrAuthError::ExtensionRejected(m)) if m == TEXT),
+                    "{got:?}"
+                );
             }
             assert_eq!(count("enc"), 0.0);
             assert_eq!(count("dec"), 0.0);
