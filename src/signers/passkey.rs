@@ -462,6 +462,18 @@ mod imp {
         }
 
         #[wasm_bindgen_test]
+        fn abort_guard_sets_outer_signal_and_aborts_on_drop() {
+            let options = Object::new();
+            let guard = abort_guard(&options).unwrap();
+            let signal: web_sys::AbortSignal = Reflect::get(&options, &"signal".into())
+                .unwrap()
+                .unchecked_into();
+            assert!(!signal.aborted());
+            drop(guard);
+            assert!(signal.aborted());
+        }
+
+        #[wasm_bindgen_test]
         fn prf_outcome_table() {
             let expected: Vec<u8> = (0..32).collect();
             for (extensions, want) in [
