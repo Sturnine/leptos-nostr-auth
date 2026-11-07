@@ -73,6 +73,62 @@ impl AuthResult {
         }
     }
 
+    /// NIP-44 encrypt `plaintext` for `peer`, the same call on every method. Passkey, Ncryptsec and
+    /// `RawNsec` use `nostr`'s NIP-44 v2 with the key in memory and finish without suspending,
+    /// including on a server. Extension and Bunker ask their signer, and need the browser.
+    ///
+    /// # Errors
+    ///
+    /// - [`NostrAuthError::EncryptionUnavailable`]: a read-only session with any peer, or an
+    ///   Extension or Bunker session on a server.
+    /// - [`NostrAuthError::InvalidPublicKey`]: `peer` is not on the curve, on every other method and
+    ///   before anything reaches a signer. From an extension it can also mean `getPublicKey`
+    ///   returned a malformed key.
+    /// - [`NostrAuthError::EncryptionFailed`]: a key session's failure, including empty plaintext,
+    ///   or a signer's refusal or malformed response.
+    /// - [`NostrAuthError::ExtensionNotFound`], [`NostrAuthError::ExtensionRejected`] and
+    ///   [`NostrAuthError::SignerKeyMismatch`]: see [`Nip07Handle::nip44_encrypt`].
+    /// - [`NostrAuthError::BunkerSessionClosed`], [`NostrAuthError::BunkerTimeout`],
+    ///   [`NostrAuthError::BunkerAuthRequired`] and [`NostrAuthError::BunkerConnectionFailed`]: see
+    ///   [`BunkerSession::nip44_encrypt`].
+    pub async fn nip44_encrypt(
+        &self,
+        peer: &PublicKey,
+        plaintext: &str,
+    ) -> Result<String, NostrAuthError> {
+        match self {
+            Self::Extension(h) => h.nip44_encrypt(peer, plaintext).await,
+            Self::Bunker(s) => s.nip44_encrypt(peer, plaintext).await,
+            Self::Passkey(s) => s.nip44_encrypt(peer, plaintext),
+            Self::ReadOnly(_) => Err(NostrAuthError::EncryptionUnavailable),
+            Self::Ncryptsec(s) => s.nip44_encrypt(peer, plaintext),
+            #[cfg(feature = "insecure_nsec_input")]
+            Self::RawNsec(s) => s.nip44_encrypt(peer, plaintext),
+        }
+    }
+
+    /// NIP-44 decrypt `ciphertext` from `peer`. See [`Self::nip44_encrypt`].
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::nip44_encrypt`]. On a key session a wrong key or bad payload is
+    /// [`NostrAuthError::EncryptionFailed`].
+    pub async fn nip44_decrypt(
+        &self,
+        peer: &PublicKey,
+        ciphertext: &str,
+    ) -> Result<String, NostrAuthError> {
+        match self {
+            Self::Extension(h) => h.nip44_decrypt(peer, ciphertext).await,
+            Self::Bunker(s) => s.nip44_decrypt(peer, ciphertext).await,
+            Self::Passkey(s) => s.nip44_decrypt(peer, ciphertext),
+            Self::ReadOnly(_) => Err(NostrAuthError::EncryptionUnavailable),
+            Self::Ncryptsec(s) => s.nip44_decrypt(peer, ciphertext),
+            #[cfg(feature = "insecure_nsec_input")]
+            Self::RawNsec(s) => s.nip44_decrypt(peer, ciphertext),
+        }
+    }
+
     /// Close a bunker session for good, for every clone. Other variants hold no connection.
     pub(crate) fn close_session(&self) {
         if let Self::Bunker(s) = self {
@@ -331,7 +387,7 @@ pub enum NostrAuthError {
     /// The extension rejected the request (e.g. user denied permission).
     #[error("Extension request rejected: {0}")]
     ExtensionRejected(String),
-    /// The supplied public key string could not be parsed.
+    /// The supplied public key string could not be parsed, or a typed key is not on the curve.
     #[error("Invalid public key format: {0}")]
     InvalidPublicKey(String),
     /// The supplied bunker URI was malformed.
@@ -376,6 +432,15 @@ pub enum NostrAuthError {
     /// Event signing failed.
     #[error("Signing failed: {0}")]
     SigningFailed(String),
+    /// This session cannot run NIP-44. In the browser, [`AuthResult::can_sign`] being false predicts it.
+    #[error(
+        "This session cannot encrypt or decrypt: it is read-only, or its signer is only reachable in the browser"
+    )]
+    EncryptionUnavailable,
+    /// NIP-44 failed, in either direction. The text may come from the signer. On a key session it can
+    /// give a byte position within a plaintext, never its bytes.
+    #[error("NIP-44 encryption or decryption failed: {0}")]
+    EncryptionFailed(String),
     /// JSON serialization/deserialization failed.
     #[error("Serialization error: {0}")]
     Serialization(String),

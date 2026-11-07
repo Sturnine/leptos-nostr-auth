@@ -3,6 +3,7 @@ use core::pin::Pin;
 
 use nostr::event::{AsyncSignEvent, Event, UnsignedEvent};
 use nostr::key::{AsyncGetPublicKey, PublicKey};
+use nostr::nips::nip44::AsyncNip44;
 
 use crate::types::{AuthResult, NostrAuthError};
 
@@ -67,6 +68,38 @@ impl AsyncSignEvent for AuthResult {
     }
 }
 
+/// Runs through [`AuthResult::nip44_encrypt`] and [`AuthResult::nip44_decrypt`], and returns
+/// [`NostrAuthError`] directly. The same thread rule applies as on `AsyncSignEvent`.
+///
+/// `nostr`'s `nip59` helpers return `nostr::error::Error`. Their NIP-44 steps give kind `Crypto` with
+/// the crate's error as source. The seal's signature step gives kind `Other`, also with it as source.
+/// Other `nip59` failures, such as an event that is not a gift wrap, have no crate error as source.
+/// So use the downcast, not the kind:
+/// `err.source().and_then(|s| s.downcast_ref::<NostrAuthError>())`.
+///
+/// `nip59` is a `nostr` feature, which you enable. On `wasm32-unknown-unknown` the gift-wrap builders
+/// reach `Timestamp::now`, which needs `universal_time::define_time_provider!` in your binary. See
+/// the README. Unwrapping needs no provider.
+impl AsyncNip44 for AuthResult {
+    type Error = NostrAuthError;
+
+    fn nip44_encrypt_async<'a>(
+        &'a self,
+        public_key: &'a PublicKey,
+        content: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, Self::Error>> + Send + 'a>> {
+        send_future(move || self.nip44_encrypt(public_key, content))
+    }
+
+    fn nip44_decrypt_async<'a>(
+        &'a self,
+        public_key: &'a PublicKey,
+        payload: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, Self::Error>> + Send + 'a>> {
+        send_future(move || self.nip44_decrypt(public_key, payload))
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 pub(in crate::signers) mod tests {
@@ -77,9 +110,38 @@ pub(in crate::signers) mod tests {
     use core::task::{Context, Poll, Waker};
     use nostr::error::ErrorKind;
     use nostr::event::{EventId, FinalizeEvent, FinalizeEventAsync, Kind, Tag};
-    use nostr::key::Keys;
+    use nostr::key::{Keys, SecretKey};
+    use nostr::nips::nip44;
     use nostr::types::Timestamp;
     use std::sync::Arc;
+
+    pub(in crate::signers) const UNAVAILABLE: &str = "This session cannot encrypt or decrypt: it is read-only, or its signer is only reachable in the browser";
+    const VECTOR: &str = "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb";
+
+    // BIP-340's not-on-curve vector, which `from_hex` accepts.
+    pub(in crate::signers) fn off_curve() -> PublicKey {
+        let key =
+            PublicKey::from_hex("eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34")
+                .unwrap();
+        assert!(key.xonly().is_err());
+        key
+    }
+
+    fn key_sessions(keys: &Keys) -> Vec<AuthResult> {
+        vec![
+            AuthResult::Ncryptsec(RawKeySession::for_tests(keys.clone())),
+            AuthResult::Passkey(PasskeySession::for_tests(keys.clone(), vec![1])),
+        ]
+    }
+
+    fn nonce_of(ciphertext: &str) -> Vec<u8> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(ciphertext)
+            .unwrap();
+        assert_eq!(bytes.first(), Some(&2));
+        bytes.get(1..33).unwrap().to_vec()
+    }
 
     pub(in crate::signers) fn ready<F: Future>(fut: F) -> F::Output {
         match pin!(fut).poll(&mut Context::from_waker(Waker::noop())) {
@@ -147,6 +209,7 @@ pub(in crate::signers) mod tests {
     fn assert_signer<
         S: AsyncGetPublicKey<Error = NostrAuthError>
             + AsyncSignEvent<Error = NostrAuthError>
+            + AsyncNip44<Error = NostrAuthError>
             + Send
             + Sync,
     >(
@@ -162,7 +225,229 @@ pub(in crate::signers) mod tests {
         assert_signer(&nc);
         assert_send(nc.get_public_key_async());
         assert_send(nc.sign_event_async(unsigned(keys.public_key())));
+        assert_send(nc.nip44_encrypt_async(&keys.public_key(), "x"));
+        assert_send(nc.nip44_decrypt_async(&keys.public_key(), "x"));
+        let _: Arc<dyn AsyncNip44<Error = NostrAuthError>> = Arc::new(nc.clone());
         let _: Arc<dyn AsyncSignEvent<Error = NostrAuthError>> = Arc::new(nc);
+    }
+
+    #[test]
+    fn nip44_round_trip_each_key_variant() {
+        let (a, nc, _) = keyed();
+        let (b, _, pk) = keyed();
+        let forward = ready(nc.nip44_encrypt(&b.public_key(), "hello")).unwrap();
+        assert_eq!(
+            ready(pk.nip44_decrypt(&a.public_key(), &forward)).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            nip44::decrypt(b.secret_key(), &a.public_key(), &forward).unwrap(),
+            "hello"
+        );
+        let back = ready(pk.nip44_encrypt(&a.public_key(), "back")).unwrap();
+        assert_eq!(
+            ready(nc.nip44_decrypt(&b.public_key(), &back)).unwrap(),
+            "back"
+        );
+        assert_eq!(
+            nip44::decrypt(a.secret_key(), &b.public_key(), &back).unwrap(),
+            "back"
+        );
+    }
+
+    #[cfg(feature = "insecure_nsec_input")]
+    #[test]
+    fn nip44_round_trip_raw_nsec() {
+        let a = Keys::generate();
+        let b = Keys::generate();
+        let raw = AuthResult::RawNsec(RawKeySession::for_tests(a.clone()));
+        let ct = ready(raw.nip44_encrypt(&b.public_key(), "hello")).unwrap();
+        assert_eq!(
+            nip44::decrypt(b.secret_key(), &a.public_key(), &ct).unwrap(),
+            "hello"
+        );
+        let back =
+            nip44::encrypt(b.secret_key(), &a.public_key(), "back", nip44::Version::V2).unwrap();
+        assert_eq!(
+            ready(raw.nip44_decrypt(&b.public_key(), &back)).unwrap(),
+            "back"
+        );
+    }
+
+    #[test]
+    fn nip44_known_vector() {
+        let secret = |last: char| {
+            let hex = format!("{}{last}", "0".repeat(63));
+            Keys::new(SecretKey::from_hex(&hex).unwrap())
+        };
+        let (one, two) = (secret('1'), secret('2'));
+        for (own, peer) in [(&one, &two), (&two, &one)] {
+            for auth in key_sessions(own) {
+                assert_eq!(
+                    ready(auth.nip44_decrypt(&peer.public_key(), VECTOR)).unwrap(),
+                    "a"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nip44_encrypt_is_v2_with_fresh_nonce() {
+        let (_, nc, pk) = keyed();
+        let peer = Keys::generate().public_key();
+        for auth in [nc, pk] {
+            let first = ready(auth.nip44_encrypt(&peer, "x")).unwrap();
+            let second = ready(auth.nip44_encrypt(&peer, "x")).unwrap();
+            assert_ne!(nonce_of(&first), nonce_of(&second));
+        }
+    }
+
+    #[test]
+    fn nip44_read_only_is_typed() {
+        let auth = read_only();
+        for peer in [Keys::generate().public_key(), off_curve()] {
+            for got in [
+                ready(auth.nip44_encrypt(&peer, "x")),
+                ready(auth.nip44_decrypt(&peer, "x")),
+                ready(auth.nip44_encrypt_async(&peer, "x")),
+                ready(auth.nip44_decrypt_async(&peer, "x")),
+            ] {
+                let err = got.unwrap_err();
+                assert!(matches!(err, NostrAuthError::EncryptionUnavailable));
+                assert_eq!(err.to_string(), UNAVAILABLE);
+            }
+        }
+    }
+
+    // Reaching JS would panic natively, so the extension case also pins the check's place.
+    #[test]
+    fn nip44_off_curve_peer_is_typed() {
+        let (_, nc, pk) = keyed();
+        let ext = AuthResult::Extension(Nip07Handle {
+            public_key: Keys::generate().public_key(),
+        });
+        let bad = off_curve();
+        #[cfg(feature = "insecure_nsec_input")]
+        let raw = AuthResult::RawNsec(RawKeySession::for_tests(Keys::generate()));
+        for auth in [
+            &nc,
+            &pk,
+            &ext,
+            #[cfg(feature = "insecure_nsec_input")]
+            &raw,
+        ] {
+            let enc = ready(auth.nip44_encrypt(&bad, "x"));
+            assert!(matches!(enc, Err(NostrAuthError::InvalidPublicKey(_))));
+            let dec = ready(auth.nip44_decrypt(&bad, "x"));
+            assert!(matches!(dec, Err(NostrAuthError::InvalidPublicKey(_))));
+        }
+    }
+
+    #[test]
+    fn nip44_failures_are_typed() {
+        let (keys, nc, pk) = keyed();
+        let other = Keys::generate();
+        let good = nip44::encrypt(
+            other.secret_key(),
+            &keys.public_key(),
+            "hi",
+            nip44::Version::V2,
+        )
+        .unwrap();
+        let failed = |got: Result<String, NostrAuthError>, want: &str| {
+            let err = got.unwrap_err();
+            assert!(
+                matches!(&err, NostrAuthError::EncryptionFailed(text) if text.contains(want)),
+                "{err:?}"
+            );
+            for shown in [err.to_string(), format!("{err:?}")] {
+                assert!(!shown.contains("SENTINEL"), "{shown}");
+            }
+        };
+        let peer = other.public_key();
+        let stranger = Keys::generate().public_key();
+        for auth in [&nc, &pk] {
+            failed(ready(auth.nip44_decrypt(&peer, "SENTINEL!!")), "");
+            failed(ready(auth.nip44_decrypt(&stranger, &good)), "invalid HMAC");
+            failed(ready(auth.nip44_decrypt(&peer, "")), "");
+            failed(ready(auth.nip44_encrypt(&peer, "")), "message empty");
+        }
+    }
+
+    #[test]
+    fn nip44_non_utf8_plaintext_hides_bytes() {
+        let (keys, nc, pk) = keyed();
+        let other = Keys::generate();
+        let mut plaintext = vec![0xff];
+        plaintext.extend_from_slice(b"SENTINEL");
+        let payload = nip44::encrypt_with_nonce(
+            other.secret_key(),
+            &keys.public_key(),
+            &plaintext,
+            nip44::Nonce::V2([3; 32]),
+        )
+        .unwrap();
+        let run = "83, 69, 78, 84";
+        let upstream =
+            nip44::decrypt(keys.secret_key(), &other.public_key(), &payload).unwrap_err();
+        assert!(format!("{upstream:?}").contains(run));
+        for auth in [nc, pk] {
+            let err = ready(auth.nip44_decrypt(&other.public_key(), &payload)).unwrap_err();
+            assert!(matches!(err, NostrAuthError::EncryptionFailed(_)));
+            for shown in [err.to_string(), format!("{err:?}")] {
+                assert!(!shown.contains(run), "{shown}");
+                assert!(!shown.contains("FromUtf8Error"), "{shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn nip44_trait_matches_inherent() {
+        let (a, nc, _) = keyed();
+        let (b, _, pk) = keyed();
+        let sealed = ready(nc.nip44_encrypt_async(&b.public_key(), "hi")).unwrap();
+        assert_eq!(
+            ready(pk.nip44_decrypt(&a.public_key(), &sealed)).unwrap(),
+            "hi"
+        );
+        let other = ready(pk.nip44_encrypt(&a.public_key(), "yo")).unwrap();
+        assert_eq!(
+            ready(nc.nip44_decrypt_async(&b.public_key(), &other)).unwrap(),
+            "yo"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn gift_wrap_through_auth_result() {
+        use nostr::nips::nip59::{GiftWrapBuilder, UnwrappedGift};
+        let (keys, nc, _) = keyed();
+        let sender = Keys::generate();
+        let wrap = GiftWrapBuilder::new(keys.public_key(), unsigned(sender.public_key()))
+            .finalize(&sender)
+            .unwrap();
+        let opened = ready(UnwrappedGift::from_gift_wrap_async(&nc, &wrap)).unwrap();
+        assert_eq!(opened.sender, sender.public_key());
+        assert_eq!(opened.rumor.content, "hi");
+
+        let reader = Keys::generate();
+        let built = ready(
+            GiftWrapBuilder::new(reader.public_key(), unsigned(keys.public_key()))
+                .finalize_async(&nc),
+        )
+        .unwrap();
+        let read = UnwrappedGift::from_gift_wrap(&reader, &built).unwrap();
+        assert_eq!(read.sender, keys.public_key());
+
+        let refused = ready(UnwrappedGift::from_gift_wrap_async(&read_only(), &wrap)).unwrap_err();
+        assert_eq!(refused.kind(), ErrorKind::Crypto);
+        let source = refused
+            .source()
+            .and_then(|s| s.downcast_ref::<NostrAuthError>());
+        assert!(matches!(
+            source,
+            Some(NostrAuthError::EncryptionUnavailable)
+        ));
     }
 
     #[test]
@@ -334,6 +619,55 @@ pub(in crate::signers) mod tests {
                 .source()
                 .and_then(|s| s.downcast_ref::<NostrAuthError>());
             assert!(matches!(source, Some(NostrAuthError::SigningFailed(_))));
+        }
+
+        #[wasm_bindgen_test]
+        async fn nip44_round_trip_on_wasm() {
+            let (a, nc, _) = keyed();
+            let (b, _, pk) = keyed();
+            let ct = nc.nip44_encrypt(&b.public_key(), "hello").await.unwrap();
+            assert_eq!(
+                pk.nip44_decrypt(&a.public_key(), &ct).await.unwrap(),
+                "hello"
+            );
+            let traited = pk.nip44_encrypt_async(&a.public_key(), "back").await;
+            assert_eq!(
+                nc.nip44_decrypt_async(&b.public_key(), &traited.unwrap())
+                    .await
+                    .unwrap(),
+                "back"
+            );
+        }
+
+        #[wasm_bindgen_test]
+        async fn read_only_nip44_is_typed() {
+            let auth = read_only();
+            let peer = off_curve();
+            for got in [
+                auth.nip44_encrypt(&peer, "x").await,
+                auth.nip44_decrypt(&peer, "x").await,
+                auth.nip44_encrypt_async(&peer, "x").await,
+                auth.nip44_decrypt_async(&peer, "x").await,
+            ] {
+                assert_eq!(got.unwrap_err().to_string(), UNAVAILABLE);
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn nip44_nonce_comes_from_get_random_values() {
+            let (_, nc, _) = keyed();
+            let peer = Keys::generate().public_key();
+            js_sys::eval(
+                "globalThis.__rng = 0; Object.defineProperty(globalThis.crypto, 'getRandomValues', { configurable: true, value: (a) => { globalThis.__rng += 1; a.fill(0xAB); return a; } });",
+            )
+            .unwrap();
+            let spied = nc.nip44_encrypt(&peer, "x").await.unwrap();
+            let count = js_sys::eval("globalThis.__rng").unwrap().as_f64().unwrap();
+            js_sys::eval("delete globalThis.crypto.getRandomValues;").unwrap();
+            assert!(count >= 1.0);
+            assert_eq!(nonce_of(&spied), vec![0xAB; 32]);
+            let plain = nc.nip44_encrypt(&peer, "x").await.unwrap();
+            assert_ne!(nonce_of(&plain), vec![0xAB; 32]);
         }
 
         #[wasm_bindgen_test]

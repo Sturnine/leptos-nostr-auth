@@ -389,7 +389,7 @@ impl RpcFailure {
         }
     }
 
-    /// The public error for `sign_event` and NIP-44 requests.
+    /// The public error for `sign_event` requests.
     pub(super) fn into_signing_error(self) -> NostrAuthError {
         match self {
             Self::Malformed(text) => NostrAuthError::SigningFailed(text.to_owned()),
@@ -398,7 +398,16 @@ impl RpcFailure {
         }
     }
 
-    /// The mapping both request kinds share.
+    /// The public error for NIP-44 requests.
+    pub(super) fn into_encryption_error(self) -> NostrAuthError {
+        match self {
+            Self::Malformed(text) => NostrAuthError::EncryptionFailed(text.to_owned()),
+            Self::Signer(text) => NostrAuthError::EncryptionFailed(text),
+            other => other.into_shared_error(),
+        }
+    }
+
+    /// The mapping every request kind shares.
     fn into_shared_error(self) -> NostrAuthError {
         match self {
             Self::Timeout {
@@ -2073,6 +2082,49 @@ mod tests {
         assert_eq!(signer.to_string(), "Signing failed: denied");
         let login = RpcFailure::Signer("denied".into()).into_connect_error();
         assert_eq!(login.to_string(), "Bunker connection failed: denied");
+        assert!(matches!(
+            RpcFailure::Malformed("m").into_encryption_error(),
+            NostrAuthError::EncryptionFailed(text) if text == "m"
+        ));
+        assert!(matches!(
+            RpcFailure::Signer("denied".into()).into_encryption_error(),
+            NostrAuthError::EncryptionFailed(text) if text == "denied"
+        ));
+        assert!(matches!(
+            RpcFailure::SessionClosed.into_encryption_error(),
+            NostrAuthError::BunkerSessionClosed
+        ));
+        assert!(matches!(
+            RpcFailure::AuthRequired.into_encryption_error(),
+            NostrAuthError::BunkerAuthRequired
+        ));
+        assert!(matches!(
+            RpcFailure::Timeout {
+                signer_answered: true,
+                relay_asked_auth: false
+            }
+            .into_encryption_error(),
+            NostrAuthError::BunkerTimeout
+        ));
+        assert!(matches!(
+            RpcFailure::Socket(NostrAuthError::BunkerSessionClosed).into_encryption_error(),
+            NostrAuthError::BunkerSessionClosed
+        ));
+        assert!(matches!(
+            RpcFailure::SocketLost {
+                signer_answered: false
+            }
+            .into_encryption_error(),
+            NostrAuthError::BunkerConnectionFailed(_)
+        ));
+        assert!(matches!(
+            RpcFailure::Relay {
+                reason: "no".into(),
+                signer_answered: false
+            }
+            .into_encryption_error(),
+            NostrAuthError::BunkerConnectionFailed(_)
+        ));
     }
 
     #[test]

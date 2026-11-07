@@ -41,17 +41,21 @@ impl Nip07Handle {
     ///
     /// # Errors
     ///
-    /// Returns an error when called with SSR features or when nip44 encryption fails.
-    /// [`NostrAuthError::SignerKeyMismatch`] means the extension is on another account. The account
-    /// check can also return [`NostrAuthError::ExtensionRejected`] or
-    /// [`NostrAuthError::InvalidPublicKey`], and a missing `nip44` is
-    /// [`NostrAuthError::ExtensionNotFound`].
+    /// [`NostrAuthError::InvalidPublicKey`] means `peer` is not on the curve, checked before the
+    /// extension is asked anything, or that the account check got a malformed key from
+    /// `getPublicKey`. [`NostrAuthError::SignerKeyMismatch`] means the extension is on another
+    /// account, and the account check can also return [`NostrAuthError::ExtensionRejected`]. A
+    /// missing `nip44` is [`NostrAuthError::ExtensionNotFound`]. A throw, rejection or non-string
+    /// return from `nip44` is [`NostrAuthError::EncryptionFailed`], whose text comes from the
+    /// extension, unfiltered. With SSR features a valid `peer` gets
+    /// [`NostrAuthError::EncryptionUnavailable`].
     pub async fn nip44_encrypt(
         &self,
-        recipient_hex: &str,
+        peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
-        imp::nip44_encrypt(self, recipient_hex, plaintext).await
+        super::check_peer(peer)?;
+        imp::nip44_encrypt(self, peer, plaintext).await
     }
 
     /// NIP-44 decrypt via extension, after the same account check as
@@ -59,14 +63,14 @@ impl Nip07Handle {
     ///
     /// # Errors
     ///
-    /// Returns an error when called with SSR features or when nip44 decryption fails, and the same
-    /// account-check errors as [`nip44_encrypt`](Self::nip44_encrypt).
+    /// The same as [`nip44_encrypt`](Self::nip44_encrypt).
     pub async fn nip44_decrypt(
         &self,
-        sender_hex: &str,
+        peer: &PublicKey,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
-        imp::nip44_decrypt(self, sender_hex, ciphertext).await
+        super::check_peer(peer)?;
+        imp::nip44_decrypt(self, peer, ciphertext).await
     }
 }
 
@@ -202,41 +206,43 @@ mod imp {
     /// NIP-44 encrypt through the extension.
     pub(super) async fn nip44_encrypt(
         handle: &Nip07Handle,
-        recipient_hex: &str,
+        peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
         ensure_account(handle).await?;
         settle(
-            nostr_nip44_encrypt(recipient_hex, plaintext),
+            nostr_nip44_encrypt(&peer.to_hex(), plaintext),
             &["window", "nostr", "nip44", "encrypt"],
-            NostrAuthError::SigningFailed,
+            NostrAuthError::EncryptionFailed,
         )
         .await?
         .as_string()
-        .ok_or_else(|| NostrAuthError::SigningFailed("expected string ciphertext".into()))
+        .ok_or_else(|| NostrAuthError::EncryptionFailed("expected string ciphertext".into()))
     }
 
     /// NIP-44 decrypt through the extension.
     pub(super) async fn nip44_decrypt(
         handle: &Nip07Handle,
-        sender_hex: &str,
+        peer: &PublicKey,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
         ensure_account(handle).await?;
         settle(
-            nostr_nip44_decrypt(sender_hex, ciphertext),
+            nostr_nip44_decrypt(&peer.to_hex(), ciphertext),
             &["window", "nostr", "nip44", "decrypt"],
-            NostrAuthError::SigningFailed,
+            NostrAuthError::EncryptionFailed,
         )
         .await?
         .as_string()
-        .ok_or_else(|| NostrAuthError::SigningFailed("expected string plaintext".into()))
+        .ok_or_else(|| NostrAuthError::EncryptionFailed("expected string plaintext".into()))
     }
 }
 
 /// Server stubs.
 #[cfg(feature = "ssr")]
 mod imp {
+    use nostr::key::PublicKey;
+
     use super::Nip07Handle;
     use crate::signers::NOT_ON_SERVER;
     use crate::types::NostrAuthError;
@@ -257,19 +263,19 @@ mod imp {
     /// Server stub for `nip44_encrypt`.
     pub(super) async fn nip44_encrypt(
         _handle: &Nip07Handle,
-        _recipient_hex: &str,
+        _peer: &PublicKey,
         _plaintext: &str,
     ) -> Result<String, NostrAuthError> {
-        Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
+        Err(NostrAuthError::EncryptionUnavailable)
     }
 
     /// Server stub for `nip44_decrypt`.
     pub(super) async fn nip44_decrypt(
         _handle: &Nip07Handle,
-        _sender_hex: &str,
+        _peer: &PublicKey,
         _ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
-        Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
+        Err(NostrAuthError::EncryptionUnavailable)
     }
 }
 
@@ -278,6 +284,7 @@ mod imp {
 mod server_tests {
     use super::super::server_tests::{ready, text};
     use super::*;
+    use crate::signers::signer_traits::tests::{UNAVAILABLE, off_curve};
     use nostr::key::Keys;
 
     #[test]
@@ -289,10 +296,21 @@ mod server_tests {
             text(ready(Nip07Handle::get_public_key())),
             "Browser extension (window.nostr) not found"
         );
-        let want = "Signing failed: not available on server";
-        assert_eq!(text(ready(h.sign_event("{}"))), want);
-        assert_eq!(text(ready(h.nip44_encrypt("a", "b"))), want);
-        assert_eq!(text(ready(h.nip44_decrypt("a", "b"))), want);
+        assert_eq!(
+            text(ready(h.sign_event("{}"))),
+            "Signing failed: not available on server"
+        );
+        let peer = Keys::generate().public_key();
+        let bad = off_curve();
+        assert_eq!(text(ready(h.nip44_encrypt(&peer, "b"))), UNAVAILABLE);
+        assert_eq!(text(ready(h.nip44_decrypt(&peer, "b"))), UNAVAILABLE);
+        let enc = ready(h.nip44_encrypt(&bad, "b"));
+        assert!(matches!(enc, Err(NostrAuthError::InvalidPublicKey(_))));
+        let dec = ready(h.nip44_decrypt(&bad, "b"));
+        assert!(matches!(dec, Err(NostrAuthError::InvalidPublicKey(_))));
+        let auth = crate::types::AuthResult::Extension(h);
+        assert_eq!(text(ready(auth.nip44_encrypt(&peer, "b"))), UNAVAILABLE);
+        assert_eq!(text(ready(auth.nip44_decrypt(&peer, "b"))), UNAVAILABLE);
     }
 }
 
@@ -360,6 +378,28 @@ mod wasm_tests {
         clippy::needless_pass_by_value,
         reason = "callers pass the awaited result inline"
     )]
+    fn assert_encryption_failed(result: Result<String, NostrAuthError>, text: &str) {
+        assert!(
+            matches!(&result, Err(NostrAuthError::EncryptionFailed(m)) if m == text),
+            "{result:?}"
+        );
+    }
+
+    fn peer() -> nostr::key::PublicKey {
+        nostr::key::Keys::generate().public_key()
+    }
+
+    // Counts every call, and `body` answers both `nip44` methods.
+    fn nip44_shim(session_hex: &str, body: &str) {
+        shim(&format!(
+            "globalThis.__n = {{ gpk: 0, enc: 0, dec: 0 }}; globalThis.window = {{ nostr: {{ getPublicKey: async () => {{ globalThis.__n.gpk += 1; return '{session_hex}'; }}, nip44: {{ encrypt() {{ globalThis.__n.enc += 1; {body} }}, decrypt() {{ globalThis.__n.dec += 1; {body} }} }} }} }};"
+        ));
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers pass the awaited result inline"
+    )]
     fn assert_not_found<T: core::fmt::Debug>(result: Result<T, NostrAuthError>) {
         assert!(
             matches!(result, Err(NostrAuthError::ExtensionNotFound)),
@@ -387,15 +427,23 @@ mod wasm_tests {
         assert_eq!(h.public_key, keys.public_key());
         let signed = h.sign_event(&request(&keys)).await.unwrap();
         assert_eq!(signed, want);
-        assert_eq!(h.nip44_encrypt("pk", "hi").await.unwrap(), "enc:pk:hi");
-        assert_eq!(h.nip44_decrypt("pk", "ct").await.unwrap(), "dec:pk:ct");
+        let peer = peer();
+        let hex = peer.to_hex();
+        assert_eq!(
+            h.nip44_encrypt(&peer, "hi").await.unwrap(),
+            format!("enc:{hex}:hi")
+        );
+        assert_eq!(
+            h.nip44_decrypt(&peer, "ct").await.unwrap(),
+            format!("dec:{hex}:ct")
+        );
     }
 
     async fn assert_all_not_found(keys: &nostr::key::Keys, h: &Nip07Handle) {
         assert_not_found(h.sign_event(&request(keys)).await);
         assert_not_found(Nip07Handle::get_public_key().await.map(|_| ()));
-        assert_not_found(h.nip44_encrypt("pk", "x").await);
-        assert_not_found(h.nip44_decrypt("pk", "x").await);
+        assert_not_found(h.nip44_encrypt(&peer(), "x").await);
+        assert_not_found(h.nip44_decrypt(&peer(), "x").await);
     }
 
     #[wasm_bindgen_test]
@@ -440,10 +488,10 @@ mod wasm_tests {
             "globalThis.__n = {{ enc: 0, dec: 0 }}; globalThis.window = {{ nostr: {{ getPublicKey: async () => '{}', nip44: {{ encrypt() {{ globalThis.__n.enc += 1; throw new Error('denied'); }}, decrypt() {{ globalThis.__n.dec += 1; throw new Error('denied'); }} }} }} }};",
             keys.public_key().to_hex()
         ));
-        assert_signing_failed(h.nip44_encrypt("pk", "x").await, "denied");
+        assert_encryption_failed(h.nip44_encrypt(&peer(), "x").await, "denied");
         assert_eq!(count("enc"), 1.0);
         js_sys::JSON::parse("1").unwrap();
-        assert_signing_failed(h.nip44_decrypt("pk", "x").await, "denied");
+        assert_encryption_failed(h.nip44_decrypt(&peer(), "x").await, "denied");
         assert_eq!(count("dec"), 1.0);
         js_sys::JSON::parse("1").unwrap();
     }
@@ -473,13 +521,13 @@ mod wasm_tests {
         shim(&format!(
             "globalThis.window = {{ nostr: {{ getPublicKey: async () => '{key}' }} }};"
         ));
-        assert_not_found(h.nip44_encrypt("pk", "x").await);
-        assert_not_found(h.nip44_decrypt("pk", "x").await);
+        assert_not_found(h.nip44_encrypt(&peer(), "x").await);
+        assert_not_found(h.nip44_decrypt(&peer(), "x").await);
         shim(&format!(
             "globalThis.window = {{ nostr: {{ getPublicKey: async () => '{key}', nip44: {{}} }} }};"
         ));
-        assert_not_found(h.nip44_encrypt("pk", "x").await);
-        assert_not_found(h.nip44_decrypt("pk", "x").await);
+        assert_not_found(h.nip44_encrypt(&peer(), "x").await);
+        assert_not_found(h.nip44_decrypt(&peer(), "x").await);
         shim("globalThis.window = { get nostr() { throw new Error('SENTINEL'); } };");
         assert_not_found(h.sign_event(&request(&keys)).await);
         assert_not_found(Nip07Handle::get_public_key().await.map(|_| ()));
@@ -618,12 +666,101 @@ mod wasm_tests {
         shim(&format!(
             "globalThis.__n = {{ enc: 0, dec: 0 }}; globalThis.window = {{ nostr: {{ getPublicKey: async () => '{other}', nip44: {{ encrypt: async () => {{ globalThis.__n.enc += 1; return 'x'; }}, decrypt: async () => {{ globalThis.__n.dec += 1; return 'x'; }} }} }} }};"
         ));
-        let enc = h.nip44_encrypt("pk", "x").await;
+        let enc = h.nip44_encrypt(&peer(), "x").await;
         assert!(matches!(enc, Err(NostrAuthError::SignerKeyMismatch)));
-        let dec = h.nip44_decrypt("pk", "x").await;
+        let dec = h.nip44_decrypt(&peer(), "x").await;
         assert!(matches!(dec, Err(NostrAuthError::SignerKeyMismatch)));
         assert_eq!(count("enc"), 0.0);
         assert_eq!(count("dec"), 0.0);
+    }
+
+    #[wasm_bindgen_test]
+    async fn nip44_rejection_is_encryption_failed() {
+        let (keys, h) = session();
+        let hex = keys.public_key().to_hex();
+        nip44_shim(&hex, "return Promise.reject(new Error('denied'));");
+        assert_encryption_failed(h.nip44_encrypt(&peer(), "x").await, "denied");
+        assert_encryption_failed(h.nip44_decrypt(&peer(), "x").await, "denied");
+        nip44_shim(&hex, "return 7;");
+        assert_encryption_failed(
+            h.nip44_encrypt(&peer(), "x").await,
+            "expected string ciphertext",
+        );
+        assert_encryption_failed(
+            h.nip44_decrypt(&peer(), "x").await,
+            "expected string plaintext",
+        );
+        assert_eq!(count("enc"), 1.0);
+        assert_eq!(count("dec"), 1.0);
+    }
+
+    #[wasm_bindgen_test]
+    async fn nip44_rejection_object_is_not_dumped() {
+        let (keys, h) = session();
+        nip44_shim(
+            &keys.public_key().to_hex(),
+            "return Promise.reject({ SENTINEL: 'SENTINEL' });",
+        );
+        assert_encryption_failed(h.nip44_encrypt(&peer(), "x").await, STATIC_TEXT);
+        assert_encryption_failed(h.nip44_decrypt(&peer(), "x").await, STATIC_TEXT);
+    }
+
+    #[wasm_bindgen_test]
+    async fn nip44_account_check_errors() {
+        let (_, h) = session();
+        for (gpk, rejected) in [
+            ("async () => { throw new Error('denied'); }", true),
+            ("() => { throw new Error('denied'); }", true),
+            ("async () => 'not-a-key'", false),
+        ] {
+            shim(&format!(
+                "globalThis.__n = {{ enc: 0, dec: 0 }}; globalThis.window = {{ nostr: {{ getPublicKey: {gpk}, nip44: {{ encrypt() {{ globalThis.__n.enc += 1; return 'x'; }}, decrypt() {{ globalThis.__n.dec += 1; return 'x'; }} }} }} }};"
+            ));
+            for got in [
+                h.nip44_encrypt(&peer(), "x").await,
+                h.nip44_decrypt(&peer(), "x").await,
+            ] {
+                if rejected {
+                    assert!(
+                        matches!(&got, Err(NostrAuthError::ExtensionRejected(m)) if m == "denied"),
+                        "{got:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(got, Err(NostrAuthError::InvalidPublicKey(_))),
+                        "{got:?}"
+                    );
+                }
+            }
+            assert_eq!(count("enc"), 0.0);
+            assert_eq!(count("dec"), 0.0);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn nip44_off_curve_reaches_nothing() {
+        use crate::signers::signer_traits::tests::off_curve;
+        let (keys, h) = session();
+        nip44_shim(&keys.public_key().to_hex(), "return 'x';");
+        let bad = off_curve();
+        let enc = h.nip44_encrypt(&bad, "x").await;
+        assert!(matches!(enc, Err(NostrAuthError::InvalidPublicKey(_))));
+        let dec = h.nip44_decrypt(&bad, "x").await;
+        assert!(matches!(dec, Err(NostrAuthError::InvalidPublicKey(_))));
+        assert_eq!(count("gpk"), 0.0);
+        assert_eq!(count("enc"), 0.0);
+        assert_eq!(count("dec"), 0.0);
+    }
+
+    #[wasm_bindgen_test]
+    async fn nip44_through_auth_result() {
+        let (keys, auth) = extension();
+        nip44_shim(&keys.public_key().to_hex(), "return 'from-shim';");
+        assert_eq!(auth.nip44_encrypt(&peer(), "x").await.unwrap(), "from-shim");
+        assert_eq!(auth.nip44_decrypt(&peer(), "x").await.unwrap(), "from-shim");
+        assert_eq!(count("gpk"), 2.0);
+        assert_eq!(count("enc"), 1.0);
+        assert_eq!(count("dec"), 1.0);
     }
 
     fn extension() -> (nostr::key::Keys, crate::types::AuthResult) {
