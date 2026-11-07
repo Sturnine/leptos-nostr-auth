@@ -53,12 +53,20 @@ fn sign_with_keys(keys: &Keys, event_json: &str) -> Result<String, NostrAuthErro
     serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))
 }
 
-/// Refuse a peer that is not on the curve. `PublicKey::from_hex` does not check, so a typed key can
-/// still be one.
-fn check_peer(peer: &PublicKey) -> Result<(), NostrAuthError> {
-    peer.xonly()
+/// Refuse a key that is not on the curve. `PublicKey`'s `from_hex`, `from_slice` and `from_bech32`
+/// do not check, so a typed key can still be off it.
+pub(crate) fn check_on_curve(key: &PublicKey) -> Result<(), NostrAuthError> {
+    key.xonly()
         .map(|_| ())
         .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))
+}
+
+/// Parse a hex key and refuse it if it is off the curve. The error quotes no input.
+pub(crate) fn public_key_from_hex(hex: &str) -> Result<PublicKey, NostrAuthError> {
+    let key =
+        PublicKey::from_hex(hex).map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
+    check_on_curve(&key)?;
+    Ok(key)
 }
 
 /// NIP-44 v2 encrypt with in-memory keys.
@@ -67,7 +75,7 @@ fn encrypt_with_keys(
     peer: &PublicKey,
     plaintext: &str,
 ) -> Result<String, NostrAuthError> {
-    check_peer(peer)?;
+    check_on_curve(peer)?;
     nip44::encrypt(keys.secret_key(), peer, plaintext, nip44::Version::V2)
         .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
 }
@@ -78,7 +86,7 @@ fn decrypt_with_keys(
     peer: &PublicKey,
     ciphertext: &str,
 ) -> Result<String, NostrAuthError> {
-    check_peer(peer)?;
+    check_on_curve(peer)?;
     // Display only: `Debug` of this error prints a source that can hold the decrypted bytes.
     nip44::decrypt(keys.secret_key(), peer, ciphertext)
         .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))

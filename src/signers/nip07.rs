@@ -17,7 +17,9 @@ impl Nip07Handle {
     ///
     /// Returns [`NostrAuthError::ExtensionNotFound`] when called with SSR features, or when
     /// `window.nostr` or `getPublicKey` is missing. Returns
-    /// [`NostrAuthError::ExtensionRejected`] when a present method refuses or throws.
+    /// [`NostrAuthError::ExtensionRejected`] when a present method refuses or throws. Returns
+    /// [`NostrAuthError::InvalidPublicKey`] when the extension returned a malformed or off-curve
+    /// key.
     pub async fn get_public_key() -> Result<Self, NostrAuthError> {
         imp::get_public_key().await
     }
@@ -42,8 +44,8 @@ impl Nip07Handle {
     /// # Errors
     ///
     /// [`NostrAuthError::InvalidPublicKey`] means `peer` is not on the curve, checked before the
-    /// extension is asked anything, or that the account check got a malformed key from
-    /// `getPublicKey`. [`NostrAuthError::SignerKeyMismatch`] means the extension is on another
+    /// extension is asked anything, or that the extension returned a malformed or off-curve key to
+    /// the account check. [`NostrAuthError::SignerKeyMismatch`] means the extension is on another
     /// account, and the account check can also return [`NostrAuthError::ExtensionRejected`]. A
     /// missing `nip44` is [`NostrAuthError::ExtensionNotFound`]. A throw, rejection or non-string
     /// return from `nip44` is [`NostrAuthError::EncryptionFailed`], whose text comes from the
@@ -54,7 +56,7 @@ impl Nip07Handle {
         peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
-        super::check_peer(peer)?;
+        super::check_on_curve(peer)?;
         imp::nip44_encrypt(self, peer, plaintext).await
     }
 
@@ -69,7 +71,7 @@ impl Nip07Handle {
         peer: &PublicKey,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
-        super::check_peer(peer)?;
+        super::check_on_curve(peer)?;
         imp::nip44_decrypt(self, peer, ciphertext).await
     }
 }
@@ -85,10 +87,14 @@ mod imp {
     use super::Nip07Handle;
     use crate::signers::browser::make_rpc_promise;
     use crate::signers::event_contract::{checked_event, prepare};
+    use crate::signers::public_key_from_hex;
     use crate::types::NostrAuthError;
 
     /// Text for a rejection that carries no readable message.
     const STATIC_REJECTION: &str = "extension rejected the request";
+
+    /// Tells a signer at fault from stored data that can never restore, within one variant.
+    const INVALID_KEY: &str = "the extension returned an invalid public key";
 
     // Not `async` imports: wasm-bindgen does not take the exception an `async` catch import stored,
     // so a throw would leave a stale exception and `.then` called on `undefined`.
@@ -167,9 +173,10 @@ mod imp {
         let hex = js_pk
             .as_string()
             .ok_or_else(|| NostrAuthError::ExtensionRejected("expected string pubkey".into()))?;
-        let pk = PublicKey::from_hex(&hex)
-            .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
-        Ok(Nip07Handle { public_key: pk })
+        let Ok(public_key) = public_key_from_hex(&hex) else {
+            return Err(NostrAuthError::InvalidPublicKey(INVALID_KEY.into()));
+        };
+        Ok(Nip07Handle { public_key })
     }
 
     /// Sign an event through the extension. A value that cannot be stringified has no text, which
@@ -735,6 +742,31 @@ mod wasm_tests {
             assert_eq!(count("enc"), 0.0);
             assert_eq!(count("dec"), 0.0);
         }
+    }
+
+    #[wasm_bindgen_test]
+    async fn off_curve_key_is_invalid() {
+        use crate::signers::signer_traits::tests::off_curve;
+        const TEXT: &str = "the extension returned an invalid public key";
+        let (_, h) = session();
+        nip44_shim(&off_curve().to_hex(), "return 'x';");
+        let login = Nip07Handle::get_public_key().await.map(|_| ());
+        assert!(
+            matches!(&login, Err(NostrAuthError::InvalidPublicKey(m)) if m == TEXT),
+            "{login:?}"
+        );
+        let enc = h.nip44_encrypt(&peer(), "x").await;
+        assert!(
+            matches!(&enc, Err(NostrAuthError::InvalidPublicKey(m)) if m == TEXT),
+            "{enc:?}"
+        );
+        let dec = h.nip44_decrypt(&peer(), "x").await;
+        assert!(
+            matches!(&dec, Err(NostrAuthError::InvalidPublicKey(m)) if m == TEXT),
+            "{dec:?}"
+        );
+        assert_eq!(count("enc"), 0.0);
+        assert_eq!(count("dec"), 0.0);
     }
 
     #[wasm_bindgen_test]

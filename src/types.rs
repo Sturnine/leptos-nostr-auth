@@ -83,7 +83,7 @@ impl AuthResult {
     ///   Extension or Bunker session on a server.
     /// - [`NostrAuthError::InvalidPublicKey`]: `peer` is not on the curve, on every other method and
     ///   before anything reaches a signer. From an extension it can also mean `getPublicKey`
-    ///   returned a malformed key.
+    ///   returned a malformed or off-curve key.
     /// - [`NostrAuthError::EncryptionFailed`]: a key session's failure, including empty plaintext,
     ///   or a signer's refusal or malformed response.
     /// - [`NostrAuthError::ExtensionNotFound`], [`NostrAuthError::ExtensionRejected`] and
@@ -407,7 +407,11 @@ pub enum NostrAuthError {
     /// The extension rejected the request (e.g. user denied permission).
     #[error("Extension request rejected: {0}")]
     ExtensionRejected(String),
-    /// The supplied public key string could not be parsed, or a typed key is not on the curve.
+    /// A public key could not be parsed or is not on the curve.
+    ///
+    /// As `NostrAuthContext::restore_error` it has two causes, told apart only by text, which is
+    /// not API: stored data that can never restore, or an extension currently returning no valid
+    /// key, where the same session restores once fixed. It does not prove the session is dead.
     #[error("Invalid public key format: {0}")]
     InvalidPublicKey(String),
     /// The supplied bunker URI was malformed.
@@ -428,7 +432,7 @@ pub enum NostrAuthError {
     /// This session was closed for good. Retrying cannot succeed; read the current session from `NostrAuthContext::auth`.
     #[error("Bunker session closed by logout or replacement")]
     BunkerSessionClosed,
-    /// The signer used a different key than this session, usually after an account switch in the extension. Log in again to switch. As `NostrAuthContext::restore_error`, the stored session is kept and retried next time, so switching the signer back to its key restores it.
+    /// The signer used a different key than this session, usually after an account switch in the extension: two valid keys that differ; a signer returning no valid key is reported as that signer's parse failure. Log in again to switch. As `NostrAuthContext::restore_error`, the stored session is kept and retried next time, so switching the signer back to its key restores it.
     #[error("Signer is using a different account than this session. Log in again to switch.")]
     SignerKeyMismatch,
     /// The stored session's login method is no longer in `NostrAuthConfig::allowed_methods`. The session is kept, and restores if the method is allowed again.

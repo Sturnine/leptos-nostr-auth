@@ -1,6 +1,8 @@
 use nostr::key::PublicKey;
 
-use crate::signers::{BunkerSession, Nip07Handle, PasskeySession, PendingPasskey, ReadOnlyHandle};
+use crate::signers::{
+    BunkerSession, Nip07Handle, PasskeySession, PendingPasskey, ReadOnlyHandle, public_key_from_hex,
+};
 use crate::types::{AuthResult, LoginMethod, NostrAuthError, PersistedMethod, PersistedSession};
 
 /// What the provider does about a stored session on mount.
@@ -100,8 +102,7 @@ pub fn is_logout_storage_event(
 pub fn passkey_restore_target(
     session: &PersistedSession,
 ) -> Result<(PublicKey, Vec<u8>), NostrAuthError> {
-    let stored_pk = PublicKey::from_hex(&session.public_key_hex)
-        .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
+    let stored_pk = public_key_from_hex(&session.public_key_hex)?;
     let cred_id_b64 = session
         .passkey_credential_id
         .as_deref()
@@ -156,8 +157,7 @@ pub async fn restore_session(
     session: &PersistedSession,
     bunker_timeout_secs: u32,
 ) -> Result<AuthResult, NostrAuthError> {
-    let stored_pk = PublicKey::from_hex(&session.public_key_hex)
-        .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
+    let stored_pk = public_key_from_hex(&session.public_key_hex)?;
 
     match session.method {
         PersistedMethod::Extension => {
@@ -215,6 +215,7 @@ pub mod tests {
 
     const USER: &str = "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2";
     const OTHER: &str = "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa";
+    const OFF_CURVE: &str = "eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34";
 
     pub fn first_poll<F: Future>(fut: F) -> Option<F::Output> {
         match pin!(fut).poll(&mut Context::from_waker(Waker::noop())) {
@@ -265,6 +266,16 @@ pub mod tests {
         for method in METHODS {
             assert!(matches!(
                 restore_err(&session("zz", method)),
+                NostrAuthError::InvalidPublicKey(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn never_restorable_off_curve_each_method() {
+        for method in METHODS {
+            assert!(matches!(
+                restore_err(&session(OFF_CURVE, method)),
                 NostrAuthError::InvalidPublicKey(_)
             ));
         }
@@ -374,6 +385,14 @@ pub mod tests {
     fn passkey_target_bad_key() {
         assert!(matches!(
             passkey_restore_target(&passkey_session("zz", Some("AAEC"))),
+            Err(NostrAuthError::InvalidPublicKey(_))
+        ));
+    }
+
+    #[test]
+    fn passkey_target_off_curve() {
+        assert!(matches!(
+            passkey_restore_target(&passkey_session(OFF_CURVE, Some("AAEC"))),
             Err(NostrAuthError::InvalidPublicKey(_))
         ));
     }
@@ -633,6 +652,20 @@ mod wasm_tests {
             restore_session(&extension_session(), 1).await,
             Err(NostrAuthError::SignerKeyMismatch)
         ));
+    }
+
+    #[wasm_bindgen_test]
+    async fn extension_off_curve_on_restore_is_invalid() {
+        shim("eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34");
+        let got = restore_session(&extension_session(), 1).await.map(|_| ());
+        assert!(
+            matches!(
+                &got,
+                Err(NostrAuthError::InvalidPublicKey(m))
+                    if m == "the extension returned an invalid public key"
+            ),
+            "{got:?}"
+        );
     }
 
     #[wasm_bindgen_test]
