@@ -32,9 +32,9 @@ csr = ["leptos/csr"]
 leptos = { version = "0.8", default-features = false }
 
 # SSR-safe localStorage, Escape-key listener and window handle
-leptos-use-storage        = { version = "0.20", default-features = false }
-leptos-use-event-listener = { version = "0.20", default-features = false }
-leptos-use-window         = { version = "0.20", default-features = false }
+leptos-use-storage = "0.20"
+leptos-use-event-listener = "0.20"
+leptos-use-window = "0.20"
 
 # Codec for use_local_storage — JsonCodec encodes PersistedSession as JSON
 codee = { version = "0.3", features = ["json_serde"] }
@@ -52,7 +52,7 @@ nostr = { version = "0.45.7", default-features = false, features = [
   "os-rng",
 ] }
 
-# SHA-256 for passkey key derivation; nostr 0.45 no longer re-exports `hashes`
+# SHA-256 for passkey key derivation
 bitcoin_hashes = { version = "1.2", default-features = false }
 
 # WASM bridge — compiles on all targets; browser-specific imports are cfg-gated
@@ -60,7 +60,7 @@ wasm-bindgen         = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys               = "0.3"
 
-# Web platform APIs — types compile on all targets; actual API calls are cfg-gated
+# Web platform APIs. Types compile on all targets, and calls run only in the browser.
 web-sys = { version = "0.3", features = [
   "AbortController",
   "AbortSignal",
@@ -93,7 +93,7 @@ thiserror = "2"
 # Safe because WASM is single-threaded; SendWrapper panics on cross-thread access.
 send_wrapper = { version = "0.6", features = ["futures"] }
 
-# Wipes typed secrets and the PRF output. Already in the tree through nostr.
+# Wipes typed secrets and the PRF output.
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 
 # nostr 0.45 randomness (rand 0.10 -> getrandom 0.4) needs the browser backend explicitly
@@ -130,7 +130,6 @@ str_to_string                 = "warn"
 implicit_clone                = "warn"
 arithmetic_side_effects       = "warn"
 use_debug                     = "warn"
-missing_docs_in_private_items = "warn"
 std_instead_of_core           = "warn"
 exhaustive_structs            = "warn"
 exhaustive_enums              = "warn"

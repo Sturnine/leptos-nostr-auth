@@ -2,13 +2,6 @@
     clippy::exhaustive_structs,
     reason = "#[component] generates the props structs, which cannot take attributes"
 )]
-#![cfg_attr(
-    not(test),
-    expect(
-        clippy::missing_docs_in_private_items,
-        reason = "#[component] generates the props structs, which cannot take attributes"
-    )
-)]
 use futures::future::{AbortHandle, Abortable};
 use leptos::portal::Portal;
 use leptos::prelude::*;
