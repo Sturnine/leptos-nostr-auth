@@ -1,4 +1,3 @@
-
 use leptos::prelude::*;
 use leptos_nostr_auth::nostr::event::{FinalizeEventAsync, Kind, UnsignedEvent};
 use leptos_nostr_auth::nostr::key::{AsyncGetPublicKey, PublicKey};

@@ -5,7 +5,8 @@ async fn main() {
     use tower_http::services::ServeDir;
     use with_axum_ssr::{App, shell};
 
-    let conf = leptos::config::get_configuration(None).expect("Failed to read the Leptos environment set by cargo-leptos");
+    let conf = leptos::config::get_configuration(None)
+        .expect("Failed to read the Leptos environment set by cargo-leptos");
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
     let routes = generate_route_list(App);

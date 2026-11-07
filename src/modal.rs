@@ -431,7 +431,6 @@ pub fn NostrAuthModal(
     }
 }
 
-
 /// The signer's approval link. A click link, never a popup, with the full URL as its text, because
 /// a hostile signer can send a phishing link.
 #[component]
@@ -455,7 +454,6 @@ fn AuthUrlPrompt() -> impl IntoView {
         })}
     }
 }
-
 
 #[component]
 fn ModalHeader(
@@ -499,7 +497,6 @@ fn ModalHeader(
         </div>
     }
 }
-
 
 #[component]
 fn StepMethodSelect(
@@ -611,7 +608,6 @@ fn StepMethodSelect(
     }
 }
 
-
 #[component]
 fn MethodButton(
     icon: impl IntoView + 'static,
@@ -655,7 +651,6 @@ fn MethodButton(
     }
 }
 
-
 fn icon_extension() -> impl IntoView {
     view! { <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/></svg> }
 }
@@ -675,7 +670,6 @@ fn icon_ncryptsec() -> impl IntoView {
 fn icon_warning() -> impl IntoView {
     view! { <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> }
 }
-
 
 #[component]
 fn StepExtension(
@@ -732,7 +726,6 @@ fn StepExtension(
         </div>
     }
 }
-
 
 #[component]
 fn StepBunker(
@@ -828,7 +821,6 @@ fn StepBunker(
     }
 }
 
-
 #[component]
 fn StepPasskey(
     attempt: Attempt,
@@ -901,7 +893,6 @@ fn StepPasskey(
     }
 }
 
-
 #[component]
 fn StepReadOnly(
     on_auth: Callback<AuthResult>,
@@ -953,7 +944,6 @@ fn StepReadOnly(
         </div>
     }
 }
-
 
 /// Give the browser a chance to paint before scrypt blocks the thread: two frames, or a 200 ms timer
 /// that browsers may throttle in a background tab. Best effort, no paint is guaranteed. A frame
@@ -1076,7 +1066,6 @@ fn StepNcryptsec(
         </div>
     }
 }
-
 
 #[cfg(feature = "insecure_nsec_input")]
 #[component]

@@ -495,10 +495,7 @@ pub(super) enum Effect<W> {
         outcome: Result<ResponseResult, RpcFailure>,
     },
     /// Show an approval link. The request stays pending.
-    Prompt {
-        request_id: String,
-        url: HttpsUrl,
-    },
+    Prompt { request_id: String, url: HttpsUrl },
     /// Close the socket, so the next call resubscribes.
     CloseSocket,
 }
@@ -570,9 +567,7 @@ impl<W: ReconnectWaker> Drop for ReconnectLead<W> {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum DeadlineAction {
     Extend,
-    Timeout {
-        signer_answered: bool,
-    },
+    Timeout { signer_answered: bool },
     AuthRequired,
 }
 

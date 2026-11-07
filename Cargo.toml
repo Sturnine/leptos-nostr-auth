@@ -32,9 +32,9 @@ csr = ["leptos/csr"]
 leptos = { version = "0.8", default-features = false }
 
 # SSR-safe localStorage, Escape-key listener and window handle
-leptos-use-storage = "0.20"
+leptos-use-storage        = "0.20"
 leptos-use-event-listener = "0.20"
-leptos-use-window = "0.20"
+leptos-use-window         = "0.20"
 
 # Codec for use_local_storage — JsonCodec encodes PersistedSession as JSON
 codee = { version = "0.3", features = ["json_serde"] }
@@ -119,29 +119,29 @@ pedantic = { level = "warn", priority = -1 }
 nursery  = { level = "warn", priority = -1 }
 
 # Restriction lints
-unwrap_used                   = "warn"
-expect_used                   = "warn"
-panic                         = "warn"
-dbg_macro                     = "warn"
-todo                          = "warn"
-unimplemented                 = "warn"
-indexing_slicing              = "warn"
-str_to_string                 = "warn"
-implicit_clone                = "warn"
-arithmetic_side_effects       = "warn"
-use_debug                     = "warn"
-std_instead_of_core           = "warn"
-exhaustive_structs            = "warn"
-exhaustive_enums              = "warn"
-clone_on_ref_ptr              = "warn"
-mem_forget                    = "warn"
-print_stdout                  = "warn"
-print_stderr                  = "warn"
-map_err_ignore                = "warn"
-try_err                       = "warn"
-undocumented_unsafe_blocks    = "warn"
-exit                          = "warn"
-tests_outside_test_module     = "warn"
+unwrap_used                = "warn"
+expect_used                = "warn"
+panic                      = "warn"
+dbg_macro                  = "warn"
+todo                       = "warn"
+unimplemented              = "warn"
+indexing_slicing           = "warn"
+str_to_string              = "warn"
+implicit_clone             = "warn"
+arithmetic_side_effects    = "warn"
+use_debug                  = "warn"
+std_instead_of_core        = "warn"
+exhaustive_structs         = "warn"
+exhaustive_enums           = "warn"
+clone_on_ref_ptr           = "warn"
+mem_forget                 = "warn"
+print_stdout               = "warn"
+print_stderr               = "warn"
+map_err_ignore             = "warn"
+try_err                    = "warn"
+undocumented_unsafe_blocks = "warn"
+exit                       = "warn"
+tests_outside_test_module  = "warn"
 
 # Allow pedantic lints that don't fit this codebase
 module_name_repetitions = "allow" # intentional: NostrAuth* prefix throughout public API

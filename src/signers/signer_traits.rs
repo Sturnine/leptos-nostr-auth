@@ -451,7 +451,8 @@ pub(in crate::signers) mod tests {
 
         let ro = read_only();
         let unbuilt = ready(
-            GiftWrapBuilder::new(reader.public_key(), unsigned(ro.public_key())).finalize_async(&ro),
+            GiftWrapBuilder::new(reader.public_key(), unsigned(ro.public_key()))
+                .finalize_async(&ro),
         )
         .unwrap_err();
         assert_eq!(unbuilt.kind(), ErrorKind::Crypto);
