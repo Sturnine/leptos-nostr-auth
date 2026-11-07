@@ -138,32 +138,35 @@ impl BunkerSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when called with SSR features, when `recipient_hex` is not a public key,
-    /// or when nip44 encryption fails. Returns [`NostrAuthError::BunkerAuthRequired`] when the
-    /// signer asks for approval and no modal is mounted to show the link, and
-    /// [`NostrAuthError::BunkerSessionClosed`] once the session was closed.
+    /// [`NostrAuthError::InvalidPublicKey`] when `peer` is not on the curve, before anything is sent
+    /// and also on a closed session. [`NostrAuthError::EncryptionFailed`] when the signer refuses or
+    /// answers with something malformed; a refusal's text is the signer's, sanitized and capped.
+    /// [`NostrAuthError::BunkerSessionClosed`] once closed, for a valid peer.
+    /// [`NostrAuthError::BunkerAuthRequired`] when the signer asks for approval and no modal is
+    /// mounted to show the link, and [`NostrAuthError::BunkerTimeout`] or
+    /// [`NostrAuthError::BunkerConnectionFailed`] for a transport failure. With SSR features a valid
+    /// `peer` gets [`NostrAuthError::EncryptionUnavailable`].
     pub async fn nip44_encrypt(
         &self,
-        recipient_hex: &str,
+        peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
-        imp::nip44_encrypt(self, recipient_hex, plaintext).await
+        super::check_peer(peer)?;
+        imp::nip44_encrypt(self, peer, plaintext).await
     }
 
     /// NIP-44 decrypt via the remote signer (NIP-46 `nip44_decrypt` method).
     ///
     /// # Errors
     ///
-    /// Returns an error when called with SSR features, when `sender_hex` is not a public key, or
-    /// when nip44 decryption fails. Returns [`NostrAuthError::BunkerAuthRequired`] when the signer
-    /// asks for approval and no modal is mounted to show the link, and
-    /// [`NostrAuthError::BunkerSessionClosed`] once the session was closed.
+    /// The same as [`nip44_encrypt`](Self::nip44_encrypt).
     pub async fn nip44_decrypt(
         &self,
-        sender_hex: &str,
+        peer: &PublicKey,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
-        imp::nip44_decrypt(self, sender_hex, ciphertext).await
+        super::check_peer(peer)?;
+        imp::nip44_decrypt(self, peer, ciphertext).await
     }
 }
 
@@ -544,40 +547,35 @@ mod imp {
     /// NIP-46 `nip44_encrypt` over the persistent WebSocket.
     pub(super) async fn nip44_encrypt(
         session: &BunkerSession,
-        recipient_hex: &str,
+        peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
         let request = NostrConnectRequest::Nip44Encrypt {
-            public_key: peer_key(recipient_hex)?,
+            public_key: *peer,
             text: plaintext.to_owned(),
         };
         session
             .send_rpc(&request)
             .await
             .and_then(nip44_result)
-            .map_err(RpcFailure::into_signing_error)
+            .map_err(RpcFailure::into_encryption_error)
     }
 
     /// NIP-46 `nip44_decrypt` over the persistent WebSocket.
     pub(super) async fn nip44_decrypt(
         session: &BunkerSession,
-        sender_hex: &str,
+        peer: &PublicKey,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
         let request = NostrConnectRequest::Nip44Decrypt {
-            public_key: peer_key(sender_hex)?,
+            public_key: *peer,
             ciphertext: ciphertext.to_owned(),
         };
         session
             .send_rpc(&request)
             .await
             .and_then(nip44_result)
-            .map_err(RpcFailure::into_signing_error)
-    }
-
-    /// Parse the counterparty key of a NIP-44 request.
-    fn peer_key(hex: &str) -> Result<PublicKey, NostrAuthError> {
-        PublicKey::from_hex(hex).map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))
+            .map_err(RpcFailure::into_encryption_error)
     }
 
     impl BunkerSession {
@@ -881,6 +879,8 @@ mod imp {
 /// Server stubs.
 #[cfg(feature = "ssr")]
 mod imp {
+    use nostr::key::PublicKey;
+
     use super::BunkerSession;
     use crate::signers::NOT_ON_SERVER;
     use crate::types::NostrAuthError;
@@ -913,19 +913,19 @@ mod imp {
     /// Server stub for `nip44_encrypt`.
     pub(super) async fn nip44_encrypt(
         _session: &BunkerSession,
-        _recipient_hex: &str,
+        _peer: &PublicKey,
         _plaintext: &str,
     ) -> Result<String, NostrAuthError> {
-        Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
+        Err(NostrAuthError::EncryptionUnavailable)
     }
 
     /// Server stub for `nip44_decrypt`.
     pub(super) async fn nip44_decrypt(
         _session: &BunkerSession,
-        _sender_hex: &str,
+        _peer: &PublicKey,
         _ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
-        Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
+        Err(NostrAuthError::EncryptionUnavailable)
     }
 
     /// Server stub for `close`.
@@ -1025,17 +1025,68 @@ mod tests {
         assert_eq!(ready(auth.get_public_key_async()).unwrap(), pk);
     }
 
+    #[test]
+    fn closed_session_nip44() {
+        use crate::signers::signer_traits::tests::{off_curve, ready};
+        use nostr::nips::nip44::AsyncNip44;
+        let s = session();
+        let peer = Keys::generate().public_key();
+        let bad = off_curve();
+        let auth = crate::types::AuthResult::Bunker(Box::new(s.clone()));
+        let closed = |got: Result<String, NostrAuthError>| {
+            assert!(matches!(got, Err(NostrAuthError::BunkerSessionClosed)));
+        };
+        let invalid = |got: Result<String, NostrAuthError>| {
+            assert!(matches!(got, Err(NostrAuthError::InvalidPublicKey(_))));
+        };
+        invalid(ready(auth.nip44_encrypt(&bad, "x")));
+        invalid(ready(auth.nip44_decrypt(&bad, "x")));
+        s.conn.close();
+        invalid(ready(auth.nip44_encrypt(&bad, "x")));
+        invalid(ready(auth.nip44_decrypt(&bad, "x")));
+        invalid(ready(s.nip44_encrypt(&bad, "x")));
+        invalid(ready(s.nip44_decrypt(&bad, "x")));
+        closed(ready(auth.nip44_encrypt(&peer, "x")));
+        closed(ready(auth.nip44_decrypt(&peer, "x")));
+        closed(ready(auth.nip44_encrypt_async(&peer, "x")));
+        closed(ready(auth.nip44_decrypt_async(&peer, "x")));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use core::error::Error as _;
+            use nostr::event::FinalizeEvent;
+            use nostr::nips::nip59::{GiftWrapBuilder, UnwrappedGift};
+            let sender = Keys::generate();
+            let wrap = GiftWrapBuilder::new(
+                s.public_key,
+                crate::signers::signer_traits::tests::unsigned(sender.public_key()),
+            )
+            .finalize(&sender)
+            .unwrap();
+            let err = ready(UnwrappedGift::from_gift_wrap_async(&auth, &wrap)).unwrap_err();
+            assert_eq!(err.kind(), nostr::error::ErrorKind::Crypto);
+            let source = err
+                .source()
+                .and_then(|e| e.downcast_ref::<NostrAuthError>());
+            assert!(matches!(source, Some(NostrAuthError::BunkerSessionClosed)));
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     async fn closed_session_through_trait_on_wasm() {
         use crate::signers::signer_traits::tests::unsigned;
         use nostr::event::AsyncSignEvent;
+        use nostr::nips::nip44::AsyncNip44;
         let s = session();
         let pk = s.public_key;
         s.conn.close();
         let auth = crate::types::AuthResult::Bunker(Box::new(s));
         let r = auth.sign_event_async(unsigned(pk)).await;
         assert!(matches!(r, Err(NostrAuthError::BunkerSessionClosed)));
+        let enc = auth.nip44_encrypt_async(&pk, "x").await;
+        assert!(matches!(enc, Err(NostrAuthError::BunkerSessionClosed)));
+        let dec = auth.nip44_decrypt_async(&pk, "x").await;
+        assert!(matches!(dec, Err(NostrAuthError::BunkerSessionClosed)));
     }
 
     #[test]
@@ -1081,6 +1132,7 @@ mod tests {
 pub(super) mod server_tests {
     use super::super::server_tests::{ready, text};
     use super::*;
+    use crate::signers::signer_traits::tests::{UNAVAILABLE, off_curve};
 
     pub(in crate::signers) fn bunker() -> BunkerSession {
         let client_keys = Keys::generate();
@@ -1101,10 +1153,21 @@ pub(super) mod server_tests {
             text(ready(BunkerSession::connect("bunker://x", 1))),
             "Bunker connection failed: not available on server"
         );
-        let want = "Signing failed: not available on server";
-        assert_eq!(text(ready(s.sign_event("{}"))), want);
-        assert_eq!(text(ready(s.nip44_encrypt("a", "b"))), want);
-        assert_eq!(text(ready(s.nip44_decrypt("a", "b"))), want);
+        assert_eq!(
+            text(ready(s.sign_event("{}"))),
+            "Signing failed: not available on server"
+        );
+        let peer = Keys::generate().public_key();
+        let bad = off_curve();
+        assert_eq!(text(ready(s.nip44_encrypt(&peer, "b"))), UNAVAILABLE);
+        assert_eq!(text(ready(s.nip44_decrypt(&peer, "b"))), UNAVAILABLE);
+        let enc = ready(s.nip44_encrypt(&bad, "b"));
+        assert!(matches!(enc, Err(NostrAuthError::InvalidPublicKey(_))));
+        let dec = ready(s.nip44_decrypt(&bad, "b"));
+        assert!(matches!(dec, Err(NostrAuthError::InvalidPublicKey(_))));
+        let auth = crate::types::AuthResult::Bunker(Box::new(s));
+        assert_eq!(text(ready(auth.nip44_encrypt(&peer, "b"))), UNAVAILABLE);
+        assert_eq!(text(ready(auth.nip44_decrypt(&peer, "b"))), UNAVAILABLE);
     }
 
     #[test]
@@ -1117,6 +1180,9 @@ pub(super) mod server_tests {
             text(ready(auth.sign_event("{}"))),
             "Signing failed: not available on server"
         );
+        let peer = Keys::generate().public_key();
+        assert_eq!(text(ready(auth.nip44_encrypt(&peer, "b"))), UNAVAILABLE);
+        assert_eq!(text(ready(auth.nip44_decrypt(&peer, "b"))), UNAVAILABLE);
     }
 
     #[test]

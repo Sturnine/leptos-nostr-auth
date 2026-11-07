@@ -40,7 +40,8 @@ pub use raw_key::RawKeySession;
 pub use read_only::ReadOnlyHandle;
 
 use nostr::event::FinalizeEvent;
-use nostr::key::Keys;
+use nostr::key::{Keys, PublicKey};
+use nostr::nips::nip44;
 
 use crate::types::NostrAuthError;
 
@@ -50,6 +51,37 @@ fn sign_with_keys(keys: &Keys, event_json: &str) -> Result<String, NostrAuthErro
         .finalize(keys)
         .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
     serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))
+}
+
+/// Refuse a peer that is not on the curve. `PublicKey::from_hex` does not check, so a typed key can
+/// still be one.
+fn check_peer(peer: &PublicKey) -> Result<(), NostrAuthError> {
+    peer.xonly()
+        .map(|_| ())
+        .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))
+}
+
+/// NIP-44 v2 encrypt with in-memory keys.
+fn encrypt_with_keys(
+    keys: &Keys,
+    peer: &PublicKey,
+    plaintext: &str,
+) -> Result<String, NostrAuthError> {
+    check_peer(peer)?;
+    nip44::encrypt(keys.secret_key(), peer, plaintext, nip44::Version::V2)
+        .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
+}
+
+/// NIP-44 decrypt with in-memory keys.
+fn decrypt_with_keys(
+    keys: &Keys,
+    peer: &PublicKey,
+    ciphertext: &str,
+) -> Result<String, NostrAuthError> {
+    check_peer(peer)?;
+    // Display only: `Debug` of this error prints a source that can hold the decrypted bytes.
+    nip44::decrypt(keys.secret_key(), peer, ciphertext)
+        .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
 }
 
 #[cfg(test)]
@@ -81,19 +113,22 @@ mod server_tests {
             public_key: Keys::generate().public_key(),
         };
         let s = nip46::server_tests::bunker();
+        let peer = Keys::generate().public_key();
         assert_send(Nip07Handle::get_public_key());
         assert_send(h.sign_event("{}"));
-        assert_send(h.nip44_encrypt("a", "b"));
-        assert_send(h.nip44_decrypt("a", "b"));
+        assert_send(h.nip44_encrypt(&peer, "b"));
+        assert_send(h.nip44_decrypt(&peer, "b"));
         assert_send(BunkerSession::connect("bunker://x", 1));
         assert_send(s.sign_event("{}"));
-        assert_send(s.nip44_encrypt("a", "b"));
-        assert_send(s.nip44_decrypt("a", "b"));
+        assert_send(s.nip44_encrypt(&peer, "b"));
+        assert_send(s.nip44_decrypt(&peer, "b"));
         assert_send(PasskeySession::create("rp", "name"));
         assert_send(PasskeySession::authenticate("rp", None));
         let auth = AuthResult::Extension(h);
         assert_send(auth.get_public_key_async());
         assert_send(auth.sign_event_async(signer_traits::tests::unsigned(auth.public_key())));
         assert_send(auth.sign_event("{}"));
+        assert_send(auth.nip44_encrypt(&peer, "b"));
+        assert_send(auth.nip44_decrypt(&peer, "b"));
     }
 }

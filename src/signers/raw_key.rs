@@ -81,6 +81,34 @@ impl RawKeySession {
         super::sign_with_keys(&self.keys, event_json)
     }
 
+    /// NIP-44 v2 encrypt with the in-memory key.
+    ///
+    /// # Errors
+    ///
+    /// [`NostrAuthError::InvalidPublicKey`] when `peer` is not on the curve, and
+    /// [`NostrAuthError::EncryptionFailed`] when encryption fails.
+    pub fn nip44_encrypt(
+        &self,
+        peer: &PublicKey,
+        plaintext: &str,
+    ) -> Result<String, NostrAuthError> {
+        super::encrypt_with_keys(&self.keys, peer, plaintext)
+    }
+
+    /// NIP-44 decrypt with the in-memory key.
+    ///
+    /// # Errors
+    ///
+    /// [`NostrAuthError::InvalidPublicKey`] when `peer` is not on the curve, and
+    /// [`NostrAuthError::EncryptionFailed`] when decryption fails.
+    pub fn nip44_decrypt(
+        &self,
+        peer: &PublicKey,
+        ciphertext: &str,
+    ) -> Result<String, NostrAuthError> {
+        super::decrypt_with_keys(&self.keys, peer, ciphertext)
+    }
+
     /// Wraps known keys for tests outside this module.
     #[cfg(test)]
     pub(crate) fn for_tests(keys: Keys) -> Self {

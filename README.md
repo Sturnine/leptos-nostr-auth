@@ -388,23 +388,52 @@ runtime, so do not assume `EventBuilder` works on wasm without a provider.
   account shows up as `SignerKeyMismatch` when signing.
 - A future can move between threads until its first poll. Without `ssr`, one that has suspended must
   stay on its thread. Key, read-only and closed sessions finish in their first poll.
-- `nostr` helpers that also require `AsyncNip44`, such as NIP-17 and NIP-59 gift wrap, do not accept
-  `AuthResult`.
+- `AuthResult` also implements `AsyncNip44`, so NIP-17 and NIP-59 gift-wrap helpers take it. They need
+  `nostr`'s `nip59` feature on your side, and on wasm the gift-wrap builders reach `Timestamp::now`,
+  which needs the time provider above. On an extension, each NIP-44 call also calls `getPublicKey`,
+  so an unwrap makes two of each.
+- `nip44_encrypt_async` and `nip44_decrypt_async` return `NostrAuthError`. The `nip59` helpers return
+  `nostr::error::Error`: NIP-44 steps are kind `Crypto`, the seal's signature step is kind `Other`, and
+  the same downcast above works on both. Other `nip59` failures, such as an event that is not a gift
+  wrap, have no `NostrAuthError` as source. Use the downcast, not the kind.
 
 ### NIP-44 encryption
 
-```rust
-// NIP-07 extension
-if let AuthResult::Extension(handle) = &auth_result {
-    let ciphertext = handle.nip44_encrypt(recipient_hex, plaintext).await?;
-    let plaintext  = handle.nip44_decrypt(sender_hex, ciphertext).await?;
-}
+One async call works for every login method. Passkey, ncryptsec and raw nsec sessions use `nostr`'s
+NIP-44 v2 with the key in memory, and extension and bunker sessions ask their signer.
 
-// NIP-46 bunker — also supports nip44_encrypt / nip44_decrypt
-if let AuthResult::Bunker(session) = &auth_result {
-    let ciphertext = session.nip44_encrypt(recipient_hex, plaintext).await?;
-}
+```rust
+use leptos_nostr_auth::nostr::key::PublicKey;
+
+let peer = PublicKey::parse(peer_npub_or_hex)?;
+let ciphertext = auth_result.nip44_encrypt(&peer, plaintext).await?;
+let plaintext = auth_result.nip44_decrypt(&peer, &ciphertext).await?;
 ```
+
+| Situation | Result |
+| --- | --- |
+| Read-only session, any peer | `EncryptionUnavailable` |
+| Extension or bunker session on a server, on-curve peer | `EncryptionUnavailable` |
+| Off-curve peer, any other session, including a closed bunker | `InvalidPublicKey` |
+| Key session: bad payload, wrong key, empty plaintext | `EncryptionFailed(text)` |
+| Key session on a server | Works |
+| Extension throws, rejects or returns a non-string | `EncryptionFailed(text)` |
+| Missing `window`, `nostr`, `nip44` or method | `ExtensionNotFound` |
+| `getPublicKey` rejected or thrown; malformed; another account | `ExtensionRejected`; `InvalidPublicKey`; `SignerKeyMismatch` |
+| Bunker signer refuses or answers with something malformed | `EncryptionFailed(text)` |
+| Bunker closed, for a valid peer | `BunkerSessionClosed` |
+| Bunker timeout, approval, socket or relay failure | `BunkerTimeout`, `BunkerAuthRequired`, `BunkerConnectionFailed` |
+
+Nothing reaches a signer for an off-curve peer. `PublicKey::from_hex` does not check the curve, so the
+crate does, first. From an extension, `InvalidPublicKey` can mean either a bad peer or a malformed
+`getPublicKey`.
+
+The crate adds no input to an error, but `EncryptionFailed` text may come from the signer: sanitized
+and capped on a bunker, unfiltered on an extension. On a key session it can give a byte position within
+a plaintext, never its bytes. Match the variant, not the text.
+
+Decrypting a payload near NIP-44's size limit can need gigabytes of memory, so bound the size of
+untrusted payloads first.
 
 ## Session Restore
 
@@ -604,6 +633,9 @@ pub enum NostrAuthError {
 
     // Signing
     SigningFailed(String),
+    // NIP-44: this session cannot encrypt, and a failure in either direction
+    EncryptionUnavailable,
+    EncryptionFailed(String),
     // Another key than the session's. As `restore_error`, the session is kept and retried on the next load, or for a passkey on the next login click
     SignerKeyMismatch,
 
@@ -676,11 +708,16 @@ All elements emit `data-nostr-*` attributes for styling:
 - A persisted relay URL that `nostr`'s `RelayUrl` rejects (not `ws`/`wss`, or a second `://`) now
   fails restore, which deletes that session.
 - A `bunker://` URI may list at most five relays after duplicates are removed. More are refused.
-- `BunkerSession::nip44_encrypt` and `nip44_decrypt` now reject a counterparty that is not a hex
-  public key with `InvalidPublicKey`, before anything is sent.
-- A signer's refusal of `sign_event`, `nip44_encrypt` or `nip44_decrypt` is now
-  `SigningFailed(text)`, not `BunkerConnectionFailed(text)`. A refusal at login stays
-  `BunkerConnectionFailed`.
+- `AuthResult` now has `nip44_encrypt` and `nip44_decrypt`, async, on every login method, and
+  implements `AsyncNip44`. `PasskeySession` and `RawKeySession` gain sync `nip44_*`. New
+  `NostrAuthError::EncryptionUnavailable`, for a read-only session and for an extension or bunker
+  session on a server, where the stubs returned `SigningFailed`, and `NostrAuthError::EncryptionFailed`.
+- `Nip07Handle::nip44_*` and `BunkerSession::nip44_*` now take `peer: &PublicKey`, not a hex string.
+  A peer that is not on the curve is `InvalidPublicKey` on every method, before anything is sent.
+  Before, an extension was handed whatever it was given, and a bunker path only checked the hex.
+- A signer's refusal of `sign_event` is now `SigningFailed(text)`, and of `nip44_encrypt` or
+  `nip44_decrypt` is `EncryptionFailed(text)`, not `BunkerConnectionFailed(text)`. A refusal at login
+  stays `BunkerConnectionFailed`.
 - Logging out, or a login or restore replacing a session, closes that bunker session for good, even
   when the new login is the same identity. Pending requests and later calls on any clone, including
   one kept in your own state, fail with the new `NostrAuthError::BunkerSessionClosed` and never
@@ -720,7 +757,8 @@ All elements emit `data-nostr-*` attributes for styling:
   `ExtensionNotFound`, including from `Nip07Handle::get_public_key`. Before, it raised an uncaught
   `TypeError` and the future never finished.
 - A present extension method that throws synchronously is now a rejection, the same as an asynchronous
-  one: `SigningFailed(msg)` for `signEvent` and `nip44_*`, `ExtensionRejected(msg)` for `getPublicKey`.
+  one: `SigningFailed(msg)` for `signEvent`, `EncryptionFailed(msg)` for `nip44_*`,
+  `ExtensionRejected(msg)` for `getPublicKey`.
   Before, it raised an uncaught `TypeError` and the future never finished.
 - A stored session of any method is now kept when restore fails for any reason, including another
   key and data that can never restore. The user is logged out, `is_restoring` ends false, and restore
@@ -744,8 +782,9 @@ All elements emit `data-nostr-*` attributes for styling:
   never answers.
 - Extension `nip44_encrypt` and `nip44_decrypt` now call `getPublicKey` first and return
   `SignerKeyMismatch` on a switch. A missing `nip44` is `ExtensionNotFound`. A throwing or rejecting
-  `getPublicKey` here is `ExtensionRejected(msg)`, and a malformed key from it is `InvalidPublicKey`;
-  these two are new, since these methods only returned `SigningFailed` before.
+  `getPublicKey` here is `ExtensionRejected(msg)`, and a malformed key from it is `InvalidPublicKey`.
+  A throwing or rejecting `nip44`, or a non-string return, is `EncryptionFailed(msg)`. All of these
+  methods' failures were `SigningFailed` before.
 - A stored passkey no longer prompts on page load. `show_login` starts a passkey prompt when a passkey session is stored, unless the user has not interacted with the page yet.
 - `PasskeySession::authenticate` now takes `rp_id` first: `authenticate(rp_id, credential_id)`. It always sends `rpId`.
 - `create` no longer filters on `authenticatorAttachment`, so security keys and cross-device passkeys are offered. An authenticator without PRF reaches `create`, gets `PasskeyNotSupported` and leaves a credential behind on each retry. The variant's text is now "This browser or authenticator does not support the WebAuthn PRF extension".

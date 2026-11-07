@@ -92,6 +92,34 @@ impl PasskeySession {
         super::sign_with_keys(&self.keys, event_json)
     }
 
+    /// NIP-44 v2 encrypt with the in-memory key.
+    ///
+    /// # Errors
+    ///
+    /// [`NostrAuthError::InvalidPublicKey`] when `peer` is not on the curve, and
+    /// [`NostrAuthError::EncryptionFailed`] when encryption fails.
+    pub fn nip44_encrypt(
+        &self,
+        peer: &PublicKey,
+        plaintext: &str,
+    ) -> Result<String, NostrAuthError> {
+        super::encrypt_with_keys(&self.keys, peer, plaintext)
+    }
+
+    /// NIP-44 decrypt with the in-memory key.
+    ///
+    /// # Errors
+    ///
+    /// [`NostrAuthError::InvalidPublicKey`] when `peer` is not on the curve, and
+    /// [`NostrAuthError::EncryptionFailed`] when decryption fails.
+    pub fn nip44_decrypt(
+        &self,
+        peer: &PublicKey,
+        ciphertext: &str,
+    ) -> Result<String, NostrAuthError> {
+        super::decrypt_with_keys(&self.keys, peer, ciphertext)
+    }
+
     /// Wraps known keys for tests outside this module.
     #[cfg(test)]
     pub(crate) fn for_tests(keys: Keys, credential_id: Vec<u8>) -> Self {
@@ -592,6 +620,22 @@ mod tests {
             keys.public_key().to_hex(),
             "f8d6557dfcca8c44b8b9d16d33e3faa77e05286f992067a5453441f8b13d582e"
         );
+    }
+
+    #[cfg(not(feature = "ssr"))]
+    #[test]
+    fn nip44_uses_the_derived_key() {
+        let input: Vec<u8> = (0..32).collect();
+        let keys = super::imp::keys_from_prf_output(&input).unwrap();
+        assert_eq!(
+            keys.public_key().to_hex(),
+            "f8d6557dfcca8c44b8b9d16d33e3faa77e05286f992067a5453441f8b13d582e"
+        );
+        let s = PasskeySession::for_tests(keys, vec![1]);
+        let peer = Keys::generate();
+        let ct = s.nip44_encrypt(&peer.public_key(), "hi").unwrap();
+        let opened = nostr::nips::nip44::decrypt(peer.secret_key(), &s.public_key, &ct).unwrap();
+        assert_eq!(opened, "hi");
     }
 
     #[cfg(not(feature = "ssr"))]
