@@ -102,7 +102,7 @@ fn HomePage() -> impl IntoView {
                                 wasm_bindgen_futures::spawn_local(async move {
                                     match auth_result.sign_event(&event_json).await {
                                         Ok(signed) => {
-                                            let preview = &signed[..signed.len().min(80)];
+                                            let preview: String = signed.chars().take(80).collect();
                                             set_sign_output.set(format!("Signed: {preview}…"));
                                         }
                                         Err(e) => set_sign_output.set(format!("Error: {e}")),
