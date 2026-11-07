@@ -4,6 +4,10 @@ use crate::types::NostrAuthError;
 
 /// An active passkey session. The secret key is in-memory only; derived anew on each login.
 ///
+/// On drop, nostr overwrites this session's copy with `non_secure_erase`: best effort, not
+/// `zeroize`. The derivation's hash digest and hash state are not wiped, and NIP-44 calls leave
+/// derived keys and plaintext unwiped.
+///
 /// A synced passkey gives the same key on devices using this crate with the same RP ID. Whether a
 /// passkey syncs is up to its provider.
 #[derive(Clone)]

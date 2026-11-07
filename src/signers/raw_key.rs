@@ -5,22 +5,23 @@ use crate::types::NostrAuthError;
 
 /// In-memory raw key session. Used for NIP-49 ncryptsec and (feature-gated) raw nsec paste.
 ///
-/// The private key is held in memory for the lifetime of this struct. Each clone holds an
-/// independent copy — avoid unnecessary cloning. The nostr crate's `SecretKey` implements
-/// `ZeroizeOnDrop` internally, so each copy is zeroed when dropped.
+/// The key stays in wasm memory for this struct's life, and each clone holds its own copy. On drop,
+/// nostr overwrites that copy with `non_secure_erase`: best effort, not `zeroize`, and it cannot
+/// reach bytes the compiler moved or copied. NIP-44 calls leave derived keys and plaintext unwiped.
+/// Logout ends use of the key; it does not prove the memory is clean.
 #[derive(Clone)]
 pub struct RawKeySession {
     /// The authenticated user's public key.
     pub public_key: PublicKey,
-    /// In-memory keypair; `Keys` erases its secret key on drop with a non-secure erase.
+    /// In-memory keypair. On drop `Keys` overwrites its own secret bytes with `non_secure_erase`.
     keys: Keys,
 }
 
 impl RawKeySession {
     /// Decrypt a NIP-49 `ncryptsec1...` string with a password.
     ///
-    /// scrypt derivation is CPU-intensive — call this inside `spawn_local` to avoid
-    /// blocking the browser's main thread while the spinner shows.
+    /// scrypt runs synchronously and blocks the calling thread. `spawn_local` does not move it off
+    /// the main thread, so callers wanting a spinner must let the browser paint first.
     ///
     /// # Errors
     ///
@@ -165,6 +166,34 @@ mod tests {
     }
 
     #[test]
+    fn ncryptsec_errors_quote_no_input() {
+        use nostr::key::SecretKey;
+        let hex = "22".repeat(32);
+        let nsec = SecretKey::from_hex(&hex).unwrap().to_bech32().unwrap();
+        let mut bytes = EncryptedSecretKey::from_bech32(CRYPTSEC).unwrap().as_vec();
+        *bytes.get_mut(1).unwrap() = EncryptedSecretKey::MAX_LOG_N + 1;
+        let over = EncryptedSecretKey::from_slice(&bytes)
+            .unwrap()
+            .to_bech32()
+            .unwrap();
+        for input in [nsec.as_str(), hex.as_str(), over.as_str()] {
+            let Err(error) = RawKeySession::from_ncryptsec(input, "SENTINELPASSWORD") else {
+                unreachable!("{input} opened");
+            };
+            assert!(matches!(error, NostrAuthError::InvalidNcryptsec(_)));
+            let shown = format!("{error} {error:?}");
+            for quoted in [
+                nsec.as_str(),
+                hex.as_str(),
+                over.as_str(),
+                "SENTINELPASSWORD",
+            ] {
+                assert!(!shown.contains(quoted), "{shown}");
+            }
+        }
+    }
+
+    #[test]
     fn raw_key_signing_verifies() {
         let s = RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap();
         let unsigned = format!(
@@ -199,5 +228,41 @@ mod tests {
         );
         let signed = s.sign_event(&unsigned).unwrap();
         Event::from_json(signed).unwrap().verify().unwrap();
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod wasm_tests {
+    use super::*;
+    use crate::signers::memory_probe::byte_at;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    fn holds_run(start: usize, len: usize, run: &[u8; 32]) -> bool {
+        (start..start + len - run.len()).any(|at| {
+            run.iter()
+                .zip(at..)
+                .all(|(byte, address)| byte_at(address) == *byte)
+        })
+    }
+
+    // Pins upstream's erase within one boxed value. Says nothing about NIP-44 or other copies.
+    #[wasm_bindgen_test]
+    fn keys_drop_overwrites_secret() {
+        let keys = Box::new(Keys::generate());
+        let run = keys.secret_key().secret_bytes();
+        let start = core::ptr::from_ref::<Keys>(&keys).addr();
+        let len = core::mem::size_of::<Keys>();
+        assert!(holds_run(start, len, &run));
+        drop(keys);
+        assert!(!holds_run(start, len, &run));
+    }
+
+    #[wasm_bindgen_test]
+    fn holds_run_finds_a_planted_run() {
+        let run = Keys::generate().secret_key().secret_bytes();
+        let boxed = Box::new(run);
+        let start = core::ptr::from_ref::<[u8; 32]>(&boxed).addr();
+        assert!(holds_run(start.checked_sub(4).unwrap(), 72, &run));
     }
 }
