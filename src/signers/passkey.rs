@@ -29,6 +29,10 @@ impl PasskeySession {
     /// for the new credential. If that fails the credential still exists, and the error says to use
     /// it rather than create another.
     ///
+    /// Dropping the future takes the browser's prompt down, where the browser honours it. To keep
+    /// the prompt through a timeout or `select!`, keep polling the same future, or spawn it. A
+    /// credential may already exist after a dropped `create`.
+    ///
     /// # Errors
     ///
     /// Returns an error if the passkey creation fails.
@@ -47,6 +51,9 @@ impl PasskeySession {
     /// for discoverable login, where the browser presents all stored passkeys
     /// for this origin and the user picks one (used for "I already have a
     /// passkey" with no prior session).
+    ///
+    /// Dropping the future takes the browser's prompt down, where the browser honours it. To keep
+    /// the prompt through a timeout or `select!`, keep polling the same future, or spawn it.
     ///
     /// # Errors
     ///

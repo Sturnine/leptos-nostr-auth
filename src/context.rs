@@ -69,7 +69,8 @@ pub struct NostrAuthContext {
     /// it. A failed or cancelled prompt keeps the session and opens the modal.
     pub show_login: Callback<()>,
     /// Log out: clears auth state, removes the localStorage session and closes a bunker session
-    /// for good, including for clones kept elsewhere.
+    /// for good, including for clones kept elsewhere. It also closes the login modal and cancels a
+    /// login in it.
     pub logout: Callback<()>,
 }
 

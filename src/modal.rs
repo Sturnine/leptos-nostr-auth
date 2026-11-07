@@ -230,7 +230,8 @@ pub fn NostrAuthModal(
             platform.supports_webauthn &= detected.supports_webauthn;
         });
         spawn_local(async move {
-            let visible = passkey_option_visible(detected.supports_webauthn, prf_capability().await);
+            let visible =
+                passkey_option_visible(detected.supports_webauthn, prf_capability().await);
             set_platform.update(|platform| platform.supports_webauthn = visible);
         });
     });
