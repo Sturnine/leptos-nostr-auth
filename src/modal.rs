@@ -199,19 +199,26 @@ fn deliver(
 /// Can be used standalone (you manage the `open` signal) or via [`NostrAuthProvider`].
 ///
 /// # Example
-/// ```rust,ignore
-/// let (show, set_show) = signal(false);
-/// view! {
-///     <button on:click=move |_| set_show.set(true)>"Login"</button>
-///     <NostrAuthModal
-///         open=show.into()
-///         on_auth=Callback::new(move |result| {
-///             /* handle AuthResult */
-///             set_show.set(false);
-///         })
-///         on_close=Callback::new(move |()| set_show.set(false))
-///     />
+/// ```rust,no_run
+/// use leptos::prelude::*;
+/// use leptos_nostr_auth::{AuthResult, NostrAuthModal};
+///
+/// #[component]
+/// fn App() -> impl IntoView {
+///     let (show, set_show) = signal(false);
+///     view! {
+///         <button on:click=move |_| set_show.set(true)>"Login"</button>
+///         <NostrAuthModal
+///             open=show
+///             on_auth=move |result: AuthResult| {
+///                 let _ = result.public_key();
+///                 set_show.set(false);
+///             }
+///             on_close=move |()| set_show.set(false)
+///         />
+///     }
 /// }
+/// # fn main() {}
 /// ```
 ///
 /// # Typed secrets
@@ -236,9 +243,10 @@ pub fn NostrAuthModal(
     #[prop(into)]
     open: Signal<bool>,
     /// Called with the `AuthResult` after successful login.
+    #[prop(into)]
     on_auth: Callback<AuthResult>,
     /// Fired by the close button, backdrop click and Escape, not by a parent closing `open`.
-    #[prop(optional)]
+    #[prop(optional, into)]
     on_close: Option<Callback<()>>,
     /// Library configuration.
     #[prop(optional)]

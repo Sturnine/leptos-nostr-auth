@@ -118,14 +118,19 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 /// Renders [`NostrAuthModal`] internally so you don't need to add it yourself.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust,no_run
+/// use leptos::prelude::*;
+/// use leptos_nostr_auth::NostrAuthProvider;
+///
+/// #[component]
 /// fn App() -> impl IntoView {
 ///     view! {
 ///         <NostrAuthProvider>
-///             <HomePage />
+///             <p>"Your app"</p>
 ///         </NostrAuthProvider>
 ///     }
 /// }
+/// # fn main() {}
 /// ```
 #[expect(
     clippy::too_many_lines,

@@ -2,25 +2,36 @@
 //!
 //! # Quick start
 //!
-//! ```rust,ignore
-//! // Wrap your app root:
-//! <NostrAuthProvider>
-//!     <App/>
-//! </NostrAuthProvider>
+//! ```rust,no_run
+//! use leptos::prelude::*;
+//! use leptos_nostr_auth::{NostrAuthProvider, use_nostr_auth};
 //!
-//! // Anywhere inside the tree:
-//! let auth = use_nostr_auth();
-//! view! {
-//!     <Show when=move || auth.is_authenticated.get()>
-//!         <p>"Logged in as " {move || auth.npub.get().unwrap_or_default()}</p>
-//!     </Show>
-//!     <button on:click=move |_| auth.show_login.run(())>"Login"</button>
+//! #[component]
+//! fn App() -> impl IntoView {
+//!     view! {
+//!         <NostrAuthProvider>
+//!             <HomePage />
+//!         </NostrAuthProvider>
+//!     }
 //! }
+//!
+//! #[component]
+//! fn HomePage() -> impl IntoView {
+//!     let auth = use_nostr_auth();
+//!     view! {
+//!         <Show when=move || auth.is_authenticated.get()>
+//!             <p>"Logged in as " {move || auth.npub.get().unwrap_or_default()}</p>
+//!         </Show>
+//!         <button on:click=move |_| auth.show_login.run(())>"Login"</button>
+//!     }
+//! }
+//! # fn main() {}
 //! ```
 //!
 //! # Feature flags
 //!
-//! - `insecure_nsec_input` — enables raw nsec/hex key paste (XSS risk; opt-in only)
+//! - `insecure_nsec_input` — enables raw nsec/hex key paste (XSS risk; opt-in only). Passkey and
+//!   ncryptsec sessions also hold the raw key in wasm memory: see "Security limits" in the README.
 
 // Layout queries on the modal's view tree exceed the default depth limit under `ssr`.
 #![recursion_limit = "256"]

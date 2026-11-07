@@ -342,8 +342,11 @@ impl LoginMethod {
 /// Configuration for [`crate::modal::NostrAuthModal`] and [`crate::context::NostrAuthProvider`].
 ///
 /// Construct with struct update syntax from [`Default`]:
-/// ```rust,ignore
+/// ```rust
+/// use leptos_nostr_auth::NostrAuthConfig;
+///
 /// let config = NostrAuthConfig { rp_id: Some("myapp.com".to_owned()), ..Default::default() };
+/// assert_eq!(config.rp_id.as_deref(), Some("myapp.com"));
 /// ```
 #[derive(Clone)]
 #[expect(
