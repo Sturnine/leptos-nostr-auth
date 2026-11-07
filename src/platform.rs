@@ -131,7 +131,7 @@ impl Platform {
 }
 
 /// The RP ID every ceremony uses: a non-empty configured value, else a non-empty hostname.
-pub(crate) fn pick_rp_id(configured: Option<&str>, hostname: Option<String>) -> String {
+pub fn pick_rp_id(configured: Option<&str>, hostname: Option<String>) -> String {
     configured
         .filter(|rp_id| !rp_id.is_empty())
         .map(str::to_owned)
@@ -140,7 +140,7 @@ pub(crate) fn pick_rp_id(configured: Option<&str>, hostname: Option<String>) -> 
 }
 
 /// [`pick_rp_id`] with this page's hostname.
-pub(crate) fn effective_rp_id(configured: Option<&str>) -> String {
+pub fn effective_rp_id(configured: Option<&str>) -> String {
     pick_rp_id(
         configured,
         web_sys::window().and_then(|w| w.location().hostname().ok()),
@@ -159,24 +159,24 @@ fn read_has_been_active(navigator: &JsValue) -> Option<bool> {
 // Sticky, not `isActive`: a press held past the 5 s transient window, or an earlier `window.open` in the handler, reads false inside a real click.
 /// Whether the user has interacted with this document; `None` when the browser cannot say.
 #[cfg(not(feature = "ssr"))]
-pub(crate) fn page_has_been_active() -> Option<bool> {
+pub fn page_has_been_active() -> Option<bool> {
     read_has_been_active(&JsValue::from(web_sys::window()?.navigator()))
 }
 
 /// Server stub for `page_has_been_active`.
 #[cfg(feature = "ssr")]
-pub(crate) const fn page_has_been_active() -> Option<bool> {
+pub const fn page_has_been_active() -> Option<bool> {
     None
 }
 
 /// `show_login` may prompt unless the browser says the user has not interacted yet.
-pub(crate) fn prompt_allowed(been_active: Option<bool>) -> bool {
+pub fn prompt_allowed(been_active: Option<bool>) -> bool {
     been_active != Some(false)
 }
 
 /// `extension:prf` from `PublicKeyCredential.getClientCapabilities()`; `None` when unknown.
 #[cfg(not(feature = "ssr"))]
-pub(crate) async fn prf_capability() -> Option<bool> {
+pub async fn prf_capability() -> Option<bool> {
     use wasm_bindgen::JsCast as _;
 
     let window = web_sys::window()?;
@@ -199,16 +199,12 @@ pub(crate) async fn prf_capability() -> Option<bool> {
 
 /// Server stub for `prf_capability`.
 #[cfg(feature = "ssr")]
-#[expect(
-    clippy::unused_async,
-    reason = "matches the browser signature, which awaits"
-)]
-pub(crate) async fn prf_capability() -> Option<bool> {
+pub async fn prf_capability() -> Option<bool> {
     None
 }
 
 /// Hide passkeys only when WebAuthn is absent or the browser says PRF is unavailable.
-pub(crate) fn passkey_option_visible(has_public_key_credential: bool, prf: Option<bool>) -> bool {
+pub fn passkey_option_visible(has_public_key_credential: bool, prf: Option<bool>) -> bool {
     has_public_key_credential && prf != Some(false)
 }
 

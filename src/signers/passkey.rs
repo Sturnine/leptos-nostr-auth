@@ -96,7 +96,7 @@ impl PasskeySession {
     }
 }
 
-pub(crate) use imp::Pending as PendingPasskey;
+pub use imp::Pending as PendingPasskey;
 
 /// Browser implementation.
 #[cfg(not(feature = "ssr"))]
@@ -119,7 +119,7 @@ mod imp {
     ///
     /// The promise is converted when the ceremony starts. An attempt aborted before its first poll
     /// would otherwise leave a rejection with no handler.
-    pub(crate) struct Pending {
+    pub struct Pending {
         /// The ceremony's promise.
         credential: JsFuture,
         /// The RP ID for a `create`'s follow-up. `None` on a `get`.
@@ -128,7 +128,7 @@ mod imp {
 
     impl Pending {
         /// Await the ceremony and derive the session.
-        pub(crate) async fn finish(self) -> Result<PasskeySession, NostrAuthError> {
+        pub async fn finish(self) -> Result<PasskeySession, NostrAuthError> {
             let credential = await_credential(self.credential).await?;
             let Some(rp_id) = self.create_rp_id else {
                 return derive_from_credential(&credential);
@@ -459,7 +459,7 @@ mod imp {
     use crate::types::NostrAuthError;
 
     /// Server stub for the browser's in-flight ceremony.
-    pub(crate) struct Pending;
+    pub struct Pending;
 
     impl Pending {
         /// Server stub for `finish`.
@@ -467,7 +467,7 @@ mod imp {
             clippy::unused_async,
             reason = "matches the browser signature, which awaits"
         )]
-        pub(crate) async fn finish(self) -> Result<PasskeySession, NostrAuthError> {
+        pub async fn finish(self) -> Result<PasskeySession, NostrAuthError> {
             Err(NostrAuthError::PasskeyFailed(NOT_ON_SERVER.into()))
         }
     }
