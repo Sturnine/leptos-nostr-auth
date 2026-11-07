@@ -107,6 +107,15 @@ impl Attempt {
     }
 }
 
+/// Links the provider to the modal it renders. A consumer's own modal never sees this.
+#[derive(Clone, Copy)]
+pub(crate) struct ProviderLink {
+    /// The provider's modal's login in flight, cancelled synchronously on logout and removal.
+    pub(crate) attempt: Attempt,
+    /// Whether a session is live, watched for a restore landing.
+    pub(crate) is_authenticated: Signal<bool>,
+}
+
 /// What Escape does.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum EscapeAction {
@@ -229,7 +238,8 @@ pub fn NostrAuthModal(
     let (step, set_step) = signal(ModalStep::MethodSelect);
     let (error, set_error) = signal(Option::<String>::None);
 
-    let attempt = Attempt::new();
+    let link = use_context::<ProviderLink>();
+    let attempt = link.map_or_else(Attempt::new, |link| link.attempt);
     on_cleanup(move || {
         attempt.cancel();
     });
@@ -252,6 +262,21 @@ pub fn NostrAuthModal(
             to_list();
         }
     });
+
+    if let Some(link) = link {
+        Effect::watch(
+            move || link.is_authenticated.get(),
+            // On a step the user chose a path and may have typed a secret, so a restore must not
+            // take that away. The list implies no login is running. `authed` matters because a
+            // removal in another tab sets auth to `None` under an idle modal.
+            move |&authed, _, _| {
+                if authed && step.get_untracked() == ModalStep::MethodSelect {
+                    close();
+                }
+            },
+            false,
+        );
+    }
 
     let _ = use_event_listener(use_window(), leptos::ev::keydown, {
         move |e| {

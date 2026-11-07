@@ -4,6 +4,7 @@
 )]
 use codee::string::JsonSerdeCodec;
 use futures::future::{AbortHandle, Abortable};
+use leptos::context::Provider;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_use_event_listener::use_event_listener;
@@ -11,7 +12,7 @@ use leptos_use_storage::{UseStorageError, UseStorageOptions, use_local_storage_w
 use leptos_use_window::use_window;
 use nostr::nips::nip19::ToBech32;
 
-use crate::modal::NostrAuthModal;
+use crate::modal::{Attempt, NostrAuthModal, ProviderLink};
 use crate::platform::{effective_rp_id, page_has_been_active, prompt_allowed};
 use crate::storage::{
     LoginStorageAction, RestorePlan, begin_passkey_restore, initial_restoring,
@@ -163,6 +164,7 @@ pub fn NostrAuthProvider(
     let (settled, set_settled) = signal(!hydrating);
     let (restore_error, set_restore_error) = signal(None::<NostrAuthError>);
 
+    let attempt = Attempt::new();
     let restore_handle = StoredValue::new(None::<AbortHandle>);
     // The pubkey of a login whose failed write must delete what it could not replace.
     let clear_on_write_failure = StoredValue::new(None::<String>);
@@ -199,6 +201,9 @@ pub fn NostrAuthProvider(
             )
         });
         if logged_out {
+            if attempt.cancel() {
+                set_show_modal.set(false);
+            }
             cancel_restore();
             replace_auth(auth, set_auth, None);
         }
@@ -335,6 +340,8 @@ pub fn NostrAuthProvider(
     let logout = Callback::new({
         let delete = delete_stored_session.clone();
         move |(): ()| {
+            attempt.cancel();
+            set_show_modal.set(false);
             cancel_restore();
             delete();
             replace_auth(auth, set_auth, None);
@@ -382,6 +389,11 @@ pub fn NostrAuthProvider(
         set_show_modal.set(false);
     });
 
+    let link = ProviderLink {
+        attempt,
+        is_authenticated,
+    };
+
     view! {
         // Show a subtle loading indicator while restoring (optional — UX polish)
         <Show when=move || restoring.get()>
@@ -398,12 +410,14 @@ pub fn NostrAuthProvider(
 
         {children()}
 
-        <NostrAuthModal
-            open=Signal::from(show_modal)
-            on_auth=on_auth_callback
-            on_close=on_close_callback
-            config=cfg.get_value()
-        />
+        <Provider value=link>
+            <NostrAuthModal
+                open=Signal::from(show_modal)
+                on_auth=on_auth_callback
+                on_close=on_close_callback
+                config=cfg.get_value()
+            />
+        </Provider>
     }
 }
 
