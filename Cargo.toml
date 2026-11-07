@@ -62,6 +62,8 @@ js-sys               = "0.3"
 
 # Web platform APIs — types compile on all targets; actual API calls are cfg-gated
 web-sys = { version = "0.3", features = [
+  "AbortController",
+  "AbortSignal",
   "Window",
   "Navigator",
   "console",

@@ -115,6 +115,23 @@ mod imp {
     /// its own context. Changing them changes every user's identity.
     pub(super) const PRF_SALT: &[u8] = b"nostr-key-v1";
 
+    /// Takes the browser's prompt down when the ceremony's future is dropped.
+    struct AbortOnDrop(web_sys::AbortController);
+
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    /// Set a new controller's signal on the outer options object, not on `publicKey`.
+    fn abort_guard(options: &Object) -> Result<AbortOnDrop, NostrAuthError> {
+        let controller = web_sys::AbortController::new()
+            .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
+        set(options, "signal", &controller.signal());
+        Ok(AbortOnDrop(controller))
+    }
+
     /// A ceremony already started, whose result is not yet read.
     ///
     /// The promise is converted when the ceremony starts. An attempt aborted before its first poll
@@ -124,6 +141,8 @@ mod imp {
         credential: JsFuture,
         /// The RP ID for a `create`'s follow-up. `None` on a `get`.
         create_rp_id: Option<String>,
+        /// Must outlive the await on `credential`. A partial move of that field keeps it alive.
+        _abort: AbortOnDrop,
     }
 
     impl Pending {
@@ -230,6 +249,7 @@ mod imp {
         set(&pk_opts, "extensions", &extensions);
 
         set(&options, "publicKey", &pk_opts);
+        let abort = abort_guard(&options)?;
 
         let promise = credentials
             .create_with_options(&options.unchecked_into())
@@ -238,6 +258,7 @@ mod imp {
         Ok(Pending {
             credential: JsFuture::from(promise),
             create_rp_id: Some(rp_id.to_owned()),
+            _abort: abort,
         })
     }
 
@@ -295,6 +316,7 @@ mod imp {
         set(&pk_opts, "extensions", &extensions);
 
         set(&options, "publicKey", &pk_opts);
+        let abort = abort_guard(&options)?;
 
         let promise = credentials
             .get_with_options(&options.unchecked_into())
@@ -303,6 +325,7 @@ mod imp {
         Ok(Pending {
             credential: JsFuture::from(promise),
             create_rp_id: None,
+            _abort: abort,
         })
     }
 
