@@ -107,6 +107,36 @@ impl Attempt {
     }
 }
 
+/// What Escape does.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum EscapeAction {
+    /// Close the open modal.
+    Close,
+    /// Dismiss the approval link shown with the modal closed.
+    DismissPrompt,
+    /// Nothing is showing.
+    Nothing,
+}
+
+/// Decide what Escape does.
+const fn escape_action(open: bool, prompt_showing: bool) -> EscapeAction {
+    match (open, prompt_showing) {
+        (true, _) => EscapeAction::Close,
+        (false, true) => EscapeAction::DismissPrompt,
+        (false, false) => EscapeAction::Nothing,
+    }
+}
+
+/// Whether any method renders below the "More options" divider.
+fn has_more_options(methods: &[LoginMethod]) -> bool {
+    methods.iter().any(|method| match method {
+        LoginMethod::ReadOnly | LoginMethod::Ncryptsec => true,
+        #[cfg(feature = "insecure_nsec_input")]
+        LoginMethod::RawNsec => true,
+        LoginMethod::Extension | LoginMethod::Bunker | LoginMethod::Passkey => false,
+    })
+}
+
 /// Cancel any login and show the method list with no error.
 fn to_method_list(
     attempt: Attempt,
@@ -177,13 +207,22 @@ pub fn NostrAuthModal(
     // updates to real browser capabilities after hydration so the UI narrows reactively.
     // Effects don't run on the server, so SSR always renders the full method list.
     let (platform, set_platform) = signal(Platform::server_default());
-    Effect::new(move |_| {
+    Effect::new(move |previous: Option<()>| {
+        // Read first: `previous.is_none() || open.get()` would never subscribe on the first run.
+        let is_open = open.get();
+        if !is_open && previous.is_some() {
+            return;
+        }
         let detected = Platform::detect();
-        set_platform.set(detected);
+        // `&=`: setting it true here would flash a passkey button the check below then hides.
+        set_platform.update(|platform| {
+            platform.os = detected.os;
+            platform.has_nostr_extension = detected.has_nostr_extension;
+            platform.supports_webauthn &= detected.supports_webauthn;
+        });
         spawn_local(async move {
-            if !passkey_option_visible(detected.supports_webauthn, prf_capability().await) {
-                set_platform.update(|platform| platform.supports_webauthn = false);
-            }
+            let visible = passkey_option_visible(detected.supports_webauthn, prf_capability().await);
+            set_platform.update(|platform| platform.supports_webauthn = visible);
         });
     });
 
@@ -214,14 +253,13 @@ pub fn NostrAuthModal(
         }
     });
 
-    // Escape closes the modal; with the modal closed it dismisses the approval link instead.
     let _ = use_event_listener(use_window(), leptos::ev::keydown, {
         move |e| {
             if e.key() == "Escape" && config.get_value().close_on_escape {
-                if !open.get_untracked() && untrack(current_auth_url).is_some() {
-                    dismiss_auth_prompt();
-                } else {
-                    close();
+                match escape_action(open.get_untracked(), untrack(current_auth_url).is_some()) {
+                    EscapeAction::Close => close(),
+                    EscapeAction::DismissPrompt => dismiss_auth_prompt(),
+                    EscapeAction::Nothing => {}
                 }
             }
         }
@@ -447,6 +485,7 @@ fn StepMethodSelect(
     let show_bunker = has(&LoginMethod::Bunker);
     let show_readonly = has(&LoginMethod::ReadOnly);
     let show_ncryptsec = has(&LoginMethod::Ncryptsec);
+    let show_more = has_more_options(&methods);
     #[cfg(feature = "insecure_nsec_input")]
     let advanced = has(&LoginMethod::RawNsec).then(|| {
         view! {
@@ -479,7 +518,7 @@ fn StepMethodSelect(
                 <MethodButton
                     icon=icon_passkey
                     title="Passkey"
-                    subtitle="Face ID / Touch ID · syncs via iCloud Keychain"
+                    subtitle="Face ID, Touch ID or a security key"
                     badge=Some("Recommended")
                     on_click=move || set_step.set(ModalStep::Passkey)
                 />
@@ -495,16 +534,6 @@ fn StepMethodSelect(
                         (!matches!(platform.get().os, Os::Apple)).then_some("Recommended")
                     })
                     on_click=move || set_step.set(ModalStep::Extension)
-                />
-            </Show>
-
-            // ── Android: Amber hint before generic bunker ─────────────────────
-            <Show when=move || matches!(platform.get().os, Os::Android) && show_bunker>
-                <MethodButton
-                    icon=icon_amber
-                    title="Amber"
-                    subtitle="Open in Amber signer app via NIP-46"
-                    on_click=move || set_step.set(ModalStep::Bunker)
                 />
             </Show>
 
@@ -529,9 +558,11 @@ fn StepMethodSelect(
             </Show>
 
             // ── Divider ───────────────────────────────────────────────────────
-            <div data-nostr-divider="">
-                "More options"
-            </div>
+            <Show when=move || show_more>
+                <div data-nostr-divider="">
+                    "More options"
+                </div>
+            </Show>
 
             // ── ncryptsec (NIP-49) ────────────────────────────────────────────
             <Show when=move || show_ncryptsec>
@@ -615,9 +646,6 @@ fn icon_passkey() -> impl IntoView {
 }
 fn icon_bunker() -> impl IntoView {
     view! { <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M12 2a4 4 0 0 1 4 4v5H8V6a4 4 0 0 1 4-4z"/><circle cx="12" cy="16" r="1" fill="currentColor"/></svg> }
-}
-fn icon_amber() -> impl IntoView {
-    view! { <svg data-nostr-icon-amber="" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg> }
 }
 fn icon_read_only() -> impl IntoView {
     view! { <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> }
@@ -705,6 +733,9 @@ fn StepBunker(
     let timeout = config.bunker_timeout_secs;
 
     let connect = move || {
+        if loading.get_untracked() {
+            return;
+        }
         let uri_val = uri.get().trim().to_owned();
         if uri_val.is_empty() {
             set_error.set(Some("Please paste a bunker:// URI.".into()));
@@ -906,6 +937,9 @@ fn StepNcryptsec(
     let (loading, set_loading) = signal(false);
 
     let decrypt = move || {
+        if loading.get_untracked() {
+            return;
+        }
         let nc = ncryptsec.get().trim().to_owned();
         let pw = password.get();
         if nc.is_empty() {
@@ -1149,6 +1183,72 @@ mod tests {
             assert!(!attempt.cancel());
             drop(running);
         });
+    }
+
+    #[test]
+    fn escape_action_table() {
+        assert_eq!(escape_action(true, false), EscapeAction::Close);
+        assert_eq!(escape_action(true, true), EscapeAction::Close);
+        assert_eq!(escape_action(false, true), EscapeAction::DismissPrompt);
+        assert_eq!(escape_action(false, false), EscapeAction::Nothing);
+    }
+
+    #[test]
+    fn has_more_options_table() {
+        use LoginMethod::{Bunker, Extension, Ncryptsec, Passkey, ReadOnly};
+        assert!(!has_more_options(&[]));
+        assert!(!has_more_options(&[Extension, Bunker, Passkey]));
+        assert!(has_more_options(&[Extension, ReadOnly]));
+        assert!(has_more_options(&[Ncryptsec]));
+    }
+
+    #[cfg(feature = "insecure_nsec_input")]
+    #[test]
+    fn has_more_options_raw_nsec() {
+        assert!(has_more_options(&[LoginMethod::RawNsec]));
+    }
+
+    #[cfg(feature = "ssr")]
+    fn method_list_html(os: Os, allowed_methods: Vec<LoginMethod>) -> String {
+        let owner = Owner::new();
+        owner.with(|| {
+            let (platform, _) = signal(Platform {
+                os,
+                has_nostr_extension: false,
+                supports_webauthn: true,
+            });
+            let (_, set_step) = signal(ModalStep::MethodSelect);
+            let config = NostrAuthConfig {
+                allowed_methods,
+                ..NostrAuthConfig::default()
+            };
+            view! { <StepMethodSelect platform=platform config=config set_step=set_step /> }
+                .to_html()
+        })
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn method_list_divider_html() {
+        use LoginMethod::{Bunker, ReadOnly};
+        assert!(!method_list_html(Os::Other, vec![Bunker]).contains("data-nostr-divider"));
+        assert!(method_list_html(Os::Other, vec![Bunker, ReadOnly]).contains("data-nostr-divider"));
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn method_list_no_amber_on_android() {
+        let html = method_list_html(Os::Android, vec![LoginMethod::Bunker]);
+        assert!(!html.contains("Login with Amber"));
+        assert_eq!(html.matches("Login with Nostr Connect").count(), 1);
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn method_list_apple_subtitle() {
+        let html = method_list_html(Os::Apple, vec![LoginMethod::Passkey]);
+        assert!(html.contains("Face ID"));
+        assert!(!html.contains("iCloud"));
     }
 
     #[test]
