@@ -40,23 +40,18 @@
 pub mod context;
 /// Login modal UI component.
 pub mod modal;
-/// Platform capability detection (browser APIs, user-agent).
 pub(crate) mod platform;
 /// Authentication backends (NIP-07, NIP-46, passkey, ncryptsec, read-only).
 pub mod signers;
-/// Session restore logic (reads `PersistedSession` and reconnects the signer).
 pub(crate) mod storage;
 
-// Public re-exports
 pub use context::{NostrAuthContext, NostrAuthProvider, try_use_nostr_auth, use_nostr_auth};
 pub use modal::NostrAuthModal;
 pub use nostr;
 
-// Core types
 pub use signers::{BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle};
 pub use types::{
     AuthResult, LoginMethod, NostrAuthConfig, NostrAuthError, PersistedMethod, PersistedSession,
 };
 
-/// Core types: auth results, login methods, configuration, and errors.
 mod types;

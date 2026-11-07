@@ -16,7 +16,6 @@ fn send_future<'a, T: 'a, F: Future<Output = T> + 'a>(
     Box::pin(async move { send_wrapper::SendWrapper::new(make()).await })
 }
 
-/// Server futures need no wrapper.
 #[cfg(feature = "ssr")]
 fn send_future<'a, T: 'a, F: Future<Output = T> + Send + 'a>(
     make: impl FnOnce() -> F,

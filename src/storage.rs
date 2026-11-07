@@ -5,20 +5,16 @@ use crate::signers::{
 };
 use crate::types::{AuthResult, LoginMethod, NostrAuthError, PersistedMethod, PersistedSession};
 
-/// What the provider does about a stored session on mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestorePlan {
-    /// Persistence is off or nothing is stored.
     Nothing,
     /// The stored method left `allowed_methods`. No prompt, no network, session kept.
     NotAllowed,
-    /// Start a restore.
     Restore,
     /// A stored passkey, which restores only from the login click. No prompt, session kept.
     AwaitClick,
 }
 
-/// Decide the mount action from the persist flag, the stored session and the allowed methods.
 pub fn restore_plan(
     persist: bool,
     stored: Option<&PersistedSession>,
@@ -43,18 +39,13 @@ pub fn initial_restoring(hydrating: bool, plan: RestorePlan) -> bool {
     !hydrating && plan == RestorePlan::Restore
 }
 
-/// What a successful login does to the stored session.
 pub enum LoginStorageAction {
-    /// Leave storage alone.
     Keep,
-    /// Write the new session.
     Overwrite {
-        /// What to write.
         session: PersistedSession,
         /// Another identity is stored, and a failed write would let it return on reload.
         clear_on_failure: bool,
     },
-    /// Delete what is stored.
     Clear,
 }
 
@@ -82,7 +73,6 @@ pub fn login_storage_action(
     }
 }
 
-/// Whether a `storage` event means another tab removed the stored session.
 pub fn is_logout_storage_event(
     persist: bool,
     is_local_area: bool,
@@ -98,7 +88,6 @@ pub fn is_logout_storage_event(
     event_key.is_none_or(|key| key == storage_key && new_value.is_none())
 }
 
-/// The stored key and credential id of a passkey session.
 pub fn passkey_restore_target(
     session: &PersistedSession,
 ) -> Result<(PublicKey, Vec<u8>), NostrAuthError> {
@@ -117,14 +106,11 @@ pub fn passkey_restore_target(
 
 /// A passkey restore whose `get` has already started.
 pub struct PendingRestore {
-    /// The ceremony in flight.
     pending: PendingPasskey,
-    /// The key the ceremony must derive.
     stored_pk: PublicKey,
 }
 
 impl PendingRestore {
-    /// Await the ceremony and check the derived key against the stored one.
     pub async fn finish(self) -> Result<AuthResult, NostrAuthError> {
         let session = self.pending.finish().await?;
         if session.public_key != self.stored_pk {

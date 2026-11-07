@@ -1,8 +1,6 @@
 use leptos::prelude::*;
 use leptos_nostr_auth::{NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
 
-// Hydrate entry — browser calls this after loading the WASM bundle.
-// wasm_bindgen exports it so the JS glue code can invoke it on startup.
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn hydrate() {
@@ -10,8 +8,6 @@ pub fn hydrate() {
     leptos::mount::hydrate_body(App);
 }
 
-/// HTML shell — server renders this as the full outer document.
-/// `HydrationScripts` injects the WASM bundle URL + serialized reactive state.
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>

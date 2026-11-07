@@ -129,7 +129,6 @@ impl AuthResult {
         }
     }
 
-    /// Close a bunker session for good, for every clone. Other variants hold no connection.
     pub(crate) fn close_session(&self) {
         if let Self::Bunker(s) = self {
             s.close();
@@ -150,7 +149,6 @@ impl AuthResult {
         self.login_method().name()
     }
 
-    /// The `LoginMethod` that produces this result.
     const fn login_method(&self) -> LoginMethod {
         match self {
             Self::Extension(_) => LoginMethod::Extension,
@@ -198,7 +196,6 @@ impl AuthResult {
                 bunker_client_secret_hex: None,
                 passkey_credential_id: None,
             }),
-            // ncryptsec and raw nsec: key is not persisted (no safe way to store it)
             Self::Ncryptsec(_) => None,
             #[cfg(feature = "insecure_nsec_input")]
             Self::RawNsec(_) => None,
@@ -281,7 +278,6 @@ pub enum PersistedMethod {
 }
 
 impl PersistedMethod {
-    /// The login method a stored session of this kind needs to be allowed.
     pub(crate) const fn login_method(&self) -> LoginMethod {
         match self {
             Self::Extension => LoginMethod::Extension,

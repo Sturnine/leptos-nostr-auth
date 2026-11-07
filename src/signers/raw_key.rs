@@ -110,7 +110,6 @@ impl RawKeySession {
         super::decrypt_with_keys(&self.keys, peer, ciphertext)
     }
 
-    /// Wraps known keys for tests outside this module.
     #[cfg(test)]
     pub(crate) fn for_tests(keys: Keys) -> Self {
         Self {

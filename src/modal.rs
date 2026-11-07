@@ -19,31 +19,21 @@ use crate::signers::{
 };
 use crate::types::{AuthResult, LoginMethod, NostrAuthConfig, NostrAuthError};
 
-/// Which form is currently shown inside the modal.
 #[derive(Clone, PartialEq)]
 enum ModalStep {
-    /// Login method picker list.
     MethodSelect,
-    /// NIP-07 browser extension flow.
     Extension,
-    /// NIP-46 bunker URI entry flow.
     Bunker,
-    /// WebAuthn passkey flow.
     Passkey,
-    /// Read-only public key entry flow.
     ReadOnly,
-    /// NIP-49 ncryptsec password entry flow.
     Ncryptsec,
-    /// Security warning shown before the raw nsec entry step.
     #[cfg(feature = "insecure_nsec_input")]
     RawNsecWarn,
-    /// Raw nsec / hex key paste flow (requires `insecure_nsec_input`).
     #[cfg(feature = "insecure_nsec_input")]
     RawNsec,
 }
 
 impl ModalStep {
-    /// Header title displayed while this step is active.
     const fn title(&self) -> &'static str {
         match self {
             Self::MethodSelect => "Connect to Nostr",
@@ -58,12 +48,9 @@ impl ModalStep {
     }
 }
 
-/// Sub-step within the passkey flow.
 #[derive(Clone, PartialEq)]
 enum PasskeySubStep {
-    /// Choose between creating a new passkey or authenticating with an existing one.
     Choose,
-    /// WebAuthn ceremony in progress.
     Loading,
 }
 
@@ -73,7 +60,6 @@ enum PasskeySubStep {
 pub(crate) struct Attempt(StoredValue<Option<AbortHandle>>);
 
 impl Attempt {
-    /// No login in flight, stored under the current owner.
     pub(crate) fn new() -> Self {
         Self(StoredValue::new(None))
     }
@@ -84,7 +70,6 @@ impl Attempt {
         handle.map(|handle| handle.abort()).is_some()
     }
 
-    /// Record `body` as the login in flight, now, and return it wrapped.
     fn wrap(self, body: impl Future<Output = ()>) -> impl Future<Output = ()> {
         let (handle, registration) = AbortHandle::new_pair();
         let _ = self.0.try_set_value(Some(handle));
@@ -97,7 +82,6 @@ impl Attempt {
         }
     }
 
-    /// Run `body` as the login in flight.
     fn spawn(self, body: impl Future<Output = ()> + 'static) {
         spawn_local(self.wrap(body));
     }
@@ -108,22 +92,16 @@ impl Attempt {
 pub(crate) struct ProviderLink {
     /// The provider's modal's login in flight, cancelled synchronously on logout and removal.
     pub(crate) attempt: Attempt,
-    /// Whether a session is live, watched for a restore landing.
     pub(crate) is_authenticated: Signal<bool>,
 }
 
-/// What Escape does.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum EscapeAction {
-    /// Close the open modal.
     Close,
-    /// Dismiss the approval link shown with the modal closed.
     DismissPrompt,
-    /// Nothing is showing.
     Nothing,
 }
 
-/// Decide what Escape does.
 const fn escape_action(open: bool, prompt_showing: bool) -> EscapeAction {
     match (open, prompt_showing) {
         (true, _) => EscapeAction::Close,
@@ -132,7 +110,6 @@ const fn escape_action(open: bool, prompt_showing: bool) -> EscapeAction {
     }
 }
 
-/// Whether any method renders below the "More options" divider.
 fn has_more_options(methods: &[LoginMethod]) -> bool {
     methods.iter().any(|method| match method {
         LoginMethod::ReadOnly | LoginMethod::Ncryptsec => true,
@@ -142,7 +119,6 @@ fn has_more_options(methods: &[LoginMethod]) -> bool {
     })
 }
 
-/// Cancel any login and show the method list with no error.
 fn to_method_list(
     attempt: Attempt,
     set_step: WriteSignal<ModalStep>,
@@ -169,12 +145,10 @@ fn take_secret(set: WriteSignal<String>) -> Zeroizing<String> {
     Zeroizing::new(set.try_update(core::mem::take).unwrap_or_default())
 }
 
-/// Empty a secret signal and wipe its buffer.
 fn clear_secret(set: WriteSignal<String>) {
     drop(take_secret(set));
 }
 
-/// Reset the modal, then forward a finished login.
 fn deliver(
     attempt: Attempt,
     set_step: WriteSignal<ModalStep>,
@@ -332,7 +306,6 @@ pub fn NostrAuthModal(
     view! {
         <Portal>
             <Show when=move || open.get()>
-                // Backdrop
                 <div
                     data-nostr-backdrop=""
                     on:click={
@@ -343,7 +316,6 @@ pub fn NostrAuthModal(
                         }
                     }
                 >
-                    // Modal box — stop click propagation so backdrop doesn't close when clicking inside
                     <div
                         role="dialog"
                         aria-modal="true"
@@ -417,7 +389,6 @@ pub fn NostrAuthModal(
 
                         <AuthUrlPrompt />
 
-                        // Error display
                         <Show when=move || error.get().is_some()>
                             <div
                                 role="alert"
@@ -461,7 +432,6 @@ pub fn NostrAuthModal(
     }
 }
 
-// ─── Approval link ───────────────────────────────────────────────────────────
 
 /// The signer's approval link. A click link, never a popup, with the full URL as its text, because
 /// a hostile signer can send a phishing link.
@@ -487,7 +457,6 @@ fn AuthUrlPrompt() -> impl IntoView {
     }
 }
 
-// ─── Modal Header ────────────────────────────────────────────────────────────
 
 #[component]
 fn ModalHeader(
@@ -508,7 +477,6 @@ fn ModalHeader(
                         data-nostr-back=""
                         on:click=move |_| on_back.run(())
                     >
-                        // ← back arrow (inline SVG)
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M19 12H5M12 5l-7 7 7 7"/>
                         </svg>
@@ -533,7 +501,6 @@ fn ModalHeader(
     }
 }
 
-// ─── Step 1: Method Selection ────────────────────────────────────────────────
 
 #[component]
 fn StepMethodSelect(
@@ -571,13 +538,11 @@ fn StepMethodSelect(
     #[cfg(not(feature = "insecure_nsec_input"))]
     let advanced = ();
 
-    // Reactive closures: re-evaluate when platform signal changes after hydration
     let show_passkey = move || platform.get().supports_webauthn && passkey_allowed;
 
     view! {
         <div data-nostr-methods="">
 
-            // ── Apple: passkey first ──────────────────────────────────────────
             <Show when=move || matches!(platform.get().os, Os::Apple) && show_passkey()>
                 <MethodButton
                     icon=icon_passkey
@@ -588,7 +553,6 @@ fn StepMethodSelect(
                 />
             </Show>
 
-            // ── Browser extension ─────────────────────────────────────────────
             <Show when=move || platform.get().has_nostr_extension && extension_allowed>
                 <MethodButton
                     icon=icon_extension
@@ -601,7 +565,6 @@ fn StepMethodSelect(
                 />
             </Show>
 
-            // ── Nostr Connect (Bunker) ────────────────────────────────────────
             <Show when=move || show_bunker>
                 <MethodButton
                     icon=icon_bunker
@@ -611,7 +574,6 @@ fn StepMethodSelect(
                 />
             </Show>
 
-            // ── Non-Apple: passkey after bunker ───────────────────────────────
             <Show when=move || !matches!(platform.get().os, Os::Apple) && show_passkey()>
                 <MethodButton
                     icon=icon_passkey
@@ -621,14 +583,12 @@ fn StepMethodSelect(
                 />
             </Show>
 
-            // ── Divider ───────────────────────────────────────────────────────
             <Show when=move || show_more>
                 <div data-nostr-divider="">
                     "More options"
                 </div>
             </Show>
 
-            // ── ncryptsec (NIP-49) ────────────────────────────────────────────
             <Show when=move || show_ncryptsec>
                 <MethodButton
                     icon=icon_ncryptsec
@@ -638,7 +598,6 @@ fn StepMethodSelect(
                 />
             </Show>
 
-            // ── Read-Only ─────────────────────────────────────────────────────
             <Show when=move || show_readonly>
                 <MethodButton
                     icon=icon_read_only
@@ -648,13 +607,11 @@ fn StepMethodSelect(
                 />
             </Show>
 
-            // ── Raw nsec (feature-gated) ──────────────────────────────────────
             {advanced}
         </div>
     }
 }
 
-// ─── Method Button ────────────────────────────────────────────────────────────
 
 #[component]
 fn MethodButton(
@@ -692,7 +649,6 @@ fn MethodButton(
                     {subtitle}
                 </span>
             </span>
-            // Chevron
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M9 18l6-6-6-6"/>
             </svg>
@@ -700,7 +656,6 @@ fn MethodButton(
     }
 }
 
-// ─── Icons (inline SVG) ───────────────────────────────────────────────────────
 
 fn icon_extension() -> impl IntoView {
     view! { <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/></svg> }
@@ -722,7 +677,6 @@ fn icon_warning() -> impl IntoView {
     view! { <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> }
 }
 
-// ─── Step 2a: Extension ───────────────────────────────────────────────────────
 
 #[component]
 fn StepExtension(
@@ -733,7 +687,6 @@ fn StepExtension(
 ) -> impl IntoView {
     let (loading, set_loading) = signal(true);
 
-    // Shared login attempt — called from both the mount Effect and the "Try again" button.
     let login = move || {
         set_error.set(None);
         set_loading.set(true);
@@ -751,7 +704,6 @@ fn StepExtension(
         });
     };
 
-    // Trigger extension login immediately on mount
     Effect::new(move |_| login());
 
     view! {
@@ -782,7 +734,6 @@ fn StepExtension(
     }
 }
 
-// ─── Step 2b: Bunker (NIP-46) ─────────────────────────────────────────────────
 
 #[component]
 fn StepBunker(
@@ -841,7 +792,6 @@ fn StepBunker(
                 "A bunker URI can hold a one-time secret, so keep it off shared screens. If a retry fails, the secret may be used up: get a new URI from your signer."
             </div>
 
-            // Amber tip — Android only
             <Show when=move || matches!(platform.get().os, Os::Android)>
                 <div
                     data-nostr-tip=""
@@ -879,7 +829,6 @@ fn StepBunker(
     }
 }
 
-// ─── Step 2c: Passkey ─────────────────────────────────────────────────────────
 
 #[component]
 fn StepPasskey(
@@ -889,7 +838,6 @@ fn StepPasskey(
     config: NostrAuthConfig,
 ) -> impl IntoView {
     let (sub_step, set_sub_step) = signal(PasskeySubStep::Choose);
-    // Store both in StoredValue so they're Copy-accessible across multiple Fn closures
     let rp_id = StoredValue::new(config.rp_id);
     let rp_name = StoredValue::new(config.rp_name);
 
@@ -954,7 +902,6 @@ fn StepPasskey(
     }
 }
 
-// ─── Step 2d: Read-Only ───────────────────────────────────────────────────────
 
 #[component]
 fn StepReadOnly(
@@ -1008,7 +955,6 @@ fn StepReadOnly(
     }
 }
 
-// ─── Step 2e: ncryptsec (NIP-49) ─────────────────────────────────────────────
 
 /// Give the browser a chance to paint before scrypt blocks the thread: two frames, or a 200 ms timer
 /// that browsers may throttle in a background tab. Best effort, no paint is guaranteed. A frame
@@ -1132,7 +1078,6 @@ fn StepNcryptsec(
     }
 }
 
-// ─── Step 2f: Raw nsec (feature-gated) ───────────────────────────────────────
 
 #[cfg(feature = "insecure_nsec_input")]
 #[component]

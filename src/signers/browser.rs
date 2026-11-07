@@ -2,7 +2,6 @@ use js_sys::{Object, Promise, Reflect, Uint8Array};
 use nostr::types::Timestamp;
 use wasm_bindgen::prelude::*;
 
-/// Create a Promise and extract its resolve/reject functions.
 pub(super) fn make_rpc_promise() -> (Promise, js_sys::Function, js_sys::Function) {
     let mut settle = None;
     let promise = Promise::new(&mut |resolve, reject| settle = Some((resolve, reject)));
@@ -19,18 +18,13 @@ pub(super) fn make_rpc_promise() -> (Promise, js_sys::Function, js_sys::Function
 ///
 /// Hold it in a named local across the await: a temporary drops first, and dropping resolves.
 pub(super) struct RpcTimer {
-    /// Owns the timer id.
     window: web_sys::Window,
-    /// Cleared on drop.
     id: i32,
-    /// Resolves when the time is up.
     fired: Promise,
-    /// Resolves `fired`.
     resolve: js_sys::Function,
 }
 
 impl RpcTimer {
-    /// Start a timer of `timeout_secs` seconds.
     #[expect(
         clippy::unwrap_used,
         clippy::cast_possible_truncation,
@@ -80,8 +74,6 @@ pub(super) fn now_timestamp() -> Timestamp {
     Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64)
 }
 
-/// Fill a `Vec<u8>` of the given length with cryptographically random bytes via
-/// `window.crypto.getRandomValues`.
 #[expect(
     clippy::unwrap_used,
     clippy::cast_possible_truncation,
@@ -99,7 +91,6 @@ pub(super) fn random_bytes(len: usize) -> Vec<u8> {
     buf
 }
 
-/// Extract a human-readable message from any JS error value.
 pub(super) fn js_err_msg(e: &JsValue) -> String {
     e.as_string()
         .or_else(|| {
@@ -110,7 +101,6 @@ pub(super) fn js_err_msg(e: &JsValue) -> String {
         .unwrap_or_else(|| format!("{e:?}"))
 }
 
-/// Set a property on a freshly-constructed, non-frozen JS object.
 #[expect(
     clippy::unwrap_used,
     reason = "Reflect::set only fails on frozen targets; callers pass fresh plain objects"
@@ -119,7 +109,6 @@ pub(super) fn set(obj: &Object, key: &str, val: &JsValue) {
     Reflect::set(obj, &key.into(), val).unwrap();
 }
 
-/// Set a string property on a freshly-constructed, non-frozen JS object.
 #[expect(
     clippy::unwrap_used,
     reason = "Reflect::set only fails on frozen targets; callers pass fresh plain objects"

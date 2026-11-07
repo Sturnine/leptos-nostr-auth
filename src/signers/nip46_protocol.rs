@@ -20,33 +20,22 @@ use crate::types::NostrAuthError;
 pub(super) const MAX_BUNKER_RELAYS: usize = 5;
 /// Extra wait granted once to a request whose link a mounted modal can show.
 pub(super) const AUTH_URL_TIMEOUT_SECS: u32 = 300;
-/// The one subscription this client holds on a relay socket.
 pub(super) const SUBSCRIPTION_ID: &str = "nip46-persistent";
-/// Permissions requested by `connect`.
 pub(super) const CONNECT_PERMS: &str = "sign_event,get_public_key,nip44_encrypt,nip44_decrypt";
-/// Longest accepted approval link, in bytes.
 const MAX_AUTH_URL_BYTES: usize = 2048;
-/// Longest relay or signer text shown to the user, in characters.
 const MAX_REMOTE_TEXT_CHARS: usize = 200;
 
-/// Fixed text for a response whose `result` or `error` has the wrong JSON type.
 const MALFORMED_RESPONSE: &str = "remote signer sent a malformed response";
-/// Fixed text for a response with neither `result` nor `error`.
 const MISSING_RESULT: &str = "remote signer sent a response with no result";
-/// Fixed text for an unusable `result` value.
 const UNEXPECTED_RESULT: &str = "remote signer sent an unexpected result";
 /// Fixed text for a refused `auth_url`. It must never quote the URL.
 const REFUSED_AUTH_URL: &str = "remote signer sent an approval link that is not a safe https URL";
-/// Fixed text for a request that could not be built.
 pub(super) const REQUEST_BUILD_FAILED: &str = "could not build the request";
 /// Fixed text for a socket that went away. A close carries nothing trusted.
 const SOCKET_LOST: &str = "relay connection lost";
-/// Fixed text for a caller whose reconnect was led by a future that got dropped.
 const RECONNECT_CANCELLED: &str = "reconnect cancelled";
 
-/// What a `bunker://` URI names.
 pub(super) struct BunkerTarget {
-    /// Remote signer's key.
     pub(super) remote: PublicKey,
     /// Relays to try, in order, without duplicates.
     pub(super) relays: Vec<RelayUrl>,
@@ -127,11 +116,8 @@ pub(super) fn rotate_to_front(relays: &mut Vec<RelayUrl>, working: &RelayUrl) {
     }
 }
 
-/// Which handshake to run on a relay.
 pub(super) enum Handshake {
-    /// Fresh login with the URI's secret, if any.
     Pair {
-        /// One-time pairing secret from the URI.
         secret: Option<String>,
     },
     /// Restore a client the signer already knows. Any secret in the stored URI is ignored.
@@ -144,7 +130,6 @@ pub(super) const fn needs_connect(handshake: &Handshake, paired: bool) -> bool {
     matches!(handshake, Handshake::Pair { .. }) && !paired
 }
 
-/// The `connect` request for a handshake.
 pub(super) fn connect_request(handshake: &Handshake, remote: PublicKey) -> NostrConnectRequest {
     NostrConnectRequest::Connect {
         remote_signer_public_key: remote,
@@ -202,7 +187,6 @@ pub(super) fn request_event(
     .ok()
 }
 
-/// `REQ` frame for responses addressed to `client`.
 pub(super) fn subscribe_frame(client: PublicKey) -> String {
     ClientMessage::req(
         SubscriptionId::new(SUBSCRIPTION_ID),
@@ -211,7 +195,6 @@ pub(super) fn subscribe_frame(client: PublicKey) -> String {
     .as_json()
 }
 
-/// `EVENT` frame for a request.
 pub(super) fn event_frame(event: &Event) -> String {
     ClientMessage::event(event.clone()).as_json()
 }
@@ -233,30 +216,25 @@ impl HttpsUrl {
 pub(super) struct PromptList(Vec<(String, HttpsUrl)>);
 
 impl PromptList {
-    /// Show `url` for a request, replacing any link it already has.
     pub(super) fn upsert(&mut self, id: String, url: HttpsUrl) {
         self.remove(&id);
         self.0.push((id, url));
     }
 
-    /// Whether a request has a link.
     pub(super) fn has(&self, id: &str) -> bool {
         self.0.iter().any(|(owner, _)| owner == id)
     }
 
-    /// Remove a request's link. Returns whether it had one.
     pub(super) fn remove(&mut self, id: &str) -> bool {
         let before = self.0.len();
         self.0.retain(|(owner, _)| owner != id);
         self.0.len() != before
     }
 
-    /// Remove the link on show.
     pub(super) fn remove_current(&mut self) {
         self.0.pop();
     }
 
-    /// The link on show.
     pub(super) fn current(&self) -> Option<&str> {
         self.0.last().map(|(_, url)| url.as_str())
     }
@@ -299,9 +277,7 @@ fn sanitize_remote_text(text: &str) -> String {
         .collect()
 }
 
-/// How one request failed.
 pub(super) enum RpcFailure {
-    /// The deadline passed.
     Timeout {
         /// A verified signer had already answered this request.
         signer_answered: bool,
@@ -314,14 +290,12 @@ pub(super) enum RpcFailure {
     Socket(NostrAuthError),
     /// The socket went away after the request was sent.
     SocketLost {
-        /// A verified signer had already answered this request.
         signer_answered: bool,
     },
     /// The relay refused. Relay frames are unauthenticated, so this may be a hostile relay.
     Relay {
         /// Sanitised relay text.
         reason: String,
-        /// A verified signer had already answered this request.
         signer_answered: bool,
     },
     /// A verified signer refused, with its sanitised text.
@@ -329,7 +303,6 @@ pub(super) enum RpcFailure {
     /// A verified response was unusable, or the request could not be built locally. Fixed text
     /// only: parser errors can quote values.
     Malformed(&'static str),
-    /// The session was closed for good, so no retry on any clone can work.
     SessionClosed,
 }
 
@@ -385,7 +358,6 @@ impl RpcFailure {
         )
     }
 
-    /// The public error for a handshake request.
     pub(super) fn into_connect_error(self) -> NostrAuthError {
         match self {
             Self::Malformed(text) => NostrAuthError::BunkerConnectionFailed(text.to_owned()),
@@ -393,7 +365,6 @@ impl RpcFailure {
         }
     }
 
-    /// The public error for `sign_event` requests.
     pub(super) fn into_signing_error(self) -> NostrAuthError {
         match self {
             Self::Malformed(text) => NostrAuthError::SigningFailed(text.to_owned()),
@@ -402,7 +373,6 @@ impl RpcFailure {
         }
     }
 
-    /// The public error for NIP-44 requests.
     pub(super) fn into_encryption_error(self) -> NostrAuthError {
         match self {
             Self::Malformed(text) => NostrAuthError::EncryptionFailed(text.to_owned()),
@@ -411,7 +381,6 @@ impl RpcFailure {
         }
     }
 
-    /// The mapping every request kind shares.
     fn into_shared_error(self) -> NostrAuthError {
         match self {
             Self::Timeout {
@@ -435,12 +404,9 @@ impl RpcFailure {
     }
 }
 
-/// Failures across a handshake's relay attempts.
 #[derive(Default)]
 pub(super) struct AttemptLog {
-    /// The latest reason a relay gave.
     relay_reason: Option<RpcFailure>,
-    /// The latest other failure.
     last: Option<RpcFailure>,
 }
 
@@ -459,7 +425,6 @@ impl AttemptLog {
         None
     }
 
-    /// The failure to report once every relay has failed.
     pub(super) fn finish(self) -> RpcFailure {
         self.relay_reason.or(self.last).unwrap_or_else(|| {
             RpcFailure::Socket(NostrAuthError::BunkerConnectionFailed(
@@ -496,7 +461,6 @@ pub(super) fn signed_event_result(result: ResponseResult) -> Result<String, RpcF
     }
 }
 
-/// An opaque NIP-44 result.
 pub(super) fn nip44_result(result: ResponseResult) -> Result<String, RpcFailure> {
     match result {
         ResponseResult::Nip44Encrypt { ciphertext } => Ok(ciphertext),
@@ -517,10 +481,8 @@ fn typed_result(method: NostrConnectMethod, result: String) -> Result<ResponseRe
     }
 }
 
-/// Who a relay frame must be from and for.
 #[derive(Clone)]
 pub(super) struct Peer {
-    /// This client's pairing keys.
     pub(super) client: Keys,
     /// The configured remote signer. Never taken from a frame.
     pub(super) remote: PublicKey,
@@ -528,18 +490,13 @@ pub(super) struct Peer {
 
 /// What a relay frame caused. Handlers run these after the `Inflight` borrow has ended.
 pub(super) enum Effect<W> {
-    /// Finish a request.
     Settle {
-        /// Wakes the waiting call.
         waker: W,
-        /// The request's result.
         outcome: Result<ResponseResult, RpcFailure>,
     },
     /// Show an approval link. The request stays pending.
     Prompt {
-        /// The request the link belongs to.
         request_id: String,
-        /// The checked link.
         url: HttpsUrl,
     },
     /// Close the socket, so the next call resubscribes.
@@ -549,9 +506,7 @@ pub(super) enum Effect<W> {
 /// How a reconnect ended. Passed by value, so no error text has to survive a trip through JS.
 pub(super) type ReconnectOutcome = Result<(), NostrAuthError>;
 
-/// Wakes a caller waiting on someone else's reconnect.
 pub(super) trait ReconnectWaker {
-    /// Hand over the outcome and wake the caller.
     fn wake(self, outcome: ReconnectOutcome);
 }
 
@@ -588,14 +543,11 @@ impl<W: ReconnectWaker> ReconnectGate<W> {
 /// The running reconnect. Dropping it reopens the gate and wakes the followers, including when the
 /// leader's future is dropped, which runs no exit code.
 pub(super) struct ReconnectLead<W: ReconnectWaker> {
-    /// The gate this reconnect holds.
     gate: Rc<ReconnectGate<W>>,
-    /// Set by `finish`.
     outcome: Option<ReconnectOutcome>,
 }
 
 impl<W: ReconnectWaker> ReconnectLead<W> {
-    /// End the reconnect with `outcome`.
     pub(super) fn finish(mut self, outcome: ReconnectOutcome) {
         self.outcome = Some(outcome);
     }
@@ -615,27 +567,20 @@ impl<W: ReconnectWaker> Drop for ReconnectLead<W> {
     }
 }
 
-/// What to do when a request's timer fires.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum DeadlineAction {
-    /// Wait `AUTH_URL_TIMEOUT_SECS` more.
     Extend,
-    /// Give up.
     Timeout {
-        /// A verified signer had already answered this request.
         signer_answered: bool,
     },
-    /// A verified signer asked for approval, and no modal can show the link.
     AuthRequired,
 }
 
-/// One request awaiting its response.
 struct Pending<W> {
     /// Decides how `result` is read.
     method: NostrConnectMethod,
     /// Matches `OK` frames to this request.
     event_id: EventId,
-    /// Wakes the waiting call.
     waker: W,
     /// A verified signer sent a valid `auth_url` for this request.
     auth_seen: bool,
@@ -646,14 +591,12 @@ struct Pending<W> {
 /// The `{ id }` of a response that does not otherwise parse.
 #[derive(Deserialize)]
 struct ResponseId {
-    /// Request id.
     id: String,
 }
 
 /// In-flight requests, and the only entry point for relay bytes. Every field in a relay frame is
 /// hostile. Generic over the waker so native tests can drive it with no browser.
 pub(super) struct Inflight<W> {
-    /// Requests by id.
     entries: HashMap<String, Pending<W>>,
     /// The relay on the current socket sent a NIP-42 challenge.
     auth_requested: bool,
@@ -672,7 +615,6 @@ impl<W> Default for Inflight<W> {
 }
 
 impl<W> Inflight<W> {
-    /// Register a request before sending it.
     pub(super) fn insert(
         &mut self,
         id: String,
@@ -692,12 +634,10 @@ impl<W> Inflight<W> {
         );
     }
 
-    /// Forget a request.
     pub(super) fn remove(&mut self, id: &str) {
         self.entries.remove(id);
     }
 
-    /// Whether a request is still in flight.
     #[cfg(test)]
     pub(super) fn contains(&self, id: &str) -> bool {
         self.entries.contains_key(id)
@@ -808,7 +748,6 @@ impl<W> Inflight<W> {
         }
     }
 
-    /// A verified response.
     fn on_response(
         &mut self,
         id: &str,
@@ -839,7 +778,6 @@ impl<W> Inflight<W> {
         self.settle(id, outcome)
     }
 
-    /// `OK false` for a request we sent.
     fn on_rejected(&mut self, event_id: EventId, message: &str) -> Vec<Effect<W>> {
         let Some(id) = self
             .entries
@@ -878,17 +816,14 @@ impl<W> Inflight<W> {
         })
     }
 
-    /// Fail every request because the socket went away.
     pub(super) fn fail_socket_lost(&mut self) -> Vec<Effect<W>> {
         self.fail_all_with(|signer_answered| RpcFailure::SocketLost { signer_answered })
     }
 
-    /// Fail every request because the session was closed.
     pub(super) fn fail_session_closed(&mut self) -> Vec<Effect<W>> {
         self.fail_all_with(|_| RpcFailure::SessionClosed)
     }
 
-    /// Fail every request, passing each its own `auth_seen`.
     fn fail_all_with(&mut self, failure: impl Fn(bool) -> RpcFailure) -> Vec<Effect<W>> {
         self.entries
             .drain()
@@ -924,7 +859,6 @@ impl<W> Inflight<W> {
         DeadlineAction::Extend
     }
 
-    /// The failure for a `Timeout` deadline on the current socket.
     pub(super) const fn timeout_failure(&self, signer_answered: bool) -> RpcFailure {
         RpcFailure::Timeout {
             signer_answered,

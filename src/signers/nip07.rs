@@ -76,7 +76,6 @@ impl Nip07Handle {
     }
 }
 
-/// Browser implementation.
 #[cfg(not(feature = "ssr"))]
 mod imp {
     use js_sys::Reflect;
@@ -90,7 +89,6 @@ mod imp {
     use crate::signers::public_key_from_hex;
     use crate::types::NostrAuthError;
 
-    /// Text for a rejection that carries no readable message.
     const STATIC_REJECTION: &str = "extension rejected the request";
 
     /// Tells a signer at fault from stored data that can never restore, within one variant.
@@ -162,7 +160,6 @@ mod imp {
             .map_err(|e| refused(rejection_text(&e)))
     }
 
-    /// Request the public key from the extension.
     pub(super) async fn get_public_key() -> Result<Nip07Handle, NostrAuthError> {
         let js_pk = settle(
             nostr_get_public_key(),
@@ -210,7 +207,6 @@ mod imp {
         }
     }
 
-    /// NIP-44 encrypt through the extension.
     pub(super) async fn nip44_encrypt(
         handle: &Nip07Handle,
         peer: &PublicKey,
@@ -227,7 +223,6 @@ mod imp {
         .ok_or_else(|| NostrAuthError::EncryptionFailed("expected string ciphertext".into()))
     }
 
-    /// NIP-44 decrypt through the extension.
     pub(super) async fn nip44_decrypt(
         handle: &Nip07Handle,
         peer: &PublicKey,
@@ -245,7 +240,6 @@ mod imp {
     }
 }
 
-/// Server stubs.
 #[cfg(feature = "ssr")]
 mod imp {
     use nostr::key::PublicKey;
@@ -254,12 +248,10 @@ mod imp {
     use crate::signers::NOT_ON_SERVER;
     use crate::types::NostrAuthError;
 
-    /// Server stub for `get_public_key`.
     pub(super) async fn get_public_key() -> Result<Nip07Handle, NostrAuthError> {
         Err(NostrAuthError::ExtensionNotFound)
     }
 
-    /// Server stub for `sign_event`.
     pub(super) async fn sign_event(
         _handle: &Nip07Handle,
         _event_json: &str,
@@ -267,7 +259,6 @@ mod imp {
         Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
     }
 
-    /// Server stub for `nip44_encrypt`.
     pub(super) async fn nip44_encrypt(
         _handle: &Nip07Handle,
         _peer: &PublicKey,
@@ -276,7 +267,6 @@ mod imp {
         Err(NostrAuthError::EncryptionUnavailable)
     }
 
-    /// Server stub for `nip44_decrypt`.
     pub(super) async fn nip44_decrypt(
         _handle: &Nip07Handle,
         _peer: &PublicKey,

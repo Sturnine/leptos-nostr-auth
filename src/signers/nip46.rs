@@ -27,15 +27,11 @@ pub struct BunkerSession {
     pub public_key: PublicKey,
     /// Stored for session restore
     pub bunker_uri: String,
-    /// Timeout in seconds for RPC calls — stored from config at connect time
     timeout_secs: u32,
-    /// Ephemeral client keypair — stays in memory
     client_keys: Keys,
-    /// Remote signer's public key.
     remote_pubkey: PublicKey,
     /// Relays to try, working relay first.
     relays: Vec<RelayUrl>,
-    /// The connection every clone shares.
     #[cfg(not(feature = "ssr"))]
     conn: send_wrapper::SendWrapper<std::rc::Rc<imp::Connection>>,
 }
@@ -102,7 +98,6 @@ impl BunkerSession {
         self.client_keys.secret_key().to_secret_hex()
     }
 
-    /// Close this session for good, for every clone. See [`NostrAuthError::BunkerSessionClosed`].
     #[cfg_attr(
         feature = "ssr",
         expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
@@ -206,7 +201,6 @@ pub fn unregister_auth_presenter() {
     imp::unregister_auth_presenter();
 }
 
-/// Browser implementation.
 #[cfg(not(feature = "ssr"))]
 mod imp {
     use core::cell::{Cell, RefCell};
@@ -240,41 +234,33 @@ mod imp {
         /// closed, and threading a handle there would change public signatures. A tab is one
         /// thread and one user.
         static PROMPTS: ArcRwSignal<PromptList> = ArcRwSignal::new(PromptList::default());
-        /// Mounted `NostrAuthModal`s.
         static PRESENTERS: Cell<u32> = const { Cell::new(0) };
     }
 
-    /// See the facade.
     pub(super) fn current_auth_url() -> Option<String> {
         PROMPTS.with(|prompts| prompts.read().current().map(str::to_owned))
     }
 
-    /// See the facade.
     pub(super) fn dismiss_auth_prompt() {
         PROMPTS.with(|prompts| prompts.update(PromptList::remove_current));
     }
 
-    /// See the facade.
     pub(super) fn register_auth_presenter() {
         PRESENTERS.with(|count| count.set(count.get().saturating_add(1)));
     }
 
-    /// See the facade.
     pub(super) fn unregister_auth_presenter() {
         PRESENTERS.with(|count| count.set(count.get().saturating_sub(1)));
     }
 
-    /// Whether a mounted `NostrAuthModal` can show a link.
     fn presenter_mounted() -> bool {
         PRESENTERS.with(Cell::get) > 0
     }
 
-    /// Show a request's approval link.
     pub(super) fn show_prompt(id: String, url: HttpsUrl) {
         PROMPTS.with(|prompts| prompts.update(|list| list.upsert(id, url)));
     }
 
-    /// Remove a request's link, notifying readers only if it had one.
     fn remove_prompt(id: &str) {
         PROMPTS.with(|prompts| {
             if prompts.with_untracked(|list| list.has(id)) {
@@ -285,20 +271,16 @@ mod imp {
         });
     }
 
-    /// How a settled request reaches the call awaiting it.
     type Outcome = Result<ResponseResult, RpcFailure>;
 
     /// Wakes a waiting call. The typed outcome goes through the slot, so the promise is only a
     /// wake-up and no error text has to survive a trip through JS.
     pub(super) struct Waker<T> {
-        /// Read by the waiting call once woken.
         slot: Rc<RefCell<Option<T>>>,
-        /// Resolves the promise the waiting call races.
         resolve: js_sys::Function,
     }
 
     impl<T> Waker<T> {
-        /// Hand over the outcome and wake the waiting call.
         fn wake(self, outcome: T) {
             *self.slot.borrow_mut() = Some(outcome);
             let _ = self.resolve.call0(&JsValue::UNDEFINED);
@@ -311,7 +293,6 @@ mod imp {
         }
     }
 
-    /// A promise to race, the slot to read once it resolves, and the waker that fills both.
     fn wake_pair<T>() -> (Promise, Rc<RefCell<Option<T>>>, Waker<T>) {
         let slot = Rc::new(RefCell::new(None));
         let (woken, resolve, _) = make_rpc_promise();
@@ -322,22 +303,17 @@ mod imp {
         (woken, slot, waker)
     }
 
-    /// Wakes `send_on`.
     pub(super) type RpcWaker = Waker<Outcome>;
 
-    /// Requests awaiting a response.
     pub(super) type InflightSlot = Rc<RefCell<Inflight<RpcWaker>>>;
 
     /// A socket's event closures, owned here because the socket only borrows them.
     #[expect(dead_code, reason = "held to keep the closures alive, never read")]
     pub(super) struct SocketHandlers {
-        /// `onmessage`.
         on_message: Closure<dyn FnMut(web_sys::MessageEvent)>,
-        /// `onclose`.
         on_close: Closure<dyn FnMut(web_sys::Event)>,
     }
 
-    /// Serializes reconnects.
     pub(super) type ConnectLock = Rc<ReconnectGate<Waker<ReconnectOutcome>>>;
 
     /// What every clone of a session shares.
@@ -346,12 +322,10 @@ mod imp {
     /// it owns, and its last-owner cleanup would never run.
     #[derive(Default)]
     pub(super) struct Connection {
-        /// Persistent WebSocket: opened by the handshake, reopened by `ensure_ws` if lost.
         ws: RefCell<Option<web_sys::WebSocket>>,
         /// Current `onmessage` and `onclose` handlers. Replacing them on reconnect drops the
         /// previous closures' `client_keys` clones instead of leaking them.
         handlers: RefCell<Option<SocketHandlers>>,
-        /// Requests awaiting a response.
         inflight: InflightSlot,
         /// Serializes reconnects: a concurrent caller waits for the running one's outcome, up to
         /// its own timeout, instead of racing a second WebSocket into existence. See `ensure_ws`.
@@ -364,15 +338,11 @@ mod imp {
         opening: RefCell<Option<OpeningSocket>>,
     }
 
-    /// A socket still opening, and how to wake the call racing its open.
     struct OpeningSocket {
-        /// The attempt's socket.
         ws: web_sys::WebSocket,
-        /// Resolves the promise `open_relay` races.
         wake: js_sys::Function,
     }
 
-    /// The error every call on a closed session returns.
     fn closed_error() -> NostrAuthError {
         RpcFailure::SessionClosed.into_connect_error()
     }
@@ -422,14 +392,11 @@ mod imp {
     /// Removes a request from `Inflight` on every exit from `send_on`, including a dropped future,
     /// which runs no exit code.
     pub(super) struct RequestGuard<W> {
-        /// The table holding the request.
         inflight: Rc<RefCell<Inflight<W>>>,
-        /// The request's id.
         id: String,
     }
 
     impl<W> RequestGuard<W> {
-        /// Guard the request `id`.
         pub(super) const fn new(inflight: Rc<RefCell<Inflight<W>>>, id: String) -> Self {
             Self { inflight, id }
         }
@@ -445,14 +412,11 @@ mod imp {
     /// Owns a socket being opened or handshaked. It is not in `BunkerSession::ws` yet, so nothing
     /// else could close it if the caller drops the future.
     struct AttemptGuard {
-        /// The attempt's socket.
         ws: web_sys::WebSocket,
-        /// Whether dropping the guard closes the socket.
         armed: bool,
     }
 
     impl AttemptGuard {
-        /// Hand the socket over to the caller.
         fn disarm(mut self) -> web_sys::WebSocket {
             self.armed = false;
             self.ws.clone()
@@ -495,7 +459,6 @@ mod imp {
         }
     }
 
-    /// Fresh login with a newly generated local pairing keypair.
     pub(super) async fn connect(
         uri: &str,
         timeout_secs: u32,
@@ -507,12 +470,10 @@ mod imp {
         BunkerSession::connect_with_keys(target, timeout_secs, Keys::generate(), handshake).await
     }
 
-    /// See the facade.
     pub(super) fn close(session: &BunkerSession) {
         session.conn.close();
     }
 
-    /// Restore with the persisted local pairing keypair.
     pub(super) async fn reconnect(
         uri_without_secret: &str,
         timeout_secs: u32,
@@ -530,7 +491,6 @@ mod imp {
         .await
     }
 
-    /// NIP-46 `sign_event` over the persistent WebSocket.
     pub(super) async fn sign_event(
         session: &BunkerSession,
         event_json: &str,
@@ -544,7 +504,6 @@ mod imp {
         checked_event(&request, session.public_key, &returned)
     }
 
-    /// NIP-46 `nip44_encrypt` over the persistent WebSocket.
     pub(super) async fn nip44_encrypt(
         session: &BunkerSession,
         peer: &PublicKey,
@@ -561,7 +520,6 @@ mod imp {
             .map_err(RpcFailure::into_encryption_error)
     }
 
-    /// NIP-46 `nip44_decrypt` over the persistent WebSocket.
     pub(super) async fn nip44_decrypt(
         session: &BunkerSession,
         peer: &PublicKey,
@@ -579,7 +537,6 @@ mod imp {
     }
 
     impl BunkerSession {
-        /// Shared implementation behind [`BunkerSession::connect`] and [`BunkerSession::reconnect`].
         async fn connect_with_keys(
             target: BunkerTarget,
             timeout_secs: u32,
@@ -715,7 +672,6 @@ mod imp {
             Err(last)
         }
 
-        /// Open a socket to `relay`, install the handlers and subscribe.
         async fn open_relay(&self, relay: &RelayUrl) -> Result<AttemptGuard, NostrAuthError> {
             let ws = web_sys::WebSocket::new(relay.as_str()).map_err(|e| {
                 NostrAuthError::BunkerConnectionFailed(format!("WebSocket: {}", js_err_msg(&e)))
@@ -799,7 +755,6 @@ mod imp {
             });
         }
 
-        /// Post-handshake request: reconnect if needed, then send.
         async fn send_rpc(&self, request: &NostrConnectRequest) -> Outcome {
             let ws = self.ensure_ws().await.map_err(RpcFailure::Socket)?;
             let result = self.send_on(&ws, request).await;
@@ -867,7 +822,6 @@ mod imp {
         }
     }
 
-    /// Generate a cryptographically random request ID using `window.crypto.getRandomValues`.
     fn generate_request_id() -> String {
         random_bytes(8).iter().fold(String::new(), |mut acc, b| {
             let _ = write!(acc, "{b:02X}");
@@ -876,7 +830,6 @@ mod imp {
     }
 }
 
-/// Server stubs.
 #[cfg(feature = "ssr")]
 mod imp {
     use nostr::key::PublicKey;
@@ -885,7 +838,6 @@ mod imp {
     use crate::signers::NOT_ON_SERVER;
     use crate::types::NostrAuthError;
 
-    /// Server stub for `connect`.
     pub(super) async fn connect(
         _uri: &str,
         _timeout_secs: u32,
@@ -893,7 +845,6 @@ mod imp {
         Err(NostrAuthError::BunkerConnectionFailed(NOT_ON_SERVER.into()))
     }
 
-    /// Server stub for `reconnect`.
     pub(super) async fn reconnect(
         _uri_without_secret: &str,
         _timeout_secs: u32,
@@ -902,7 +853,6 @@ mod imp {
         Err(NostrAuthError::BunkerConnectionFailed(NOT_ON_SERVER.into()))
     }
 
-    /// Server stub for `sign_event`.
     pub(super) async fn sign_event(
         _session: &BunkerSession,
         _event_json: &str,
@@ -910,7 +860,6 @@ mod imp {
         Err(NostrAuthError::SigningFailed(NOT_ON_SERVER.into()))
     }
 
-    /// Server stub for `nip44_encrypt`.
     pub(super) async fn nip44_encrypt(
         _session: &BunkerSession,
         _peer: &PublicKey,
@@ -919,7 +868,6 @@ mod imp {
         Err(NostrAuthError::EncryptionUnavailable)
     }
 
-    /// Server stub for `nip44_decrypt`.
     pub(super) async fn nip44_decrypt(
         _session: &BunkerSession,
         _peer: &PublicKey,
@@ -928,7 +876,6 @@ mod imp {
         Err(NostrAuthError::EncryptionUnavailable)
     }
 
-    /// Server stub for `close`.
     pub(super) const fn close(_session: &BunkerSession) {}
 
     /// Server stub for `current_auth_url`. No state may cross requests.
@@ -936,13 +883,10 @@ mod imp {
         None
     }
 
-    /// Server stub for `dismiss_auth_prompt`.
     pub(super) const fn dismiss_auth_prompt() {}
 
-    /// Server stub for `register_auth_presenter`.
     pub(super) const fn register_auth_presenter() {}
 
-    /// Server stub for `unregister_auth_presenter`.
     pub(super) const fn unregister_auth_presenter() {}
 }
 

@@ -76,7 +76,6 @@ pub struct NostrAuthContext {
     pub logout: Callback<()>,
 }
 
-/// Replace the current session, closing the old one for good.
 fn replace_auth(
     auth: ReadSignal<Option<AuthResult>>,
     set_auth: WriteSignal<Option<AuthResult>>,

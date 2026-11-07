@@ -1,5 +1,3 @@
-//! Basic headless example — no CSS classes injected by the library.
-//! Style via `data-nostr-*` attributes in your own CSS.
 
 use leptos::prelude::*;
 use leptos_nostr_auth::nostr::event::{FinalizeEventAsync, Kind, UnsignedEvent};
@@ -91,7 +89,6 @@ fn HomePage() -> impl IntoView {
                     </code>
                 </p>
 
-                // Signing demo — only available for non-read-only sessions
                 <Show
                     when=move || auth.auth.get().is_some_and(|a| a.can_sign())
                     fallback=|| view! { <p class="meta">"(Read-only — cannot sign)"</p> }
