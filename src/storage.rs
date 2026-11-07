@@ -647,6 +647,22 @@ mod wasm_tests {
     }
 
     #[wasm_bindgen_test]
+    async fn extension_non_string_on_restore_is_rejected() {
+        js_sys::eval(
+            "globalThis.window = { nostr: { getPublicKey: function () { return Promise.resolve(null); } } };",
+        )
+        .unwrap();
+        let got = restore_session(&extension_session(), 1).await.map(|_| ());
+        assert!(
+            matches!(
+                &got,
+                Err(NostrAuthError::ExtensionRejected(m)) if m == "expected string pubkey"
+            ),
+            "{got:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
     async fn extension_matching_key_restores() {
         shim(USER);
         assert!(matches!(

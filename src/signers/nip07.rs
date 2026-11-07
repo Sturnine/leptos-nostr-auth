@@ -736,6 +736,39 @@ mod wasm_tests {
     }
 
     #[wasm_bindgen_test]
+    async fn non_string_pubkey_is_rejected() {
+        const TEXT: &str = "expected string pubkey";
+        let (_, h) = session();
+        for gpk in [
+            "async () => null",
+            "async () => undefined",
+            "() => null",
+            "async () => 7",
+            "async () => ({ SENTINEL: 'SENTINEL' })",
+        ] {
+            shim(&format!(
+                "globalThis.__n = {{ enc: 0, dec: 0 }}; globalThis.window = {{ nostr: {{ getPublicKey: {gpk}, nip44: {{ encrypt() {{ globalThis.__n.enc += 1; return 'x'; }}, decrypt() {{ globalThis.__n.dec += 1; return 'x'; }} }} }} }};"
+            ));
+            let login = Nip07Handle::get_public_key().await.map(|_| ());
+            assert!(
+                matches!(&login, Err(NostrAuthError::ExtensionRejected(m)) if m == TEXT),
+                "{login:?}"
+            );
+            for got in [
+                h.nip44_encrypt(&peer(), "x").await,
+                h.nip44_decrypt(&peer(), "x").await,
+            ] {
+                assert!(
+                    matches!(&got, Err(NostrAuthError::ExtensionRejected(m)) if m == TEXT),
+                    "{got:?}"
+                );
+            }
+            assert_eq!(count("enc"), 0.0);
+            assert_eq!(count("dec"), 0.0);
+        }
+    }
+
+    #[wasm_bindgen_test]
     async fn off_curve_key_is_invalid() {
         use crate::signers::signer_traits::tests::off_curve;
         const TEXT: &str = "the extension returned an invalid public key";
