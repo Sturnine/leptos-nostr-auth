@@ -239,7 +239,8 @@ mod wasm_tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     fn holds_run(start: usize, len: usize, run: &[u8; 32]) -> bool {
-        (start..start + len - run.len()).any(|at| {
+        let end = start.saturating_add(len).saturating_sub(run.len());
+        (start..end).any(|at| {
             run.iter()
                 .zip(at..)
                 .all(|(byte, address)| byte_at(address) == *byte)
