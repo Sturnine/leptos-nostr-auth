@@ -5,9 +5,8 @@ use nostr::key::PublicKey;
 
 use crate::types::NostrAuthError;
 
-/// Parse the caller's event JSON into what every backend signs. NIP-46 lists `sign_event` params
-/// without `pubkey`, so an absent one is filled in. A `pubkey` or `id` the session could not sign is
-/// refused here, so nothing reaches a signer.
+/// NIP-46 lists `sign_event` params without `pubkey`, so an absent one is filled in. A `pubkey` or
+/// `id` the session could not sign is refused here, so nothing reaches a signer.
 pub(super) fn prepare(
     event_json: &str,
     session: PublicKey,
@@ -35,9 +34,9 @@ pub(super) fn prepare(
     Ok(unsigned)
 }
 
-/// Judge a remote signer's return against the request. Returns the verified value's JSON, never the
-/// signer's bytes, so extra fields cannot leave the crate. Each failure has its own text because
-/// without them a removed field check would fall through to the id check and go unnoticed.
+/// Returns the verified value's JSON, never the signer's bytes, so extra fields cannot leave the
+/// crate. Each failure has its own text because without them a removed field check would fall
+/// through to the id check and go unnoticed.
 #[cfg(not(feature = "ssr"))]
 pub(super) fn checked_event(
     request: &UnsignedEvent,

@@ -47,7 +47,6 @@ impl RpcTimer {
         }
     }
 
-    /// Resolves when the time is up, or when the timer is dropped.
     pub(super) const fn fired(&self) -> &Promise {
         &self.fired
     }
