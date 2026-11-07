@@ -1129,8 +1129,8 @@ fn StepRawNsec(
 mod tests {
     use super::*;
     use crate::storage::tests::first_poll;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const USER: &str = "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2";
 
@@ -1145,7 +1145,7 @@ mod tests {
         let captured = Arc::new(());
         let (flag, held) = (Arc::clone(&ran), Arc::clone(&captured));
         let wrapped = attempt.wrap(async move {
-            let _held = held;
+            drop(held);
             flag.store(true, Ordering::SeqCst);
         });
         assert!(attempt.cancel());
@@ -1168,11 +1168,11 @@ mod tests {
     fn attempt_cancel_reports_running() {
         let attempt = Attempt::new();
         assert!(!attempt.cancel());
-        let unfinished = attempt.wrap(std::future::ready(()));
+        let unfinished = attempt.wrap(core::future::ready(()));
         assert!(attempt.cancel());
         assert!(!attempt.cancel());
         drop(unfinished);
-        let finished = attempt.wrap(std::future::ready(()));
+        let finished = attempt.wrap(core::future::ready(()));
         assert_eq!(first_poll(finished), Some(()));
         assert!(!attempt.cancel());
     }
@@ -1180,9 +1180,9 @@ mod tests {
     #[test]
     fn attempt_cancel_keeps_newer_handle() {
         let attempt = Attempt::new();
-        let older = attempt.wrap(std::future::ready(()));
+        let older = attempt.wrap(core::future::ready(()));
         assert!(attempt.cancel());
-        let newer = attempt.wrap(std::future::ready(()));
+        let newer = attempt.wrap(core::future::ready(()));
         assert_eq!(first_poll(older), Some(()));
         assert!(attempt.cancel());
         drop(newer);
@@ -1201,7 +1201,7 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
             });
             let attempt = Attempt::new();
-            let running = attempt.wrap(std::future::ready(()));
+            let running = attempt.wrap(core::future::ready(()));
             deliver(attempt, set_step, set_error, on_auth, read_only());
             assert!(step.get_untracked() == ModalStep::MethodSelect);
             assert_eq!(error.get_untracked(), None);
