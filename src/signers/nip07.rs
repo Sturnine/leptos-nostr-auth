@@ -112,8 +112,7 @@ mod imp {
         fn nostr_nip44_decrypt(pubkey: &str, ciphertext: &str) -> Result<JsValue, JsValue>;
     }
 
-    /// Whether the method at `path` from the global object exists and can be called. Reads through
-    /// a catch import, so a throwing getter or Proxy trap reads as absent.
+    /// Reads through a catch import, so a throwing getter or Proxy trap reads as absent.
     fn method_is_callable(path: &[&str]) -> bool {
         let mut current: JsValue = js_sys::global().into();
         for step in path {
@@ -125,8 +124,8 @@ mod imp {
         current.is_function()
     }
 
-    /// What a throw or rejection says about itself. `js_err_msg` would fall back to the Debug form,
-    /// printing an object an extension rejected with, possibly a full event.
+    /// `js_err_msg` would fall back to the Debug form, printing an object an extension rejected
+    /// with, possibly a full event.
     fn rejection_text(value: &JsValue) -> String {
         value
             .as_string()
@@ -138,10 +137,10 @@ mod imp {
             .unwrap_or_else(|| STATIC_REJECTION.to_owned())
     }
 
-    /// Settle what an extension call returned. A signer can return a non-Promise or a Promise with
-    /// its own `then`, and neither `Promise::resolve` nor `JsFuture::from` guards the calls they
-    /// make on it. A resolve function reads `then` under its own catch and runs it in a later job,
-    /// so `JsFuture` only ever sees a fresh native promise.
+    /// A signer can return a non-Promise or a Promise with its own `then`, and neither
+    /// `Promise::resolve` nor `JsFuture::from` guards the calls they make on it. A resolve function
+    /// reads `then` under its own catch and runs it in a later job, so `JsFuture` only ever sees a
+    /// fresh native promise.
     async fn settle(
         called: Result<JsValue, JsValue>,
         path: &[&str],
@@ -387,7 +386,6 @@ mod wasm_tests {
         nostr::key::Keys::generate().public_key()
     }
 
-    // Counts every call, and `body` answers both `nip44` methods.
     fn nip44_shim(session_hex: &str, body: &str) {
         shim(&format!(
             "globalThis.__n = {{ gpk: 0, enc: 0, dec: 0 }}; globalThis.window = {{ nostr: {{ getPublicKey: async () => {{ globalThis.__n.gpk += 1; return '{session_hex}'; }}, nip44: {{ encrypt() {{ globalThis.__n.enc += 1; {body} }}, decrypt() {{ globalThis.__n.dec += 1; {body} }} }} }} }};"

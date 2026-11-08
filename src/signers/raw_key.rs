@@ -13,7 +13,6 @@ use crate::types::NostrAuthError;
 pub struct RawKeySession {
     /// The authenticated user's public key.
     pub public_key: PublicKey,
-    /// In-memory keypair. On drop `Keys` overwrites its own secret bytes with `non_secure_erase`.
     keys: Keys,
 }
 
@@ -132,7 +131,7 @@ mod tests {
     const CRYPTSEC_PUBKEY: &str =
         "672a31bfc59d3f04548ec9b7daeeba2f61814e8ccc40448045007f5479f693a3";
 
-    // Expected values were computed outside the crate (shasum, Python hashlib and a pure-Python secp256k1 multiply).
+    // The NIP-49 spec test vector.
 
     #[test]
     fn ncryptsec_correct_password() {
