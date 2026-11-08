@@ -84,7 +84,14 @@
             };
 
           commonArgs = {
-            src = craneLib.cleanCargoSource ./.;
+            # README.md is compiled as doctests.
+            src = lib.fileset.toSource {
+              root = ./.;
+              fileset = lib.fileset.unions [
+                (craneLib.fileset.commonCargoSources ./.)
+                ./README.md
+              ];
+            };
             strictDeps = true;
             # Tests keep overflow checks and match `cargo test`.
             CARGO_PROFILE = "";
