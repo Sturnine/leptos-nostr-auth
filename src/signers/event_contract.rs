@@ -26,7 +26,11 @@ pub(super) fn prepare(
     object
         .entry("pubkey")
         .or_insert_with(|| session.to_hex().into());
-    let unsigned: UnsignedEvent = serde_json::from_value(value).map_err(|_error| {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the serde error text quotes event values"
+    )]
+    let unsigned: UnsignedEvent = serde_json::from_value(value).map_err(|_| {
         NostrAuthError::Serialization("event fields are missing or have the wrong type".into())
     })?;
     if unsigned.pubkey != session {
