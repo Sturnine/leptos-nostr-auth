@@ -100,6 +100,11 @@ pub fn passkey_restore_target(
         cred_id_b64,
     )
     .map_err(|e| NostrAuthError::PasskeyFailed(e.to_string()))?;
+    if cred_id.is_empty() {
+        return Err(NostrAuthError::PasskeyFailed(
+            "no credential ID stored".into(),
+        ));
+    }
     Ok((stored_pk, cred_id))
 }
 
@@ -379,6 +384,14 @@ pub mod tests {
     fn passkey_target_missing_id() {
         assert!(matches!(
             passkey_restore_target(&passkey_session(USER, None)),
+            Err(NostrAuthError::PasskeyFailed(_))
+        ));
+    }
+
+    #[test]
+    fn passkey_target_empty_id() {
+        assert!(matches!(
+            passkey_restore_target(&passkey_session(USER, Some(""))),
             Err(NostrAuthError::PasskeyFailed(_))
         ));
     }

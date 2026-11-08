@@ -832,25 +832,36 @@ fn StepPasskey(
     let rp_id = StoredValue::new(config.rp_id);
     let rp_name = StoredValue::new(config.rp_name);
 
-    let await_ceremony = move |begun: Result<PendingPasskey, NostrAuthError>| match begun {
-        Ok(pending) => {
-            set_sub_step.set(PasskeySubStep::Loading);
-            set_error.set(None);
-            attempt.spawn(async move {
-                match pending.finish().await {
-                    Ok(session) => on_auth.run(AuthResult::Passkey(session)),
-                    Err(e) => {
-                        set_error.set(Some(e.to_string()));
-                        set_sub_step.set(PasskeySubStep::Choose);
+    let (orphan, set_orphan) = signal(false);
+
+    let await_ceremony =
+        move |begun: Result<PendingPasskey, NostrAuthError>, creating: bool| match begun {
+            Ok(pending) => {
+                set_sub_step.set(PasskeySubStep::Loading);
+                set_error.set(None);
+                set_orphan.set(false);
+                attempt.spawn(async move {
+                    match pending.finish().await {
+                        Ok(session) => on_auth.run(AuthResult::Passkey(session)),
+                        Err(e) => {
+                            set_orphan
+                                .set(creating && matches!(e, NostrAuthError::PasskeyNotSupported));
+                            set_error.set(Some(e.to_string()));
+                            set_sub_step.set(PasskeySubStep::Choose);
+                        }
                     }
-                }
-            });
-        }
-        Err(e) => set_error.set(Some(e.to_string())),
-    };
+                });
+            }
+            Err(e) => set_error.set(Some(e.to_string())),
+        };
 
     view! {
         <div data-nostr-step="passkey">
+            <Show when=move || orphan.get()>
+                <div data-nostr-info="">
+                    "A passkey may have been saved anyway. Remove the 'nostr' passkey from your password manager or device before trying again."
+                </div>
+            </Show>
             <Show when=move || sub_step.get() == PasskeySubStep::Choose fallback=move || view! {
                 <div>
                     <span
@@ -873,7 +884,7 @@ fn StepPasskey(
                         let rp = rp_id.with_value(|rp_id| effective_rp_id(rp_id.as_deref()));
                         let begun = rp_name
                             .with_value(|rp_name| PasskeySession::begin_create(&rp, rp_name));
-                        await_ceremony(begun);
+                        await_ceremony(begun, true);
                     }
                 >
                     "Create new Nostr identity"
@@ -883,7 +894,7 @@ fn StepPasskey(
                     on:click=move |_| {
                         let rp = rp_id.with_value(|rp_id| effective_rp_id(rp_id.as_deref()));
                         // `None`: a discoverable login, where the browser offers every stored passkey.
-                        await_ceremony(PasskeySession::begin_authenticate(&rp, None));
+                        await_ceremony(PasskeySession::begin_authenticate(&rp, None), false);
                     }
                 >
                     "I already have a Nostr passkey — restore it"

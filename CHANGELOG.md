@@ -153,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crate replaced its socket now says the signer may still have received it, so apps do not blindly
   retry a signature.
 - A NIP-44 encrypt result from an extension or remote signer that is not a NIP-44 v2 payload (for example NIP-04 output or the plaintext) is now refused with `EncryptionFailed` instead of being returned as ciphertext.
+- After a passkey is created, every failure now says the passkey exists and should be used rather than recreated; a passkey created on an authenticator without PRF gets a warning in the modal. Ceremony errors no longer show a JavaScript debug dump. A missing or empty credential id is refused instead of being stored.
 
 ### Security
 

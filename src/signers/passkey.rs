@@ -189,16 +189,17 @@ mod imp {
             let Some(rp_id) = self.create_rp_id else {
                 return derive_from_credential(&credential);
             };
-            match prf_outcome(&credential)? {
-                PrfOutcome::Output(_) => derive_from_credential(&credential),
-                PrfOutcome::EnabledWithoutOutput => {
-                    let raw_id = credential_id_of(&credential)?;
-                    follow_up_get(&rp_id, &raw_id)
-                        .await
-                        .map_err(follow_up_error)
+            let created = async {
+                match prf_outcome(&credential)? {
+                    PrfOutcome::Output(_) => derive_from_credential(&credential),
+                    PrfOutcome::EnabledWithoutOutput => {
+                        let raw_id = credential_id_of(&credential)?;
+                        follow_up_get(&rp_id, &raw_id).await
+                    }
+                    PrfOutcome::Unavailable => Err(NostrAuthError::PasskeyNotSupported),
                 }
-                PrfOutcome::Unavailable => Err(NostrAuthError::PasskeyNotSupported),
-            }
+            };
+            created.await.map_err(follow_up_error)
         }
     }
 
@@ -281,7 +282,7 @@ mod imp {
 
         let promise = credentials
             .create_with_options(&options.unchecked_into())
-            .map_err(|e| NostrAuthError::PasskeyFailed(format!("{e:?}")))?;
+            .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
 
         Ok(Pending {
             credential: JsFuture::from(promise),
@@ -343,7 +344,7 @@ mod imp {
 
         let promise = credentials
             .get_with_options(&options.unchecked_into())
-            .map_err(|e| NostrAuthError::PasskeyFailed(format!("{e:?}")))?;
+            .map_err(|e| NostrAuthError::PasskeyFailed(js_err_msg(&e)))?;
 
         Ok(Pending {
             credential: JsFuture::from(promise),
@@ -404,7 +405,11 @@ mod imp {
     fn credential_id_of(credential: &JsValue) -> Result<Vec<u8>, NostrAuthError> {
         let raw_id = Reflect::get(credential, &"rawId".into())
             .map_err(|e| NostrAuthError::PasskeyFailed(format!("no rawId: {}", js_err_msg(&e))))?;
-        Ok(Uint8Array::new(&raw_id).to_vec())
+        let id = Uint8Array::new(&raw_id).to_vec();
+        if id.is_empty() {
+            return Err(NostrAuthError::PasskeyFailed("no rawId".into()));
+        }
+        Ok(id)
     }
 
     fn derive_from_credential(credential: &JsValue) -> Result<PasskeySession, NostrAuthError> {
@@ -462,6 +467,52 @@ mod imp {
 
         const OUTPUT_0_TO_31: &str =
             "{ prf: { results: { first: Uint8Array.from({ length: 32 }, (_, i) => i).buffer } } }";
+
+        #[wasm_bindgen_test]
+        async fn failed_create_says_the_passkey_exists() {
+            let fake = credential("{ prf: { results: { first: new Uint8Array(5).buffer } } }");
+            let pending = Pending {
+                credential: JsFuture::from(js_sys::Promise::resolve(&fake)),
+                create_rp_id: Some("example.com".into()),
+                _abort: AbortOnDrop(web_sys::AbortController::new().unwrap()),
+            };
+            let Err(NostrAuthError::PasskeyFailed(text)) = pending.finish().await else {
+                unreachable!("expected PasskeyFailed");
+            };
+            assert!(text.contains("passkey created"), "{text}");
+        }
+
+        #[wasm_bindgen_test]
+        fn sync_ceremony_throw_is_not_a_debug_dump() {
+            js_sys::eval(
+                "globalThis.__nav = globalThis.navigator; globalThis.window = globalThis; \
+                 globalThis.Window = class { static [Symbol.hasInstance]() { return true; } }; \
+                 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { credentials: { \
+                   create() { throw new TypeError('boom'); }, get() { throw new TypeError('boom'); } } } });",
+            )
+            .unwrap();
+            let results = [
+                begin_create("example.com", "Example").map(|_| ()),
+                begin_authenticate("example.com", None).map(|_| ()),
+            ];
+            js_sys::eval("Object.defineProperty(globalThis, 'navigator', { configurable: true, value: globalThis.__nav });").unwrap();
+            for got in results {
+                let Err(NostrAuthError::PasskeyFailed(text)) = got else {
+                    unreachable!("expected PasskeyFailed");
+                };
+                assert!(!text.contains("JsValue"), "{text}");
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn missing_raw_id_is_rejected() {
+            let fake = js_sys::eval(&format!(
+                "({{ getClientExtensionResults() {{ return {OUTPUT_0_TO_31}; }} }})"
+            ))
+            .unwrap();
+            let got = derive_from_credential(&fake).map(|s| s.credential_id);
+            assert!(got.is_err(), "missing rawId gave credential id {got:?}");
+        }
 
         #[wasm_bindgen_test]
         fn derive_from_fake_credential() {
