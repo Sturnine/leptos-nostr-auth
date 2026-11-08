@@ -680,3 +680,221 @@ mod wasm_tests {
         ));
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod tampered_bunker {
+    use super::*;
+    use crate::signers::test_ws;
+    use core::cell::RefCell;
+    use nostr::event::{FinalizeEvent as _, Kind, Tag, UnsignedEvent};
+    use nostr::key::Keys;
+    use nostr::message::{ClientMessage, RelayMessage, SubscriptionId};
+    use nostr::nips::nip44;
+    use nostr::nips::nip46::{NostrConnectMessage, NostrConnectMethod};
+    use nostr::types::Timestamp;
+    use std::rc::Rc;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    const VICTIM: &str = "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2";
+
+    type Log = Rc<RefCell<Vec<NostrConnectMethod>>>;
+
+    enum Answers {
+        /// Every result is the victim's public key, without holding the victim's key.
+        VictimKeyOnly,
+        Holds(Keys),
+    }
+
+    impl Answers {
+        fn result(&self, method: NostrConnectMethod, params: &[String]) -> String {
+            let Self::Holds(user) = self else {
+                return VICTIM.to_owned();
+            };
+            let param = |i: usize| params.get(i).unwrap();
+            match method {
+                NostrConnectMethod::SignEvent => UnsignedEvent::from_json(param(0))
+                    .unwrap()
+                    .finalize(user)
+                    .unwrap()
+                    .as_json(),
+                NostrConnectMethod::Nip44Encrypt => nip44::encrypt(
+                    user.secret_key(),
+                    &PublicKey::from_hex(param(0)).unwrap(),
+                    param(1),
+                    nip44::Version::V2,
+                )
+                .unwrap(),
+                _ => user.public_key().to_hex(),
+            }
+        }
+    }
+
+    async fn fake_signer(remote: Keys, client: PublicKey, answers: Answers, methods: Log) {
+        loop {
+            test_ws::tick(10).await;
+            for ws in test_ws::sockets().iter() {
+                for frame in test_ws::take_sent(&ws) {
+                    let Ok(ClientMessage::Event(event)) = ClientMessage::from_json(&frame) else {
+                        continue;
+                    };
+                    let plain =
+                        nip44::decrypt(remote.secret_key(), &event.pubkey, &event.content).unwrap();
+                    let NostrConnectMessage::Request { id, method, params } =
+                        NostrConnectMessage::from_json(&plain).unwrap()
+                    else {
+                        continue;
+                    };
+                    let result = answers.result(method, &params);
+                    methods.borrow_mut().push(method);
+                    let reply = serde_json::json!({ "id": id, "result": result }).to_string();
+                    let content =
+                        nip44::encrypt(remote.secret_key(), &client, reply, nip44::Version::V2)
+                            .unwrap();
+                    let answer = UnsignedEvent::new(
+                        remote.public_key(),
+                        Timestamp::from_secs(1_700_000_000),
+                        Kind::NostrConnect,
+                        [Tag::public_key(client)],
+                        content,
+                    )
+                    .finalize(&remote)
+                    .unwrap();
+                    let msg = RelayMessage::event(SubscriptionId::new("nip46-persistent"), answer)
+                        .as_json();
+                    test_ws::deliver(&ws, &msg);
+                }
+            }
+        }
+    }
+
+    fn stored(user_hex: &str, remote: &Keys, client: &Keys) -> PersistedSession {
+        PersistedSession {
+            public_key_hex: user_hex.to_owned(),
+            method: PersistedMethod::Bunker,
+            bunker_uri: Some(format!(
+                "bunker://{}?relay=wss%3A%2F%2Fsigner.example",
+                remote.public_key().to_hex()
+            )),
+            bunker_client_secret_hex: Some(client.secret_key().to_secret_hex()),
+            passkey_credential_id: None,
+        }
+    }
+
+    fn bunker(result: Result<AuthResult, NostrAuthError>) -> BunkerSession {
+        match result {
+            Ok(AuthResult::Bunker(session)) => *session,
+            Ok(_) => unreachable!("restored another method"),
+            Err(e) => unreachable!("restore failed: {e}"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn unproven_bunker_never_receives_nip44_plaintext() {
+        test_ws::install();
+        let attacker = Keys::generate();
+        let client = Keys::generate();
+        let stored = stored(VICTIM, &attacker, &client);
+        let methods = Log::default();
+        let signer = fake_signer(
+            attacker,
+            client.public_key(),
+            Answers::VictimKeyOnly,
+            Rc::clone(&methods),
+        );
+        let body = async {
+            if let Ok(session) = restore_session(&stored, 2).await {
+                let peer = Keys::generate().public_key();
+                let got = session.nip44_encrypt(&peer, "meet at nine").await;
+                assert!(
+                    got.is_err(),
+                    "encrypted through a signer without the key: {got:?}"
+                );
+            }
+        };
+        futures::pin_mut!(signer, body);
+        futures::future::select(body, signer).await;
+        assert!(
+            !methods.borrow().contains(&NostrConnectMethod::Nip44Encrypt),
+            "plaintext reached a signer that never proved the key: {:?}",
+            methods.borrow()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn proof_runs_once_then_nip44_goes_through() {
+        test_ws::install();
+        let remote = Keys::generate();
+        let client = Keys::generate();
+        let victim = Keys::generate();
+        let stored = stored(&victim.public_key().to_hex(), &remote, &client);
+        let methods = Log::default();
+        let signer = fake_signer(
+            remote,
+            client.public_key(),
+            Answers::Holds(victim),
+            Rc::clone(&methods),
+        );
+        let body = async {
+            let session = bunker(restore_session(&stored, 2).await);
+            let peer = Keys::generate().public_key();
+            let got = session.nip44_encrypt(&peer, "a").await;
+            assert!(got.is_ok(), "{got:?}");
+            assert_eq!(
+                *methods.borrow(),
+                [
+                    NostrConnectMethod::GetPublicKey,
+                    NostrConnectMethod::SignEvent,
+                    NostrConnectMethod::Nip44Encrypt
+                ]
+            );
+            let again = session.nip44_encrypt(&peer, "b").await;
+            assert!(again.is_ok(), "{again:?}");
+            assert_eq!(
+                methods.borrow().get(3..),
+                Some(&[NostrConnectMethod::Nip44Encrypt][..])
+            );
+        };
+        futures::pin_mut!(signer, body);
+        futures::future::select(body, signer).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn concurrent_nip44_calls_share_one_proof() {
+        test_ws::install();
+        let remote = Keys::generate();
+        let client = Keys::generate();
+        let victim = Keys::generate();
+        let stored = stored(&victim.public_key().to_hex(), &remote, &client);
+        let methods = Log::default();
+        let signer = fake_signer(
+            remote,
+            client.public_key(),
+            Answers::Holds(victim),
+            Rc::clone(&methods),
+        );
+        let body = async {
+            let session = bunker(restore_session(&stored, 2).await);
+            let peer = Keys::generate().public_key();
+            let (a, b) = futures::future::join(
+                session.nip44_encrypt(&peer, "a"),
+                session.nip44_encrypt(&peer, "b"),
+            )
+            .await;
+            assert!(a.is_ok() && b.is_ok(), "{a:?} {b:?}");
+            let signs = methods
+                .borrow()
+                .iter()
+                .filter(|m| **m == NostrConnectMethod::SignEvent)
+                .count();
+            assert_eq!(
+                signs,
+                1,
+                "one challenge per session: {:?}",
+                methods.borrow()
+            );
+        };
+        futures::pin_mut!(signer, body);
+        futures::future::select(body, signer).await;
+    }
+}

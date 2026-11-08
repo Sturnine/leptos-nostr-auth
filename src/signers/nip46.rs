@@ -124,6 +124,10 @@ impl BunkerSession {
     ///
     /// A lost socket ends the request the same way as on [`sign_event`](Self::sign_event).
     ///
+    /// Before the first call on a session that has not signed anything, the signer is asked to sign
+    /// a short check event that is never published; a signer that cannot sign it fails the call
+    /// with `EncryptionFailed`.
+    ///
     /// # Errors
     ///
     /// [`NostrAuthError::InvalidPublicKey`] when `peer` is not on the curve, before anything is sent
@@ -146,6 +150,10 @@ impl BunkerSession {
     /// NIP-44 decrypt via the remote signer (NIP-46 `nip44_decrypt` method).
     ///
     /// A lost socket ends the request the same way as on [`sign_event`](Self::sign_event).
+    ///
+    /// Before the first call on a session that has not signed anything, the signer is asked to sign
+    /// a short check event that is never published; a signer that cannot sign it fails the call
+    /// with `EncryptionFailed`.
     ///
     /// # Errors
     ///
@@ -200,6 +208,7 @@ mod imp {
     use core::fmt::Write;
     use js_sys::{Array, Promise};
     use leptos::prelude::{ArcRwSignal, Read, Update, WithUntracked};
+    use nostr::event::{Kind, Tag, UnsignedEvent};
     use nostr::key::{Keys, PublicKey, SecretKey};
     use nostr::nips::nip46::{NostrConnectRequest, ResponseResult};
     use nostr::types::RelayUrl;
@@ -215,10 +224,11 @@ mod imp {
     use crate::signers::event_contract::{checked_event, prepare};
     use crate::signers::nip46_protocol::{
         AUTH_URL_TIMEOUT_SECS, AttemptLog, BunkerTarget, DeadlineAction, Effect, Handshake,
-        HttpsUrl, Inflight, Peer, PromptList, REQUEST_BUILD_FAILED, ReconnectGate,
-        ReconnectOutcome, ReconnectWaker, RpcFailure, connect_request, connect_result, event_frame,
-        needs_connect, nip44_result, parse_bunker_uri, persisted_uri, public_key_result,
-        request_event, request_message, rotate_to_front, signed_event_result, subscribe_frame,
+        HttpsUrl, Inflight, Peer, PromptList, RECONNECT_CANCELLED, REQUEST_BUILD_FAILED,
+        ReconnectGate, ReconnectOutcome, ReconnectWaker, RpcFailure, connect_request,
+        connect_result, event_frame, needs_connect, nip44_result, parse_bunker_uri, persisted_uri,
+        public_key_result, request_event, request_message, rotate_to_front, signed_event_result,
+        subscribe_frame,
     };
     use crate::types::NostrAuthError;
 
@@ -319,6 +329,9 @@ mod imp {
         handlers: RefCell<Option<SocketHandlers>>,
         inflight: InflightSlot,
         connect_lock: ConnectLock,
+        /// Set by the first `sign_event` that passes `checked_event`; never cleared.
+        proven: Cell<bool>,
+        proof_lock: ConnectLock,
         /// Set once by `close`, and never cleared.
         pub(super) closed: Cell<bool>,
         /// The attempt `do_reconnect` is opening. It is not in `ws` and has no request entries,
@@ -488,7 +501,61 @@ mod imp {
             .await
             .and_then(signed_event_result)
             .map_err(RpcFailure::into_signing_error)?;
-        checked_event(&request, session.public_key, &returned)
+        let checked = checked_event(&request, session.public_key, &returned)?;
+        session.conn.proven.set(true);
+        Ok(checked)
+    }
+
+    const PROOF_KIND: u16 = 29_421;
+    const PROOF_FAILED: &str = "the remote signer did not prove it holds this account's key";
+
+    /// A public key is public, so `get_public_key` proves nothing; NIP-44 waits for a checked
+    /// signature. Concurrent callers share one challenge, so a signer that prompts per request asks
+    /// once.
+    async fn ensure_proven(session: &BunkerSession) -> Result<(), NostrAuthError> {
+        if session.conn.closed.get() {
+            return Err(closed_error());
+        }
+        for _ in 0..3 {
+            if session.conn.proven.get() {
+                return Ok(());
+            }
+            let (woken, slot, waker) = wake_pair();
+            if let Some(lead) = session.conn.proof_lock.join(waker) {
+                let result = prove(session).await;
+                lead.finish(result.clone());
+                return result;
+            }
+            let _ = JsFuture::from(woken).await;
+            let outcome = slot.borrow_mut().take();
+            match outcome {
+                Some(Err(NostrAuthError::BunkerConnectionFailed(m)))
+                    if m == RECONNECT_CANCELLED => {}
+                Some(outcome) => return outcome,
+                None => {}
+            }
+        }
+        Err(NostrAuthError::EncryptionFailed(PROOF_FAILED.into()))
+    }
+
+    async fn prove(session: &BunkerSession) -> Result<(), NostrAuthError> {
+        let challenge = UnsignedEvent::new(
+            session.public_key,
+            now_timestamp(),
+            Kind::Custom(PROOF_KIND),
+            [Tag::custom("challenge", [hex_of(&random_bytes(32))])],
+            "leptos-nostr-auth: confirm this signer holds the key",
+        );
+        match sign_event(session, &challenge.as_json()).await {
+            Ok(_) => Ok(()),
+            Err(NostrAuthError::SigningFailed(why)) => Err(NostrAuthError::EncryptionFailed(
+                format!("{PROOF_FAILED}: {why}"),
+            )),
+            Err(NostrAuthError::SignerKeyMismatch) => {
+                Err(NostrAuthError::EncryptionFailed(PROOF_FAILED.into()))
+            }
+            Err(other) => Err(other),
+        }
     }
 
     pub(super) async fn nip44_encrypt(
@@ -496,6 +563,7 @@ mod imp {
         peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
+        ensure_proven(session).await?;
         let request = NostrConnectRequest::Nip44Encrypt {
             public_key: *peer,
             text: plaintext.to_owned(),
@@ -512,6 +580,7 @@ mod imp {
         peer: &PublicKey,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
+        ensure_proven(session).await?;
         let request = NostrConnectRequest::Nip44Decrypt {
             public_key: *peer,
             ciphertext: ciphertext.to_owned(),
@@ -801,6 +870,13 @@ mod imp {
                 }
             }
         }
+    }
+
+    fn hex_of(bytes: &[u8]) -> String {
+        bytes.iter().fold(String::new(), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
     }
 
     fn generate_request_id() -> String {

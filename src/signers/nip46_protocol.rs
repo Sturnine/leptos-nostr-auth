@@ -33,7 +33,7 @@ const REFUSED_AUTH_URL: &str = "remote signer sent an approval link that is not 
 pub(super) const REQUEST_BUILD_FAILED: &str = "could not build the request";
 /// Fixed text for a socket that went away. A close carries nothing trusted.
 const SOCKET_LOST: &str = "relay connection lost";
-const RECONNECT_CANCELLED: &str = "reconnect cancelled";
+pub(super) const RECONNECT_CANCELLED: &str = "reconnect cancelled";
 
 pub(super) struct BunkerTarget {
     pub(super) remote: PublicKey,

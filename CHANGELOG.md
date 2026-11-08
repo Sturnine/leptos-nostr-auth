@@ -157,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An `ncryptsec` string now stays only after `WrongPassword`, where anyone who reads it can attack it offline at its scrypt cost. `InvalidNcryptsec`, including a pasted `nsec1...` and the `log_n` refusal, empties the field, and the error says why. A secret pasted in this field should be treated as exposed.
 - The bunker, ncryptsec, password, secret key and read-only inputs now carry `autocomplete="off"` and `spellcheck="false"`. Browsers may ignore `autocomplete="off"`.
 - Documented that a bunker restore's matching public key does not prove the signer holds the key, and that a one-time localStorage write can redirect a stored bunker session, or swap in another identity, until logout.
+- A bunker session now encrypts or decrypts only after its signer has produced a valid signature for the account. If the app has not signed yet, the first NIP-44 call sends one signing request for an unpublished check event, which some signers ask the user to approve. A stored session pointed at another signer can no longer receive NIP-44 plaintext.
 
 ## [0.1.0] - 2026-07-22
 
