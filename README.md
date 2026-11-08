@@ -27,7 +27,7 @@ leptos-nostr-auth = { version = "0.2", features = ["csr"] }
 
 ```rust
 use leptos::prelude::*;
-use leptos_nostr_auth::{use_nostr_auth, NostrAuthProvider};
+use leptos_nostr_auth::{use_nostr_auth, AuthResult, NostrAuthProvider};
 
 fn main() {
     leptos::mount::mount_to_body(App);
@@ -66,7 +66,7 @@ fn HomePage() -> impl IntoView {
             }
         >
             <p>"Logged in as: " {move || auth.npub.get().unwrap_or_default()}</p>
-            <p>"via " {move || auth.auth.get().map(|a| a.method_name()).unwrap_or("")}</p>
+            <p>"via " {move || auth.auth.with(|a| a.as_ref().map_or("", AuthResult::method_name))}</p>
             <button on:click=move |_| auth.logout.run(())>"Logout"</button>
         </Show>
     }
@@ -225,7 +225,7 @@ Two runnable examples are included in the `examples/` directory:
 | `basic-csr` | CSR (Trunk) | Headless (`data-nostr-*`) | `trunk serve`, then open `http://localhost:3000` |
 | `with-axum-ssr` | SSR + Hydrate (cargo-leptos) | Headless | `cargo leptos serve`, then open `http://localhost:3000` |
 
-Both examples show a login button, a restore indicator, a forget-session button and logout. `basic-csr` also signs events.
+Both examples show a login button, a restore indicator, a forget-session button and logout. `basic-csr` also signs events, and `with-axum-ssr` sends a strict Content-Security-Policy.
 
 Open `localhost`, not `127.0.0.1`. The default RP ID is the page's hostname, and WebAuthn refuses an IP address as an RP ID, so creating a passkey on `127.0.0.1` throws `SecurityError`.
 
@@ -271,9 +271,7 @@ let auth = use_nostr_auth();
 let npub: Signal<Option<String>> = auth.npub;
 
 // Check auth method for display
-if let Some(result) = auth.auth.get() {
-    let method = result.method_name(); // "Browser Extension", "Passkey", etc.
-}
+let method = auth.auth.with(|a| a.as_ref().map_or("", AuthResult::method_name)); // "Browser Extension", "Passkey", etc.
 ```
 
 ### Signing events
@@ -281,23 +279,21 @@ if let Some(result) = auth.auth.get() {
 ```rust
 use leptos_nostr_auth::AuthResult;
 
-// Check if this session can sign (false only for Read-Only)
-if auth.auth.get().map(|a| a.can_sign()).unwrap_or(false) {
-    if let Some(auth_result) = auth.auth.get() {
-        let pubkey = auth_result.public_key();
-        use leptos_nostr_auth::nostr::{event::{Kind, UnsignedEvent}, types::Timestamp};
-        let now = Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64);
-        let unsigned = UnsignedEvent::new(pubkey, now, Kind::TextNote, [], "Hello Nostr!");
-        let event_json = unsigned.as_json();
+// A session that can sign (every method but Read-Only)
+if let Some(auth_result) = auth.auth.get_untracked().filter(AuthResult::can_sign) {
+    let pubkey = auth_result.public_key();
+    use leptos_nostr_auth::nostr::{event::{Kind, UnsignedEvent}, types::Timestamp};
+    let now = Timestamp::from_secs((js_sys::Date::now() / 1000.0) as u64);
+    let unsigned = UnsignedEvent::new(pubkey, now, Kind::TextNote, [], "Hello Nostr!");
+    let event_json = unsigned.as_json();
 
-        // Unified async API — works for all signing methods
-        wasm_bindgen_futures::spawn_local(async move {
-            match auth_result.sign_event(&event_json).await {
-                Ok(signed_json) => { /* publish to relays */ }
-                Err(e) => { /* show error */ }
-            }
-        });
-    }
+    // Unified async API — works for all signing methods
+    wasm_bindgen_futures::spawn_local(async move {
+        match auth_result.sign_event(&event_json).await {
+            Ok(signed_json) => { /* publish to relays */ }
+            Err(e) => { /* show error */ }
+        }
+    });
 }
 ```
 
@@ -543,6 +539,10 @@ NostrAuthConfig { persist_session: false, ..Default::default() }
 ```
 
 ## Security limits
+
+### Content-Security-Policy
+
+Serve the app with a strict Content-Security-Policy; the SSR example shows one.
 
 ### `is_authenticated` is not proof of identity
 

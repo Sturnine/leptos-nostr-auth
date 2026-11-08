@@ -37,6 +37,7 @@ hydrate = [
 ]
 ssr = [
   "leptos/ssr",
+  "leptos/nonce",
   "leptos-nostr-auth/ssr",
   "dep:leptos_axum",
   "dep:axum",

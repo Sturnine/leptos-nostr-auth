@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use leptos_nostr_auth::{NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
+use leptos_nostr_auth::{AuthResult, NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
 
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
@@ -9,6 +9,8 @@ pub fn hydrate() {
 }
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
+    #[cfg(feature = "ssr")]
+    send_csp();
     view! {
         <!DOCTYPE html>
         <html lang="en">
@@ -24,6 +26,25 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             </body>
         </html>
     }
+}
+
+// The `ws://` sources are for cargo-leptos live reload and local relays.
+#[cfg(feature = "ssr")]
+fn send_csp() {
+    use axum::http::{HeaderValue, header::CONTENT_SECURITY_POLICY};
+    use leptos_axum::ResponseOptions;
+
+    leptos::nonce::provide_nonce();
+    let nonce = leptos::nonce::use_nonce().expect("provide_nonce just ran");
+    let policy = format!(
+        "default-src 'self'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; \
+         style-src 'self'; connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:*; \
+         img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    );
+    expect_context::<ResponseOptions>().insert_header(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_str(&policy).expect("the policy is visible ASCII"),
+    );
 }
 
 #[component]
@@ -87,7 +108,7 @@ fn HomePage() -> impl IntoView {
                 <p>
                     "Logged in via: "
                     <strong>
-                        {move || auth.auth.get().map_or("", |a| a.method_name())}
+                        {move || auth.auth.with(|a| a.as_ref().map_or("", AuthResult::method_name))}
                     </strong>
                 </p>
                 <p>

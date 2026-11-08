@@ -182,6 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A passkey PRF result or credential id that is not a byte buffer is now refused. Before, a number was coerced into zero bytes, giving a key anyone could compute. Keys from conforming browsers, and byte buffers from another JavaScript realm, are unchanged.
 - An approval link now ignores a primary click for half a second after it appears and names the signer's host, so a hostile signer cannot time it under the user's next primary click. Middle-click and "open in new tab" are not guarded.
 - The stored bunker URI is now built from the session's own signer key and relays, so a bunker secret put back into the public `bunker_uri` field is never persisted.
+- The examples no longer clone the session in views or keep a signed event across logins, and the SSR example sends a strict Content-Security-Policy.
 
 ## [0.1.0] - 2026-07-22
 
