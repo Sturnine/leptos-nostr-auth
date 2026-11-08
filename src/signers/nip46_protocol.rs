@@ -14,7 +14,7 @@ use nostr::nips::nip46::{
 use nostr::types::{RelayUrl, Timestamp, Url};
 use serde::Deserialize;
 
-use super::sanitize_remote_text;
+use super::{is_nip44_payload, sanitize_remote_text};
 use crate::types::NostrAuthError;
 
 /// Most relays accepted from one URI, counted after de-duplication.
@@ -461,7 +461,9 @@ pub(super) fn signed_event_result(result: ResponseResult) -> Result<String, RpcF
 
 pub(super) fn nip44_result(result: ResponseResult) -> Result<String, RpcFailure> {
     match result {
-        ResponseResult::Nip44Encrypt { ciphertext } => Ok(ciphertext),
+        ResponseResult::Nip44Encrypt { ciphertext } if is_nip44_payload(&ciphertext) => {
+            Ok(ciphertext)
+        }
         ResponseResult::Nip44Decrypt { plaintext } => Ok(plaintext),
         _ => Err(RpcFailure::Malformed(UNEXPECTED_RESULT)),
     }
@@ -1491,6 +1493,25 @@ mod tests {
         };
         assert!(text.starts_with("nopex"));
         assert_eq!(text.chars().count(), MAX_REMOTE_TEXT_CHARS);
+    }
+
+    #[test]
+    fn nip44_encrypt_result_must_be_a_payload() {
+        let (a, b) = (Keys::generate(), Keys::generate());
+        let real =
+            nip44::encrypt(a.secret_key(), &b.public_key(), "hi", nip44::Version::V2).unwrap();
+        assert!(is_nip44_payload(&real));
+        assert!(nip44_result(ResponseResult::Nip44Encrypt { ciphertext: real }).is_ok());
+        for bad in [
+            "meet at 9, the secret plan",
+            "aGVsbG8=?iv=AAAAAAAAAAAAAAAAAAAAAA==",
+            "",
+        ] {
+            let got = nip44_result(ResponseResult::Nip44Encrypt {
+                ciphertext: bad.into(),
+            });
+            assert!(got.is_err(), "plaintext accepted as ciphertext: {bad}");
+        }
     }
 
     #[test]

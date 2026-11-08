@@ -87,7 +87,7 @@ mod imp {
     use super::Nip07Handle;
     use crate::signers::browser::make_rpc_promise;
     use crate::signers::event_contract::{checked_event, prepare};
-    use crate::signers::{public_key_from_hex, sanitize_remote_text};
+    use crate::signers::{is_nip44_payload, public_key_from_hex, sanitize_remote_text};
     use crate::types::NostrAuthError;
 
     const STATIC_REJECTION: &str = "extension rejected the request";
@@ -221,6 +221,15 @@ mod imp {
         .await?
         .as_string()
         .ok_or_else(|| NostrAuthError::EncryptionFailed("expected string ciphertext".into()))
+        .and_then(|ciphertext| {
+            is_nip44_payload(&ciphertext)
+                .then_some(ciphertext)
+                .ok_or_else(|| {
+                    NostrAuthError::EncryptionFailed(
+                        "extension returned a non-NIP-44 payload".into(),
+                    )
+                })
+        })
     }
 
     pub(super) async fn nip44_decrypt(
@@ -321,6 +330,7 @@ mod wasm_tests {
 
     const INVALID: &str = "signer returned an invalid event";
     const STATIC_TEXT: &str = "extension rejected the request";
+    const PAYLOAD: &str = "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     fn shim(src: &str) {
         js_sys::eval(src).unwrap();
@@ -412,7 +422,7 @@ mod wasm_tests {
                 getPublicKey: async () => "{}",
                 signEvent: async () => ({}),
                 nip44: {{
-                    encrypt: async (pk, pt) => "enc:" + pk + ":" + pt,
+                    encrypt: async (pk, pt) => {{ globalThis.__args = pk + ":" + pt; return "{PAYLOAD}"; }},
                     decrypt: async (pk, ct) => "dec:" + pk + ":" + ct,
                 }},
             }} }};"#,
@@ -425,9 +435,13 @@ mod wasm_tests {
         assert_eq!(signed, want);
         let peer = peer();
         let hex = peer.to_hex();
+        assert_eq!(h.nip44_encrypt(&peer, "hi").await.unwrap(), PAYLOAD);
         assert_eq!(
-            h.nip44_encrypt(&peer, "hi").await.unwrap(),
-            format!("enc:{hex}:hi")
+            js_sys::eval("globalThis.__args")
+                .unwrap()
+                .as_string()
+                .unwrap(),
+            format!("{hex}:hi")
         );
         assert_eq!(
             h.nip44_decrypt(&peer, "ct").await.unwrap(),
@@ -702,6 +716,17 @@ mod wasm_tests {
     }
 
     #[wasm_bindgen_test]
+    async fn nip44_encrypt_refuses_non_nip44_ciphertext() {
+        let (keys, h) = session();
+        nip44_shim(
+            &keys.public_key().to_hex(),
+            "return 'aGVsbG8=?iv=AAAAAAAAAAAAAAAAAAAAAA==';",
+        );
+        let got = h.nip44_encrypt(&peer(), "x").await;
+        assert!(got.is_err(), "accepted {got:?}");
+    }
+
+    #[wasm_bindgen_test]
     async fn nip44_account_check_errors() {
         let (_, h) = session();
         for (gpk, rejected) in [
@@ -809,9 +834,9 @@ mod wasm_tests {
     #[wasm_bindgen_test]
     async fn nip44_through_auth_result() {
         let (keys, auth) = extension();
-        nip44_shim(&keys.public_key().to_hex(), "return 'from-shim';");
-        assert_eq!(auth.nip44_encrypt(&peer(), "x").await.unwrap(), "from-shim");
-        assert_eq!(auth.nip44_decrypt(&peer(), "x").await.unwrap(), "from-shim");
+        nip44_shim(&keys.public_key().to_hex(), &format!("return '{PAYLOAD}';"));
+        assert_eq!(auth.nip44_encrypt(&peer(), "x").await.unwrap(), PAYLOAD);
+        assert_eq!(auth.nip44_decrypt(&peer(), "x").await.unwrap(), PAYLOAD);
         assert_eq!(count("gpk"), 2.0);
         assert_eq!(count("enc"), 1.0);
         assert_eq!(count("dec"), 1.0);

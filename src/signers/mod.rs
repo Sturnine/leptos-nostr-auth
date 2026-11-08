@@ -39,6 +39,15 @@ use crate::types::NostrAuthError;
 #[cfg(not(feature = "ssr"))]
 pub(crate) const MAX_REMOTE_TEXT_CHARS: usize = 200;
 
+#[cfg(not(feature = "ssr"))]
+/// Shape only: a signer can still return well-formed garbage, which no check without the key can catch.
+pub(crate) fn is_nip44_payload(payload: &str) -> bool {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .is_ok_and(|bytes| bytes.first() == Some(&2) && (99..=65_603).contains(&bytes.len()))
+}
+
 /// Remove what could disguise relay, signer or extension text, and cap its length.
 /// `char::is_control` misses format characters such as U+202E, and line separators and
 /// blank-rendering fillers.
