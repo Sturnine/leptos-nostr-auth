@@ -224,11 +224,10 @@ mod imp {
     use crate::signers::event_contract::{checked_event, prepare};
     use crate::signers::nip46_protocol::{
         AUTH_URL_TIMEOUT_SECS, AttemptLog, BunkerTarget, DeadlineAction, Effect, Handshake,
-        HttpsUrl, Inflight, Peer, PromptList, RECONNECT_CANCELLED, REQUEST_BUILD_FAILED,
-        ReconnectGate, ReconnectOutcome, ReconnectWaker, RpcFailure, connect_request,
-        connect_result, event_frame, needs_connect, nip44_result, parse_bunker_uri, persisted_uri,
-        public_key_result, request_event, request_message, rotate_to_front, signed_event_result,
-        subscribe_frame,
+        HttpsUrl, Inflight, Peer, PromptList, RECONNECT_CANCELLED, ReconnectGate, ReconnectOutcome,
+        ReconnectWaker, RpcFailure, connect_request, connect_result, event_frame, needs_connect,
+        nip44_result, parse_bunker_uri, persisted_uri, public_key_result, request_event,
+        request_message, rotate_to_front, signed_event_result, subscribe_frame,
     };
     use crate::types::NostrAuthError;
 
@@ -360,7 +359,7 @@ mod imp {
             run_effects(effects, None);
             let current = self.ws.borrow().clone();
             if let Some(ws) = current {
-                self.retire_socket(&ws);
+                self.retire_socket(&ws, false);
             }
             let opening = self.opening.borrow_mut().take();
             if let Some(OpeningSocket { ws, wake }) = opening {
@@ -372,13 +371,17 @@ mod imp {
         /// Stop using `ws` and fail what is in flight on it. A relay's close frame leaves a socket
         /// `CLOSING` with no close event yet, and closing it here clears `onclose`, so its entries
         /// must fail now or they wait out their deadlines.
-        fn retire_socket(&self, ws: &web_sys::WebSocket) {
+        fn retire_socket(&self, ws: &web_sys::WebSocket, replaced: bool) {
             let current = self.ws.borrow().as_ref() == Some(ws);
             if current {
                 *self.ws.borrow_mut() = None;
             }
             close_socket(ws);
-            let effects = self.inflight.borrow_mut().fail_socket_lost();
+            let effects = if replaced {
+                self.inflight.borrow_mut().fail_socket_replaced()
+            } else {
+                self.inflight.borrow_mut().fail_socket_lost()
+            };
             run_effects(effects, None);
         }
     }
@@ -704,7 +707,8 @@ mod imp {
         async fn do_reconnect(&self) -> Result<web_sys::WebSocket, NostrAuthError> {
             let old_ws = self.conn.ws.borrow().clone();
             if let Some(old_ws) = old_ws {
-                self.conn.retire_socket(&old_ws);
+                self.conn
+                    .retire_socket(&old_ws, old_ws.ready_state() == web_sys::WebSocket::OPEN);
             }
             let mut last = NostrAuthError::BunkerConnectionFailed("no relay to try".into());
             for relay in &self.relays {
@@ -818,7 +822,7 @@ mod imp {
                 .borrow_mut()
                 .note_settled(result.as_ref().err());
             if tear_down {
-                self.conn.retire_socket(&ws);
+                self.conn.retire_socket(&ws, false);
             }
             result
         }
@@ -839,7 +843,7 @@ mod imp {
                 &message,
                 now_timestamp(),
             )
-            .ok_or(RpcFailure::Malformed(REQUEST_BUILD_FAILED))?;
+            .ok_or(RpcFailure::Build)?;
 
             let (woken, slot, waker): (_, _, RpcWaker) = wake_pair();
             self.conn

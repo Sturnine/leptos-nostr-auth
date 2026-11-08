@@ -148,6 +148,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a reload no longer returns the old identity. So does a login whose write fails.
 - A passkey created under a configured `rp_id` now logs in on a subdomain. A site with no configured `rp_id` sees no change.
 - Escape with a modal closed no longer fires `on_close`.
+- A bunker socket is no longer torn down after an approval link expires or the signer sends an unusable
+  answer, which failed other pending requests as "relay connection lost". A request failed because the
+  crate replaced its socket now says the signer may still have received it, so apps do not blindly
+  retry a signature.
 
 ### Security
 

@@ -752,6 +752,8 @@ All elements emit `data-nostr-*` attributes for styling:
   `NostrAuthContext::auth` instead of keeping a signer across login changes. A failed login closes
   nothing. `to_persisted_session` and the public fields still read.
 - A lost relay socket now fails pending requests with `BunkerConnectionFailed("relay connection lost")` as soon as the browser reports the close, including requests waiting for approval, which need a retry. A relay's close frame with TCP held open can wait for the browser's grace period or a new request, bounded by the request's deadline.
+  If the crate replaces a socket while a request waits, the request fails with a text saying the
+  signer may still answer; check before retrying a signature.
 - A pending request can fail with that same error once another request on the socket has timed out
   and a new request arrives, because the new request reconnects. A request waiting on a verified
   approval link keeps the socket instead.

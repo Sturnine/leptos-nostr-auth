@@ -30,9 +30,10 @@ const MISSING_RESULT: &str = "remote signer sent a response with no result";
 const UNEXPECTED_RESULT: &str = "remote signer sent an unexpected result";
 /// Fixed text for a refused `auth_url`. It must never quote the URL.
 const REFUSED_AUTH_URL: &str = "remote signer sent an approval link that is not a safe https URL";
-pub(super) const REQUEST_BUILD_FAILED: &str = "could not build the request";
+const REQUEST_BUILD_FAILED: &str = "could not build the request";
 /// Fixed text for a socket that went away. A close carries nothing trusted.
 const SOCKET_LOST: &str = "relay connection lost";
+const SOCKET_REPLACED: &str = "relay connection replaced while this request was pending; the signer may still have received it, so check before retrying";
 pub(super) const RECONNECT_CANCELLED: &str = "reconnect cancelled";
 
 pub(super) struct BunkerTarget {
@@ -290,6 +291,9 @@ pub(super) enum RpcFailure {
     /// The socket went away after the request was sent.
     SocketLost {
         signer_answered: bool,
+        /// The crate closed a socket that was still open, so the signer may still receive the
+        /// request.
+        replaced: bool,
     },
     /// The relay refused. Relay frames are unauthenticated, so this may be a hostile relay.
     Relay {
@@ -299,9 +303,10 @@ pub(super) enum RpcFailure {
     },
     /// A verified signer refused, with its sanitised text.
     Signer(String),
-    /// A verified response was unusable, or the request could not be built locally. Fixed text
-    /// only: parser errors can quote values.
+    /// A verified response was unusable. Fixed text only: parser errors can quote values.
     Malformed(&'static str),
+    /// The request could not be built locally, which proves nothing about the socket.
+    Build,
     SessionClosed,
 }
 
@@ -318,9 +323,13 @@ impl fmt::Debug for RpcFailure {
                 .finish(),
             Self::AuthRequired => f.write_str("AuthRequired"),
             Self::Socket(e) => f.debug_tuple("Socket").field(e).finish(),
-            Self::SocketLost { signer_answered } => f
+            Self::SocketLost {
+                signer_answered,
+                replaced,
+            } => f
                 .debug_struct("SocketLost")
                 .field("signer_answered", signer_answered)
+                .field("replaced", replaced)
                 .finish(),
             Self::Relay {
                 reason,
@@ -332,6 +341,7 @@ impl fmt::Debug for RpcFailure {
                 .finish(),
             Self::Signer(text) => f.debug_tuple("Signer").field(text).finish(),
             Self::Malformed(text) => f.debug_tuple("Malformed").field(text).finish(),
+            Self::Build => f.write_str("Build"),
             Self::SessionClosed => f.write_str("SessionClosed"),
         }
     }
@@ -349,6 +359,7 @@ impl RpcFailure {
             } | Self::Socket(_)
                 | Self::SocketLost {
                     signer_answered: false,
+                    ..
                 }
                 | Self::Relay {
                     signer_answered: false,
@@ -360,6 +371,7 @@ impl RpcFailure {
     pub(super) fn into_connect_error(self) -> NostrAuthError {
         match self {
             Self::Malformed(text) => NostrAuthError::BunkerConnectionFailed(text.to_owned()),
+            Self::Build => NostrAuthError::BunkerConnectionFailed(REQUEST_BUILD_FAILED.to_owned()),
             other => other.into_shared_error(),
         }
     }
@@ -367,6 +379,7 @@ impl RpcFailure {
     pub(super) fn into_signing_error(self) -> NostrAuthError {
         match self {
             Self::Malformed(text) => NostrAuthError::SigningFailed(text.to_owned()),
+            Self::Build => NostrAuthError::SigningFailed(REQUEST_BUILD_FAILED.to_owned()),
             Self::Signer(text) => NostrAuthError::SigningFailed(text),
             other => other.into_shared_error(),
         }
@@ -375,6 +388,7 @@ impl RpcFailure {
     pub(super) fn into_encryption_error(self) -> NostrAuthError {
         match self {
             Self::Malformed(text) => NostrAuthError::EncryptionFailed(text.to_owned()),
+            Self::Build => NostrAuthError::EncryptionFailed(REQUEST_BUILD_FAILED.to_owned()),
             Self::Signer(text) => NostrAuthError::EncryptionFailed(text),
             other => other.into_shared_error(),
         }
@@ -392,12 +406,16 @@ impl RpcFailure {
             Self::Timeout { .. } => NostrAuthError::BunkerTimeout,
             Self::AuthRequired => NostrAuthError::BunkerAuthRequired,
             Self::Socket(e) => e,
+            Self::SocketLost { replaced: true, .. } => {
+                NostrAuthError::BunkerConnectionFailed(SOCKET_REPLACED.into())
+            }
             Self::SocketLost { .. } => NostrAuthError::BunkerConnectionFailed(SOCKET_LOST.into()),
             Self::Relay { reason, .. } => {
                 NostrAuthError::BunkerConnectionFailed(format!("relay refused: {reason}"))
             }
             Self::Signer(text) => NostrAuthError::BunkerConnectionFailed(text),
             Self::Malformed(text) => NostrAuthError::BunkerConnectionFailed(text.to_owned()),
+            Self::Build => NostrAuthError::BunkerConnectionFailed(REQUEST_BUILD_FAILED.to_owned()),
             Self::SessionClosed => NostrAuthError::BunkerSessionClosed,
         }
     }
@@ -645,14 +663,27 @@ impl<W> Inflight<W> {
     }
 
     /// Record how a request on the current socket ended, `None` meaning success. Call after its
-    /// entry is gone. Returns whether to tear the socket down now.
+    /// entry is gone. Returns whether to tear the socket down now. A failure that only a live
+    /// signer on this socket can produce proves the socket alive.
     pub(super) fn note_settled(&mut self, failure: Option<&RpcFailure>) -> bool {
         match failure {
-            None | Some(RpcFailure::Signer(_)) => {
+            None
+            | Some(
+                RpcFailure::Signer(_)
+                | RpcFailure::AuthRequired
+                | RpcFailure::Malformed(_)
+                | RpcFailure::Timeout {
+                    signer_answered: true,
+                    ..
+                },
+            ) => {
                 self.suspect = false;
                 false
             }
-            Some(RpcFailure::Timeout { .. }) => {
+            Some(RpcFailure::Timeout {
+                signer_answered: false,
+                ..
+            }) => {
                 if self.entries.is_empty() {
                     return true;
                 }
@@ -811,7 +842,17 @@ impl<W> Inflight<W> {
     }
 
     pub(super) fn fail_socket_lost(&mut self) -> Vec<Effect<W>> {
-        self.fail_all_with(|signer_answered| RpcFailure::SocketLost { signer_answered })
+        self.fail_all_with(|signer_answered| RpcFailure::SocketLost {
+            signer_answered,
+            replaced: false,
+        })
+    }
+
+    pub(super) fn fail_socket_replaced(&mut self) -> Vec<Effect<W>> {
+        self.fail_all_with(|signer_answered| RpcFailure::SocketLost {
+            signer_answered,
+            replaced: true,
+        })
     }
 
     pub(super) fn fail_session_closed(&mut self) -> Vec<Effect<W>> {
@@ -1990,12 +2031,14 @@ mod tests {
             (
                 RpcFailure::SocketLost {
                     signer_answered: false,
+                    replaced: false,
                 },
                 true,
             ),
             (
                 RpcFailure::SocketLost {
                     signer_answered: true,
+                    replaced: false,
                 },
                 false,
             ),
@@ -2052,7 +2095,8 @@ mod tests {
         ));
         assert!(matches!(
             RpcFailure::SocketLost {
-                signer_answered: false
+                signer_answered: false,
+                replaced: false
             }
             .into_encryption_error(),
             NostrAuthError::BunkerConnectionFailed(_)
@@ -2109,7 +2153,10 @@ mod tests {
                 unreachable!("expected a failure");
             };
             let advances = failure.advances_to_next_relay();
-            let RpcFailure::SocketLost { signer_answered } = failure else {
+            let RpcFailure::SocketLost {
+                signer_answered, ..
+            } = failure
+            else {
                 unreachable!("expected a lost socket");
             };
             assert_eq!(signer_answered, !advances);
@@ -2122,7 +2169,10 @@ mod tests {
     #[test]
     fn socket_loss_is_not_a_relay_reason() {
         for signer_answered in [false, true] {
-            let lost = || RpcFailure::SocketLost { signer_answered };
+            let lost = || RpcFailure::SocketLost {
+                signer_answered,
+                replaced: false,
+            };
             for error in [lost().into_connect_error(), lost().into_signing_error()] {
                 let NostrAuthError::BunkerConnectionFailed(text) = error else {
                     unreachable!("expected a connection failure");
@@ -2209,17 +2259,30 @@ mod tests {
                 assert_eq!(tears_down, table == "empty");
                 assert_eq!(fx.inflight.suspect, marked || table != "empty");
 
+                for failure in [RpcFailure::AuthRequired, RpcFailure::Malformed("m")] {
+                    let mut fx = fixture(marked);
+                    assert!(!fx.inflight.note_settled(Some(&failure)));
+                    assert!(!fx.inflight.suspect, "{failure:?} on {table}");
+                }
+
+                let mut fx = fixture(marked);
+                assert!(!fx.inflight.note_settled(Some(&RpcFailure::Timeout {
+                    signer_answered: true,
+                    relay_asked_auth: false,
+                })));
+                assert!(!fx.inflight.suspect, "answered timeout on {table}");
+
                 for failure in [
-                    RpcFailure::AuthRequired,
+                    RpcFailure::Build,
                     RpcFailure::Relay {
                         reason: "r".into(),
                         signer_answered: false,
                     },
                     RpcFailure::SocketLost {
                         signer_answered: false,
+                        replaced: false,
                     },
                     RpcFailure::Socket(NostrAuthError::BunkerTimeout),
-                    RpcFailure::Malformed("m"),
                 ] {
                     let mut fx = fixture(marked);
                     assert!(!fx.inflight.note_settled(Some(&failure)));
@@ -2464,5 +2527,73 @@ mod tests {
         let response = fx.response("ack");
         assert_eq!(fx.inflight.fail_session_closed().len(), 1);
         assert!(fx.feed(&frame(&response)).is_empty());
+    }
+
+    fn two_pending() -> Inflight<()> {
+        let mut inflight = Inflight::default();
+        for (id, byte) in [("a", 1), ("b", 2)] {
+            inflight.insert(
+                id.to_owned(),
+                NostrConnectMethod::SignEvent,
+                EventId::from_byte_array([byte; 32]),
+                (),
+            );
+        }
+        inflight
+    }
+
+    #[test]
+    fn expired_approval_does_not_mark_socket_suspect() {
+        let mut inflight = two_pending();
+        let failure = RpcFailure::Timeout {
+            signer_answered: true,
+            relay_asked_auth: false,
+        };
+        assert!(!inflight.note_settled(Some(&failure)));
+        assert!(
+            !inflight.must_reconnect(),
+            "healthy socket marked for reconnect"
+        );
+        let mut alone = Inflight::<()>::default();
+        assert!(
+            !alone.note_settled(Some(&failure)),
+            "healthy socket torn down"
+        );
+    }
+
+    #[test]
+    fn verified_answers_clear_suspect() {
+        for proof in [RpcFailure::Malformed("x"), RpcFailure::AuthRequired] {
+            let mut inflight = two_pending();
+            inflight.note_settled(Some(&timeout_failure()));
+            inflight.note_settled(Some(&proof));
+            assert!(
+                !inflight.must_reconnect(),
+                "suspect survived a verified answer"
+            );
+        }
+    }
+
+    #[test]
+    fn local_build_failure_keeps_suspect() {
+        let mut inflight = two_pending();
+        inflight.note_settled(Some(&timeout_failure()));
+        inflight.note_settled(Some(&RpcFailure::Build));
+        assert!(inflight.must_reconnect());
+    }
+
+    #[test]
+    fn replaced_socket_says_the_signer_may_answer() {
+        let mut inflight = two_pending();
+        let mut effects = inflight.fail_socket_replaced();
+        let Some(Effect::Settle {
+            outcome: Err(failure),
+            ..
+        }) = effects.pop()
+        else {
+            unreachable!("no settle");
+        };
+        let text = failure.into_signing_error().to_string();
+        assert!(text.contains("may still"), "{text}");
     }
 }
