@@ -47,6 +47,9 @@ pub(super) fn checked_event(
     let Ok(event) = Event::from_json(returned) else {
         return failed("signer returned an invalid event");
     };
+    if super::check_on_curve(&event.pubkey).is_err() {
+        return failed("signer returned an invalid event");
+    }
     // First, so a switched account reports the typed error even when other fields differ too.
     if event.pubkey != session {
         return Err(NostrAuthError::SignerKeyMismatch);
@@ -228,6 +231,20 @@ mod tests {
             let forged = resigned(&other, &request, |e| e.pubkey = other.public_key());
             let err = checked_event(&request, keys.public_key(), &forged).unwrap_err();
             assert!(matches!(err, NostrAuthError::SignerKeyMismatch));
+        }
+
+        #[test]
+        fn off_curve_returned_pubkey_is_not_a_mismatch() {
+            let (keys, request) = session();
+            let mut value: serde_json::Value =
+                serde_json::from_str(&request.clone().finalize(&keys).unwrap().as_json()).unwrap();
+            let off = crate::signers::signer_traits::tests::off_curve().to_hex();
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("pubkey".to_owned(), off.into());
+            let err = checked_event(&request, keys.public_key(), &value.to_string()).unwrap_err();
+            assert!(!matches!(err, NostrAuthError::SignerKeyMismatch), "{err:?}");
         }
 
         #[test]
