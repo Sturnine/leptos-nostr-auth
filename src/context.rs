@@ -16,8 +16,8 @@ use crate::modal::{Attempt, NostrAuthModal, ProviderLink};
 use crate::platform::{effective_rp_id, page_has_been_active, prompt_allowed};
 use crate::storage::{
     LoginStorageAction, RestorePlan, begin_passkey_restore, initial_restoring,
-    is_logout_storage_event, login_storage_action, passkey_restore_target, restore_plan,
-    restore_session,
+    is_logout_storage_event, login_storage_action, passkey_restore_target, restore_is_current,
+    restore_plan, restore_session,
 };
 use crate::types::{AuthResult, NostrAuthConfig, NostrAuthError, PersistedSession};
 
@@ -241,7 +241,11 @@ pub fn NostrAuthProvider(
     let land_restore = move |result: Result<AuthResult, NostrAuthError>| {
         match result {
             Ok(result) => {
-                replace_auth(auth, set_auth, Some(result));
+                if restore_is_current(stored_session.get_untracked().as_ref(), &result) {
+                    replace_auth(auth, set_auth, Some(result));
+                } else {
+                    result.close_session();
+                }
                 set_restore_error.set(None);
             }
             Err(e) => {

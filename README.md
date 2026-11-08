@@ -531,6 +531,7 @@ Any removal of the stored session logs out other tabs, through the browser's `st
 - Removing a key that is not there fires no `storage` event. If nothing is stored, a logout in another tab does not reach this one, and this tab keeps its in-memory keys.
 - `localStorage.clear()` in another tab logs this tab out if the browser fires a `storage` event for it, even if no session of ours was stored, because the event does not say what was removed. An in-memory ncryptsec or nsec login ends too, and a bunker session closes for good. Use `removeItem` for your own keys. Chromium fires no event when the origin's storage was already empty.
 - Undecodable bytes under our key count the same: `removeItem` or `clear()` of them logs this tab out, though nothing was restorable.
+- A restore still running when another tab stores a different identity is dropped.
 - A page restored from the back/forward cache gets no `storage` event for a logout that happened meanwhile.
 - A `restore_error` here can go stale if another tab logs in persistably while this tab stays logged out.
 - A persistable login in another tab during a held passkey prompt does not cancel the prompt. Its result lands here while the other identity is stored.

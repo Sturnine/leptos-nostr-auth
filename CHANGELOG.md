@@ -135,6 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A session restore that finishes after another tab stored a different identity is now dropped instead of
+  logging this tab in as the old identity.
 - An extension without NIP-44 is no longer asked for its public key (and possibly a permission prompt)
   before NIP-44 fails with `ExtensionNotFound`.
 - A signed event returned with an off-curve `pubkey` now fails as an invalid event instead of

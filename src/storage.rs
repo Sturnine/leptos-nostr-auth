@@ -179,6 +179,16 @@ pub async fn restore_session(
     }
 }
 
+/// Another tab can store a different identity while a restore runs.
+pub fn restore_is_current(stored: Option<&PersistedSession>, restored: &AuthResult) -> bool {
+    stored.is_some_and(|s| {
+        public_key_from_hex(&s.public_key_hex).is_ok_and(|pk| pk == restored.public_key())
+            && restored
+                .to_persisted_session()
+                .is_some_and(|p| p.method == s.method)
+    })
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -423,6 +433,26 @@ pub mod tests {
         assert!(
             <JsonSerdeCodec as Decoder<Option<PersistedSession>>>::decode("not json{").is_err()
         );
+    }
+
+    #[test]
+    fn restore_is_current_matches_stored_identity_and_method() {
+        let read_only = |pk: &str| {
+            AuthResult::ReadOnly(ReadOnlyHandle {
+                public_key: PublicKey::from_hex(pk).unwrap(),
+            })
+        };
+        let restored = read_only(USER);
+        let cases = [
+            (Some(session(USER, PersistedMethod::ReadOnly)), true),
+            (Some(session(OTHER, PersistedMethod::ReadOnly)), false),
+            (Some(session(USER, PersistedMethod::Extension)), false),
+            (Some(session("zz", PersistedMethod::ReadOnly)), false),
+            (None, false),
+        ];
+        for (stored, want) in cases {
+            assert_eq!(restore_is_current(stored.as_ref(), &restored), want);
+        }
     }
 
     #[test]
