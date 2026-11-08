@@ -139,6 +139,14 @@ fn secret_signal() -> (ReadSignal<String>, WriteSignal<String>) {
     (read, write)
 }
 
+/// `set` would free the previous buffer unwiped.
+fn replace_secret(set: WriteSignal<String>, value: String) {
+    set.update(|s| {
+        s.zeroize();
+        *s = value;
+    });
+}
+
 /// Move the buffer out of a secret signal, with no copy, emptying the field. It is wiped on drop,
 /// including when an aborted attempt drops its future.
 fn take_secret(set: WriteSignal<String>) -> Zeroizing<String> {
@@ -192,8 +200,8 @@ fn deliver(
 ///
 /// The buffer of each input's signal is wiped with `zeroize` when a submit takes it, when a rejected
 /// value is cleared and when the step is left. That is the signal's buffer and nothing else. The DOM
-/// value, `event.target.value`, earlier keystrokes' strings and `prop:value` clones stay until they
-/// are collected, and nothing here can reach copies inside `nostr`. Emptying a field does not undo
+/// value, `event.target.value` and `prop:value` clones stay until the JS collector or the allocator
+/// reuses them, and nothing here can reach copies inside `nostr`. Emptying a field does not undo
 /// a paste, so a secret pasted in the wrong field should be treated as exposed.
 ///
 /// The secret key and read-only inputs empty on every submit. The password input does too, except
@@ -799,7 +807,7 @@ fn StepBunker(
                 spellcheck="false"
                 data-nostr-input="bunker-uri"
                 aria-label="Bunker URI"
-                on:input=move |e| set_uri.set(event_target_value(&e))
+                on:input=move |e| replace_secret(set_uri, event_target_value(&e))
                 prop:value=move || uri.get()
                 on:keydown={
                     move |e: web_sys::KeyboardEvent| {
@@ -940,7 +948,7 @@ fn StepReadOnly(
                 spellcheck="false"
                 data-nostr-input="pubkey"
                 aria-label="Public key (npub, nprofile, or hex)"
-                on:input=move |e| set_input.set(event_target_value(&e))
+                on:input=move |e| replace_secret(set_input, event_target_value(&e))
                 prop:value=move || input.get()
                 on:keydown=move |e: web_sys::KeyboardEvent| {
                     if e.key() == "Enter" { submit(); }
@@ -1047,7 +1055,7 @@ fn StepNcryptsec(
                 spellcheck="false"
                 data-nostr-input="ncryptsec"
                 aria-label="ncryptsec encrypted key"
-                on:input=move |e| set_ncryptsec.set(event_target_value(&e))
+                on:input=move |e| replace_secret(set_ncryptsec, event_target_value(&e))
                 prop:value=move || ncryptsec.get()
             />
 
@@ -1058,7 +1066,7 @@ fn StepNcryptsec(
                 spellcheck="false"
                 data-nostr-input="ncryptsec-password"
                 aria-label="ncryptsec decryption password"
-                on:input=move |e| set_password.set(event_target_value(&e))
+                on:input=move |e| replace_secret(set_password, event_target_value(&e))
                 prop:value=move || password.get()
                 on:keydown=move |e: web_sys::KeyboardEvent| {
                     if e.key() == "Enter" { decrypt(); }
@@ -1133,7 +1141,7 @@ fn StepRawNsec(
                 placeholder="nsec1... or 64-char hex"
                 data-nostr-input="nsec"
                 aria-label="Secret key (nsec or hex)"
-                on:input=move |e| set_nsec.set(event_target_value(&e))
+                on:input=move |e| replace_secret(set_nsec, event_target_value(&e))
                 prop:value=move || nsec.get()
                 on:keydown=move |e: web_sys::KeyboardEvent| {
                     if e.key() == "Enter" { import(); }
@@ -1515,5 +1523,21 @@ mod wasm_tests {
         assert_eq!(matches(addr, &expected), expected.len());
         owner.cleanup();
         assert!(matches(addr, &expected) <= 4);
+    }
+
+    #[wasm_bindgen_test]
+    fn replace_secret_wipes_previous_value() {
+        Owner::new().with(|| {
+            let (_read, set) = secret_signal();
+            let value = sentinel();
+            let expected = value.clone().into_bytes();
+            let addr = value.as_ptr().addr();
+            set.set(value);
+            replace_secret(set, String::from("next keystroke"));
+            assert!(
+                matches(addr, &expected) <= 4,
+                "previous field value survives unwiped"
+            );
+        });
     }
 }

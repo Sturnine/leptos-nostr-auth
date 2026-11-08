@@ -571,7 +571,7 @@ The crate wipes these. Wasm tests read memory back for the helpers, the PRF buff
 Nothing here reaches these:
 
 - JS strings: `event.target.value`, the DOM input's value and the credential's `ArrayBuffer`. Emptying a field takes the value off the screen and wipes the signal's buffer. It does not undo a paste, and a script on the page could already have read it, so treat a secret pasted in the wrong field as exposed.
-- Earlier keystrokes' strings and `prop:value` clones, so a copy of a pasted value can sit in freed memory.
+- `prop:value` clones, so a copy of a pasted value can sit in freed memory.
 - The hash digest and hash state in the passkey derivation.
 - scrypt's scratch buffers during ncryptsec decryption. One of them is a single-iteration PBKDF2 of the password, so a later memory read can test password guesses cheaply.
 - Key bytes the compiler moved or copied, the bunker one-time secret in `nostr`'s URI parsing and in this crate's parsed target and handshake, and `nostr`'s decoded bech32 bytes.
