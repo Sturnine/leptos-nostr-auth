@@ -80,6 +80,9 @@ fn decrypt_with_keys(
         .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
 }
 
+#[cfg(all(test, target_arch = "wasm32"))]
+pub(crate) mod test_ws;
+
 // Reads freed memory through a JS view: evidence about one named buffer, nothing more.
 #[cfg(all(test, target_arch = "wasm32"))]
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
