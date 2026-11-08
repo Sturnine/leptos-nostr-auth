@@ -24,6 +24,8 @@ pub(super) const MAX_BUNKER_RELAYS: usize = 5;
 pub(super) const AUTH_URL_TIMEOUT_SECS: u32 = 300;
 pub(super) const SUBSCRIPTION_ID: &str = "nip46-persistent";
 pub(super) const CONNECT_PERMS: &str = "sign_event,get_public_key,nip44_encrypt,nip44_decrypt";
+/// A genuine response is at most about 88 KB of NIP-44 base64 plus its envelope.
+pub(super) const MAX_FRAME_CHARS: usize = 262_144;
 const MAX_AUTH_URL_BYTES: usize = 2048;
 
 const MALFORMED_RESPONSE: &str = "remote signer sent a malformed response";
@@ -722,6 +724,9 @@ impl<W> Inflight<W> {
 
     /// A dropped frame yields no effects and the request stays pending.
     pub(super) fn on_frame(&mut self, data: &str, peer: &Peer) -> Vec<Effect<W>> {
+        if data.len() > MAX_FRAME_CHARS {
+            return Vec::new();
+        }
         let Ok(message) = RelayMessage::from_json(data) else {
             return Vec::new();
         };
@@ -2722,5 +2727,26 @@ mod tests {
         };
         let text = failure.into_signing_error().to_string();
         assert!(text.contains("may still"), "{text}");
+    }
+
+    #[test]
+    fn oversized_frame_is_dropped() {
+        let (client, remote) = (Keys::generate(), Keys::generate());
+        let peer = Peer {
+            client,
+            remote: remote.public_key(),
+        };
+        let id = EventId::from_byte_array([1; 32]);
+        let mut inflight = Inflight::default();
+        inflight.insert("a".into(), NostrConnectMethod::SignEvent, id, ());
+        let frame = format!(
+            r#"["OK","{}",false,"{}"]"#,
+            id.to_hex(),
+            "x".repeat(300_000)
+        );
+        assert!(
+            inflight.on_frame(&frame, &peer).is_empty(),
+            "oversized frame was parsed"
+        );
     }
 }

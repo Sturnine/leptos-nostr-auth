@@ -244,10 +244,10 @@ mod imp {
     use crate::signers::event_contract::{checked_event, prepare};
     use crate::signers::nip46_protocol::{
         AUTH_URL_TIMEOUT_SECS, AttemptLog, BunkerTarget, DeadlineAction, Effect, Handshake,
-        HttpsUrl, Inflight, Peer, PromptList, RECONNECT_CANCELLED, ReconnectGate, ReconnectOutcome,
-        ReconnectWaker, RpcFailure, connect_request, connect_result, event_frame, needs_connect,
-        nip44_result, parse_bunker_uri, persisted_uri, public_key_result, request_event,
-        request_message, rotate_to_front, signed_event_result, subscribe_frame,
+        HttpsUrl, Inflight, MAX_FRAME_CHARS, Peer, PromptList, RECONNECT_CANCELLED, ReconnectGate,
+        ReconnectOutcome, ReconnectWaker, RpcFailure, connect_request, connect_result, event_frame,
+        needs_connect, nip44_result, parse_bunker_uri, persisted_uri, public_key_result,
+        request_event, request_message, rotate_to_front, signed_event_result, subscribe_frame,
     };
     use crate::types::NostrAuthError;
 
@@ -830,7 +830,14 @@ mod imp {
                 remote: self.remote_pubkey,
             };
             let on_message = Closure::<dyn FnMut(_)>::new(move |e: web_sys::MessageEvent| {
-                let Some(data) = e.data().as_string() else {
+                let raw = e.data();
+                let Some(text) = raw.dyn_ref::<js_sys::JsString>() else {
+                    return;
+                };
+                if text.length() as usize > MAX_FRAME_CHARS {
+                    return;
+                }
+                let Some(data) = text.as_string() else {
                     return;
                 };
                 let effects = inflight.borrow_mut().on_frame(&data, &peer);
