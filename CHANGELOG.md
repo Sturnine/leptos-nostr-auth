@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `rpId` is now always sent, so changing `rp_id` strands credentials made under the old value, including ones made under the hostname before `rp_id` was set. Reverting the config recovers them.
 - **Breaking:** `ReadOnlyHandle::from_str` and the read-only step now reject off-curve hex, `npub` and `nprofile`, with new error text. About half of all hex secret keys are also valid public keys. Those are still accepted, shown and persisted as a public key.
 - **Breaking:** `NostrAuthModal`'s `on_auth` and `on_close` now accept closures, as in `on_auth=move |result: AuthResult| ...`. A closure passed this way must be `Send + Sync + 'static`, like one given to `Callback::new`. `Callback::new(|x| ...)` or `Callback::new(|_| ...)` on these props no longer infers its parameter type, so write it: `|x: AuthResult|` or `|_: AuthResult|` on `on_auth`, and `|(): ()|` on `on_close`. `Callback` values and annotated closures need no change.
+- **Breaking:** A stored session whose method was removed from `allowed_methods` no longer restores or prompts. `restore_error` is `RestoreMethodNotAllowed`.
+- A bunker login moves the relay that worked to the front of the stored `bunker_uri`.
+- The `ssr` feature enables `leptos-use-{storage,event-listener,window}/ssr` instead of `leptos-use/ssr`.
 - A bunker `sign_event` result now uses `nostr`'s JSON key order, not the order the signer sent.
 - A raw `+` in a URI secret now decodes to a space. Hex and UUID secrets are unaffected.
 - A lost relay socket now fails pending requests with `BunkerConnectionFailed("relay connection lost")` as soon as the browser reports the close, including requests waiting for approval, which need a retry. A relay's close frame with TCP held open can wait for the browser's grace period or a new request, bounded by the request's deadline.
@@ -80,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `Nip07Handle::sign_event` result now uses `nostr`'s JSON key order, with extra fields removed.
 - An extension that rejects with a non-Error object now gives the static text "extension rejected the
   request", not a dump of the object.
-- A stored session of any method is now kept when restore fails for any reason, including another
+- **Breaking:** A stored session of any method is now kept when restore fails for any reason, including another
   key and data that can never restore. The user is logged out, `is_restoring` ends false, and restore
   is retried on next load, or for a passkey on the next login click. Before, most failures deleted it, and an absent or throwing extension left
   `is_restoring` stuck true. An extension that asks on every call now prompts on every load until the
@@ -121,11 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NostrAuthError::EncryptionUnavailable`, for a read-only session and for an extension or bunker
   session on a server, where the stubs returned `SigningFailed`, and `NostrAuthError::EncryptionFailed`.
 - New `NostrAuthContext::has_saved_session` and `restore_error`, and new
-  `NostrAuthError::RestoreMethodNotAllowed`. A stored session whose method left `allowed_methods` no
-  longer restores or prompts. A mismatch on restore reports `SignerKeyMismatch` for every method.
+  `NostrAuthError::RestoreMethodNotAllowed`. A mismatch on restore reports `SignerKeyMismatch` for every method.
   A signer returning no valid key is not a mismatch: an extension returning a malformed or off-curve key string reports `InvalidPublicKey`, where an off-curve one reported `SignerKeyMismatch` before.
 - The read-only step has a new warning box on the `data-nostr-warning` hook, ending "Anything rejected is cleared from this field."
 - The bunker step has a new one-time-secret hint on the `data-nostr-tip` hook, on every platform, so CSS for that hook now applies off Android too.
+- The approval prompt, `[data-nostr-auth-prompt]` with its link `[data-nostr-auth-url]`, renders from every mounted modal, open or not. Style it.
 - The ncryptsec step has a new sentence: "A value no password can open is cleared from this field."
 
 ### Removed
@@ -172,7 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PersistedSession`'s `Debug` now prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output is unchanged.
 - Typing in a secret field now wipes the previous value instead of leaving each keystroke's prefix in freed memory.
 - The secret key and read-only inputs now empty on every submit, and the password input on every submit except one refused for an empty `ncryptsec` field. A mistyped `npub` or `nprofile` must be pasted again. Emptying wipes the signal's buffer only: the DOM value, `event.target.value` and `prop:value` clones remain until collected, and a script on the page could already have read the paste. A secret pasted in the read-only field should be treated as exposed. See [What is wiped](https://github.com/Sturnine/leptos-nostr-auth#what-is-wiped-and-what-is-not).
-- A bunker URI stays after a failed login, as it did before, in clear text with any secret, until the user leaves the step, including under a restore landing on that step or a removal in another tab with no login running. Retrying a URI whose secret was spent fails with the signer's text and needs a new URI. Whether a signer spends a secret on a failed attempt is unknown. What changed: `InvalidBunkerUri` now empties the field, so a typo there is gone. A secret pasted in this field should be treated as exposed.
+- `InvalidBunkerUri` now empties the bunker URI field, so a typo there is gone. Any other failed login leaves the URI in clear text with any secret, as before, until the user leaves the step, including under a restore landing on that step or a removal in another tab with no login running. Retrying a URI whose secret was spent fails with the signer's text and needs a new URI. Whether a signer spends a secret on a failed attempt is unknown. A secret pasted in this field should be treated as exposed.
 - An `ncryptsec` string now stays only after `WrongPassword`, where anyone who reads it can attack it offline at its scrypt cost. `InvalidNcryptsec`, including a pasted `nsec1...` and the `log_n` refusal, empties the field, and the error says why. A secret pasted in this field should be treated as exposed.
 - The bunker, ncryptsec, password, secret key and read-only inputs now carry `autocomplete="off"` and `spellcheck="false"`. Browsers may ignore `autocomplete="off"`.
 - Documented that every origin allowed to use the passkey RP ID can derive the user's Nostr key, that the hostname default is the safe choice, and that a passkey identity has no backup. The examples no longer set `rp_id`.

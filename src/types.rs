@@ -366,7 +366,7 @@ pub struct NostrAuthConfig {
     /// reconnects; `(n+1)T`, plus 300 s with a link, for a call waiting on another call's reconnect;
     /// `(2n+1)T + 600 s` for login; `2nT + 300 s` for restore.
     pub bunker_timeout_secs: u32,
-    /// WebAuthn relying party ID (default: `window.location.hostname`), with no `https://` prefix.
+    /// WebAuthn relying party ID (default: this page's hostname, or `localhost` if it has none), with no `https://` prefix.
     ///
     /// Every origin that can use the RP ID can derive the user's Nostr key, so the hostname default
     /// is the safe choice; a parent domain hands the key to every host under it. A parent domain,

@@ -6,11 +6,11 @@ Drop-in login modal supporting every Nostr authentication method. Headless — b
 
 ## Login Methods
 
-| Method | When shown |
+| Method | Shown when (and listed in `allowed_methods`) |
 |---|---|
-| Browser Extension (NIP-07) | Alby, nos2x, Nostr KeyX, detected each time the modal opens |
+| Browser Extension (NIP-07) | `window.nostr` detected, checked each time the modal opens (Alby, nos2x, Nostr KeyX) |
 | Nostr Connect / Bunker (NIP-46) | Always |
-| Passkey (WebAuthn PRF) | macOS/iOS: **top position** (Face ID/Touch ID); others: if WebAuthn available |
+| Passkey (WebAuthn PRF) | WebAuthn present and PRF not reported unsupported; first on macOS/iOS (Face ID/Touch ID), after Nostr Connect elsewhere |
 | Read-Only (npub) | Always |
 | Encrypted Key / ncryptsec (NIP-49) | Always |
 | Raw nsec paste | Only with `insecure_nsec_input` feature, and `LoginMethod::RawNsec` in `allowed_methods` (opt-in) |
@@ -95,7 +95,7 @@ See the `with-axum-ssr` example for a complete cargo-leptos project layout.
 
 Requires Rust 1.89+ (edition 2024).
 
-You must select exactly one rendering mode feature:
+Select one rendering mode feature; the server build needs `ssr`:
 
 | Feature | Use when |
 |---|---|
@@ -157,7 +157,7 @@ let config = NostrAuthConfig {
     // Close modal on Escape key (default: true)
     close_on_escape: true,
 
-    // WebAuthn RP ID. Leave it unset: the default, this page's hostname, is the safe choice.
+    // WebAuthn RP ID. Leave it unset: the default, this page's hostname, or `localhost` if it has none, is the safe choice.
     rp_id: None,
 
     // WebAuthn relying party display name (default: "Nostr App")
@@ -365,7 +365,7 @@ impl MonotonicClock for BrowserClock {
 define_time_provider!(BrowserClock);
 ```
 
-With rustc 1.99.1 a missing provider was a link error, and `custom_created_at` did not avoid it,
+With rustc 1.99.0 and 1.99.1 a missing provider was a link error, and `custom_created_at` did not avoid it,
 either in a dev build or with `opt-level = "z"` and `lto`. Other toolchains may link and trap at
 runtime, so do not assume `EventBuilder` works on wasm without a provider.
 
@@ -434,7 +434,7 @@ A failed or cancelled prompt never clears the session. Only a logout or a succes
 |---|---|---|
 | `logout` | Deleted | Logged out; also works while logged out |
 | `logout` with the modal open | Deleted | The modal closes and any login in it is cancelled; typed input is discarded |
-| Stored passkey at page load | Kept | Logged out, with no prompt. `restore_error` stays `None`, since nothing has failed. The login click restores it |
+| Stored passkey at page load | Kept | Logged out, with no prompt. `restore_error` stays `None` unless the stored data can never restore. The login click restores it |
 | Failed or cancelled restore, any method | Kept | Logged out; retried on next load, once per page load, with no timers. A passkey retries on the next login click instead, and its failure also opens the modal |
 | Another key on restore, any method | Kept | The other key is never adopted. `restore_error` is `SignerKeyMismatch`. Switching the signer back restores it |
 | Extension returns a string that is not a valid key on restore | Kept | `restore_error` is `InvalidPublicKey`. Restores once the extension returns the stored key |
@@ -485,8 +485,8 @@ relays, at most 5, the longest a call can take is:
 |---|---|---|---|
 | Call that reconnects | (n+1)T + 300 s | (n+1)T | 180 s / 480 s |
 | Call waiting on another call's reconnect | (n+1)T + 300 s | (n+1)T | 180 s / 480 s |
-| Login | (2n+1)T + 600 s | | 930 s with link |
-| Restore | 2nT + 300 s | | 600 s with link |
+| Login | (2n+1)T + 600 s | (2n+1)T | 330 s / 930 s |
+| Restore | 2nT + 300 s | 2nT | 300 s / 600 s |
 
 The `is_restoring` signal on `NostrAuthContext` is `true` while restore is in progress. Do not hide
 the login button behind it. With a relay down, each load can wait for the bounds above, and an
@@ -523,7 +523,7 @@ If a restore finishes while the login modal is on its method list, the modal clo
 Any removal of the stored session logs out other tabs, through the browser's `storage` event, and drops their in-memory keys. There is no reason signal. A bunker session there closes for good. This covers another tab's `logout`, its login as a different identity with a method that cannot persist, and its quota-failure clear. Limits:
 
 - A removal cancels a login running in this tab's modal and closes the modal, with no reason shown, and a bunker login's one-time secret may be spent, so a retry can need a new URI. With no login running the modal stays open with what was typed, and submitting it is a new login.
-- A persistable login elsewhere leaves this tab logged in, but a non-persistable one logs it out. This tab also logs out if that login is the identity it already holds.
+- A persistable login elsewhere leaves this tab logged in. A non-persistable login elsewhere logs this tab out only when it replaces a stored session of another identity, even if this tab holds the new login's identity.
 - Removing a key that is not there fires no `storage` event. If nothing is stored, a logout in another tab does not reach this one, and this tab keeps its in-memory keys.
 - `localStorage.clear()` in another tab logs this tab out if the browser fires a `storage` event for it, even if no session of ours was stored, because the event does not say what was removed. An in-memory ncryptsec or nsec login ends too, and a bunker session closes for good. Use `removeItem` for your own keys. Chromium fires no event when the origin's storage was already empty.
 - Undecodable bytes under our key count the same: `removeItem` or `clear()` of them logs this tab out, though nothing was restorable.
