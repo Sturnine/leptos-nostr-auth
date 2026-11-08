@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** A stored session whose method was removed from `allowed_methods` no longer restores or prompts. `restore_error` is `RestoreMethodNotAllowed`.
 - A bunker login moves the relay that worked to the front of the stored `bunker_uri`.
 - The `ssr` feature enables `leptos-use-{storage,event-listener,window}/ssr` instead of `leptos-use/ssr`.
+- docs.rs now documents the `ssr` and `insecure_nsec_input` API.
 - A bunker `sign_event` result now uses `nostr`'s JSON key order, not the order the signer sent.
 - A raw `+` in a URI secret now decodes to a space. Hex and UUID secrets are unaffected.
 - A lost relay socket now fails pending requests with `BunkerConnectionFailed("relay connection lost")` as soon as the browser reports the close, including requests waiting for approval, which need a retry. A relay's close frame with TCP held open can wait for the browser's grace period or a new request, bounded by the request's deadline.
