@@ -120,7 +120,6 @@ pub fn pick_rp_id(configured: Option<&str>, hostname: Option<String>) -> String 
         .unwrap_or_else(|| "localhost".to_owned())
 }
 
-/// [`pick_rp_id`] with this page's hostname.
 pub fn effective_rp_id(configured: Option<&str>) -> String {
     pick_rp_id(
         configured,
@@ -143,7 +142,6 @@ pub fn page_has_been_active() -> Option<bool> {
     read_has_been_active(&JsValue::from(web_sys::window()?.navigator()))
 }
 
-/// Server stub for `page_has_been_active`.
 #[cfg(feature = "ssr")]
 pub const fn page_has_been_active() -> Option<bool> {
     None
@@ -154,7 +152,6 @@ pub fn prompt_allowed(been_active: Option<bool>) -> bool {
     been_active != Some(false)
 }
 
-/// `extension:prf` from `PublicKeyCredential.getClientCapabilities()`; `None` when unknown.
 #[cfg(not(feature = "ssr"))]
 pub async fn prf_capability() -> Option<bool> {
     use wasm_bindgen::JsCast as _;
@@ -177,7 +174,6 @@ pub async fn prf_capability() -> Option<bool> {
         .as_bool()
 }
 
-/// Server stub for `prf_capability`.
 #[cfg(feature = "ssr")]
 pub async fn prf_capability() -> Option<bool> {
     None
