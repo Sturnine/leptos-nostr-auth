@@ -1,10 +1,6 @@
-// #[component] generates exhaustive props structs we cannot control.
-#![allow(clippy::exhaustive_structs)]
 use leptos::prelude::*;
-use leptos_nostr_auth::{use_nostr_auth, NostrAuthConfig, NostrAuthProvider};
+use leptos_nostr_auth::{AuthResult, NostrAuthConfig, NostrAuthProvider, use_nostr_auth};
 
-// Hydrate entry — browser calls this after loading the WASM bundle.
-// wasm_bindgen exports it so the JS glue code can invoke it on startup.
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn hydrate() {
@@ -12,9 +8,9 @@ pub fn hydrate() {
     leptos::mount::hydrate_body(App);
 }
 
-/// HTML shell — server renders this as the full outer document.
-/// `HydrationScripts` injects the WASM bundle URL + serialized reactive state.
 pub fn shell(options: LeptosOptions) -> impl IntoView {
+    #[cfg(feature = "ssr")]
+    send_csp();
     view! {
         <!DOCTYPE html>
         <html lang="en">
@@ -32,11 +28,29 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     }
 }
 
+// The `ws://` sources are for cargo-leptos live reload and local relays.
+#[cfg(feature = "ssr")]
+fn send_csp() {
+    use axum::http::{HeaderValue, header::CONTENT_SECURITY_POLICY};
+    use leptos_axum::ResponseOptions;
+
+    leptos::nonce::provide_nonce();
+    let nonce = leptos::nonce::use_nonce().expect("provide_nonce just ran");
+    let policy = format!(
+        "default-src 'self'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; \
+         style-src 'self'; connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:*; \
+         img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    );
+    expect_context::<ResponseOptions>().insert_header(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_str(&policy).expect("the policy is visible ASCII"),
+    );
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let config = NostrAuthConfig {
-        persist_session: true,
-        rp_id: Some("localhost".into()),
+        rp_name: "Nostr Auth Example".into(),
         ..Default::default()
     };
 
@@ -59,7 +73,7 @@ fn HomePage() -> impl IntoView {
                 "the login modal narrows to your real platform capabilities."
             </p>
 
-            // Restoring indicator — avoids login button flash on page load
+            // A restore can wait a long time, so the login button below stays available beside it
             <Show when=move || auth.is_restoring.get() fallback=|| ()>
                 <p class="restoring">"Restoring session…"</p>
             </Show>
@@ -67,13 +81,26 @@ fn HomePage() -> impl IntoView {
             <Show
                 when=move || auth.is_authenticated.get()
                 fallback=move || view! {
-                    <Show when=move || !auth.is_restoring.get() fallback=|| ()>
-                        <p>"Not logged in."</p>
+                    <p>"Not logged in."</p>
+                    <button
+                        class="btn"
+                        on:click=move |_| auth.show_login.run(())
+                    >
+                        "Login with Nostr"
+                    </button>
+                    <Show when=move || auth.has_saved_session.get() fallback=|| ()>
+                        <p class="meta">
+                            {move || {
+                                auth.restore_error
+                                    .get()
+                                    .map(|e| format!("Saved session did not restore: {e}"))
+                            }}
+                        </p>
                         <button
-                            class="btn"
-                            on:click=move |_| auth.show_login.run(())
+                            class="btn btn-ghost"
+                            on:click=move |_| auth.logout.run(())
                         >
-                            "Login with Nostr"
+                            "Forget saved session"
                         </button>
                     </Show>
                 }
@@ -81,7 +108,7 @@ fn HomePage() -> impl IntoView {
                 <p>
                     "Logged in via: "
                     <strong>
-                        {move || auth.auth.get().map_or("", |a| a.method_name())}
+                        {move || auth.auth.with(|a| a.as_ref().map_or("", AuthResult::method_name))}
                     </strong>
                 </p>
                 <p>

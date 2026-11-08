@@ -1,13 +1,12 @@
-#[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() {
     use axum::Router;
-    use leptos_axum::{generate_route_list, LeptosRoutes};
+    use leptos_axum::{LeptosRoutes, generate_route_list};
     use tower_http::services::ServeDir;
-    use with_axum_ssr::{shell, App};
+    use with_axum_ssr::{App, shell};
 
     let conf = leptos::config::get_configuration(None)
-        .expect("Failed to read Leptos.toml");
+        .expect("Failed to read the Leptos environment set by cargo-leptos");
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
     let routes = generate_route_list(App);
@@ -27,10 +26,6 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("Failed to bind");
-    println!("Listening on http://{addr}");
+    println!("Listening on http://localhost:{}", addr.port());
     axum::serve(listener, app).await.expect("Server error");
 }
-
-// Required so the crate compiles as a lib for the hydrate feature target.
-#[cfg(not(feature = "ssr"))]
-fn main() {}

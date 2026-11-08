@@ -1,15 +1,16 @@
 [package]
-name = "leptos-nostr-auth"
-version = "0.1.0"
-edition = "2024"
-description = "Headless Nostr authentication modal widget for Leptos"
-license = "Apache-2.0"
-authors = ["Devan Looches <devan.looches@gmail.com>"]
-repository = "https://github.com/Magilis/leptos-nostr-auth"
-readme = "README.md"
-keywords = ["nostr", "leptos", "wasm", "authentication", "login"]
-categories = ["wasm", "web-programming", "authentication"]
-exclude = ["examples"]
+name         = "leptos-nostr-auth"
+version      = "0.2.0"
+edition      = "2024"
+rust-version = "1.89"
+description  = "Headless Nostr authentication modal widget for Leptos"
+license      = "Apache-2.0"
+authors      = ["Devan Looches <devan.looches@gmail.com>"]
+repository   = "https://github.com/Sturnine/leptos-nostr-auth"
+readme       = "README.md"
+keywords     = ["nostr", "leptos", "wasm", "authentication", "login"]
+categories   = ["wasm", "web-programming", "authentication"]
+include      = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE"]
 
 [features]
 default = []
@@ -17,117 +18,123 @@ default = []
 insecure_nsec_input = []
 
 # Rendering modes — consumer enables exactly one per build target
-ssr = ["leptos/ssr", "leptos-use/ssr"]
+ssr = [
+  "leptos/ssr",
+  "leptos-use-storage/ssr",
+  "leptos-use-event-listener/ssr",
+  "leptos-use-window/ssr",
+]
 hydrate = ["leptos/hydrate"]
 csr = ["leptos/csr"]
 
 [dependencies]
-# Leptos 0.8 — no mode hardcoded; consumers enable ssr/hydrate/csr
 leptos = { version = "0.8", default-features = false }
 
-# use_event_listener + use_window (Escape key) + use_storage (SSR-safe localStorage)
-leptos-use = { version = "0.18", default-features = false, features = [
-  "use_event_listener",
-  "use_window",
-  "storage",
-] }
+leptos-use-storage        = "0.20"
+leptos-use-event-listener = "0.20"
+leptos-use-window         = "0.20"
 
-# Codec for use_local_storage — JsonCodec encodes PersistedSession as JSON
-# codee is already a transitive dep of leptos-use; listed explicitly for the type import
 codee = { version = "0.3", features = ["json_serde"] }
 
-# Nostr protocol: keys, events, NIP-19 bech32, NIP-49 ncryptsec (pure Rust)
-nostr = { version = "0.44", default-features = false, features = [
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+
+nostr = { version = "0.45.7", default-features = false, features = [
   "std",
   "nip44",
+  "nip46",
   "nip49",
+  "rand",
+  "os-rng",
 ] }
 
-# WASM bridge — compiles on all targets; browser-specific imports are cfg-gated
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
+bitcoin_hashes = { version = "1.2", default-features = false }
 
-# Web platform APIs — types compile on all targets; actual API calls are cfg-gated
+wasm-bindgen         = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys               = "0.3"
+
 web-sys = { version = "0.3", features = [
+  "AbortController",
+  "AbortSignal",
   "Window",
   "Navigator",
   "console",
   "CredentialsContainer",
   "CredentialCreationOptions",
   "CredentialRequestOptions",
-  "Crypto",
   "WebSocket",
   "MessageEvent",
   "ErrorEvent",
   "BinaryType",
   "Location",
+  "KeyboardEvent",
+  "Storage",
+  "StorageEvent",
 ] }
 
-# Serialization (pure Rust)
-serde = { version = "1", features = ["derive"] }
+serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = { version = "0.22", features = ["alloc"] }
+base64     = { version = "0.23", features = ["alloc"] }
 
-# Error types (pure Rust)
 thiserror = "2"
 
 # Makes non-Send types (Rc, web-sys objects) usable in Leptos signals on WASM.
 # Safe because WASM is single-threaded; SendWrapper panics on cross-thread access.
-send_wrapper = "0.6"
+send_wrapper = { version = "0.6", features = ["futures"] }
 
-[dev-dependencies]
-console_error_panic_hook = "0.1"
-leptos = { version = "0.8", features = ["csr"] }
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 
-[profile.release]
-opt-level = "z"   # minimize binary size (WASM priority)
-lto = true        # link-time optimization, reduces size + improves speed
-codegen-units = 1 # max optimization (slower compile, better output)
-panic = "abort"   # no unwinding — shrinks WASM significantly
-strip = "symbols" # strip debug symbols from release
+# nostr 0.45 randomness (rand 0.10 -> getrandom 0.4) needs the browser backend explicitly
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3.80"
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+nostr = { version = "0.45.7", default-features = false, features = ["nip59"] }
+
+[package.metadata.docs.rs]
+features     = ["ssr", "insecure_nsec_input"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [profile.dev]
-opt-level = 1 # faster incremental builds, avoids WASM slowness in dev
+opt-level = 1 # scrypt test vectors are slow at opt-level 0
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code  = "forbid"
 missing_docs = "warn"
 
 [lints.clippy]
-# Lint groups
 pedantic = { level = "warn", priority = -1 }
 nursery  = { level = "warn", priority = -1 }
 
-# Restriction lints
-unwrap_used                   = "warn"
-expect_used                   = "warn"
-panic                         = "warn"
-dbg_macro                     = "warn"
-todo                          = "warn"
-unimplemented                 = "warn"
-indexing_slicing              = "warn"
-str_to_string                 = "warn"
-implicit_clone                = "warn"
-arithmetic_side_effects       = "warn"
-use_debug                     = "warn"
-missing_docs_in_private_items = "warn"
-std_instead_of_core           = "warn"
-exhaustive_structs            = "warn"
-exhaustive_enums              = "warn"
-clone_on_ref_ptr              = "warn"
-mem_forget                    = "warn"
-print_stdout                  = "warn"
-print_stderr                  = "warn"
-map_err_ignore                = "warn"
-try_err                       = "warn"
-undocumented_unsafe_blocks    = "warn"
-exit                          = "warn"
-tests_outside_test_module     = "warn"
+unwrap_used                = "warn"
+expect_used                = "warn"
+panic                      = "warn"
+dbg_macro                  = "warn"
+todo                       = "warn"
+unimplemented              = "warn"
+indexing_slicing           = "warn"
+str_to_string              = "warn"
+implicit_clone             = "warn"
+arithmetic_side_effects    = "warn"
+use_debug                  = "warn"
+std_instead_of_core        = "warn"
+exhaustive_structs         = "warn"
+exhaustive_enums           = "warn"
+clone_on_ref_ptr           = "warn"
+mem_forget                 = "warn"
+print_stdout               = "warn"
+print_stderr               = "warn"
+map_err_ignore             = "warn"
+try_err                    = "warn"
+undocumented_unsafe_blocks = "warn"
+exit                       = "warn"
+tests_outside_test_module  = "warn"
 
-# Allow pedantic lints that don't fit this codebase
 module_name_repetitions = "allow" # intentional: NostrAuth* prefix throughout public API
 must_use_candidate      = "allow" # Leptos components return impl IntoView
 wildcard_imports        = "allow" # use leptos::prelude::* is idiomatic Leptos
 unused_async            = "allow" # SSR stubs are async to match the WASM API signature
-
+unused_async_trait_impl = "allow" # same stubs, reported on impl blocks
+future_not_send         = "allow" # wasm is single-threaded, nothing requires these futures to be Send

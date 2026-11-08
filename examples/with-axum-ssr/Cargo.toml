@@ -8,13 +8,15 @@ lib-package  = "with-axum-ssr"
 site-root    = "target/site"
 site-pkg-dir = "pkg"
 style-file   = "style/main.css"
-site-addr    = "127.0.0.1:3000"
-reload-port  = 3001
-bin-features = ["ssr"]
-lib-features = ["hydrate"]
+# Must be an IP. Open http://localhost:3000: WebAuthn refuses an IP as an RP ID.
+site-addr           = "127.0.0.1:3000"
+reload-port         = 3001
+bin-features        = ["ssr"]
+lib-features        = ["hydrate"]
+lib-profile-release = "wasm-release"
 
 [package]
-name = "with-axum-ssr"
+name    = "with-axum-ssr"
 version = "0.1.0"
 edition = "2024"
 
@@ -22,37 +24,46 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "with-axum-ssr"
-path = "src/main.rs"
+name              = "with-axum-ssr"
+path              = "src/main.rs"
 required-features = ["ssr"]
 
 [features]
 hydrate = [
-    "leptos/hydrate",
-    "leptos-nostr-auth/hydrate",
-    "dep:console_error_panic_hook",
-    "dep:wasm-bindgen",
+  "leptos/hydrate",
+  "leptos-nostr-auth/hydrate",
+  "dep:console_error_panic_hook",
+  "dep:wasm-bindgen",
 ]
 ssr = [
-    "leptos/ssr",
-    "leptos-nostr-auth/ssr",
-    "dep:leptos_axum",
-    "dep:axum",
-    "dep:tokio",
-    "dep:tower-http",
+  "leptos/ssr",
+  "leptos/nonce",
+  "leptos-nostr-auth/ssr",
+  "dep:leptos_axum",
+  "dep:axum",
+  "dep:tokio",
+  "dep:tower-http",
 ]
 
 [dependencies]
 leptos            = { version = "0.8", default-features = false }
 leptos-nostr-auth = { path = "../..", default-features = false }
-nostr             = { version = "0.44", default-features = false, features = ["std"] }
 
-# SSR-only
 leptos_axum = { version = "0.8", optional = true }
 axum        = { version = "0.8", optional = true }
-tokio       = { version = "1", features = ["rt-multi-thread"], optional = true }
-tower-http  = { version = "0.6", features = ["fs"], optional = true }
+tokio       = { version = "1", features = ["macros", "net", "rt-multi-thread"], optional = true }
+tower-http  = { version = "0.7", features = ["fs"], optional = true }
 
-# Hydrate-only (WASM)
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen             = { version = "0.2", optional = true }
+
+# Not [profile.release]: panic = "abort" would also reach the server binary.
+[profile.wasm-release]
+inherits      = "release"
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+panic         = "abort"
+
+[profile.dev]
+opt-level = 1

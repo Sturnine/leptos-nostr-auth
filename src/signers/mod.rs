@@ -1,0 +1,206 @@
+// A public browser method is a facade plus two `imp` fns, one per `feature = "ssr"` cfg, and the
+// facade keeps server futures `Send`. Above `signers/` nothing is gated on `ssr`: handlers and
+// Effects never run on the server, and the stubs make them compile. Pure logic that only the
+// browser path calls belongs in `imp`, or it is dead code under `ssr`.
+
+#[cfg(feature = "ssr")]
+const NOT_ON_SERVER: &str = "not available on server";
+
+#[cfg(not(feature = "ssr"))]
+mod browser;
+mod event_contract;
+mod nip07;
+mod nip46;
+/// JS-free NIP-46 protocol decisions, so that native `cargo test` covers them.
+#[cfg(not(feature = "ssr"))]
+mod nip46_protocol;
+mod passkey;
+mod raw_key;
+mod read_only;
+mod signer_traits;
+
+pub use crate::types::AuthResult;
+pub use nip07::Nip07Handle;
+pub use nip46::BunkerSession;
+pub(crate) use nip46::{
+    auth_url_host, current_auth_url, dismiss_auth_prompt, register_auth_presenter,
+    unregister_auth_presenter,
+};
+pub use passkey::PasskeySession;
+pub(crate) use passkey::PendingPasskey;
+pub use raw_key::RawKeySession;
+pub use read_only::ReadOnlyHandle;
+
+use nostr::event::FinalizeEvent;
+use nostr::key::{Keys, PublicKey};
+use nostr::nips::nip44;
+
+use crate::types::NostrAuthError;
+
+#[cfg(not(feature = "ssr"))]
+pub(crate) const MAX_REMOTE_TEXT_CHARS: usize = 200;
+
+#[cfg(not(feature = "ssr"))]
+/// Shape only: a signer can still return well-formed garbage, which no check without the key can catch.
+pub(crate) fn is_nip44_payload(payload: &str) -> bool {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .is_ok_and(|bytes| bytes.first() == Some(&2) && (99..=65_603).contains(&bytes.len()))
+}
+
+/// Remove what could disguise relay, signer or extension text, and cap its length.
+/// `char::is_control` misses format characters such as U+202E, and line separators and
+/// blank-rendering fillers.
+#[cfg(not(feature = "ssr"))]
+pub(crate) fn sanitize_remote_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{AD}'
+                        | '\u{061C}'
+                        | '\u{115F}'
+                        | '\u{1160}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{2028}'..='\u{202E}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{3164}'
+                        | '\u{FEFF}'
+                        | '\u{FFA0}'
+                        | '\u{FFF9}'..='\u{FFFB}'
+                        | '\u{E0000}'..='\u{E007F}'
+                )
+        })
+        .take(MAX_REMOTE_TEXT_CHARS)
+        .collect()
+}
+
+fn sign_with_keys(keys: &Keys, event_json: &str) -> Result<String, NostrAuthError> {
+    let signed = event_contract::prepare(event_json, keys.public_key())?
+        .finalize(keys)
+        .map_err(|e| NostrAuthError::SigningFailed(e.to_string()))?;
+    serde_json::to_string(&signed).map_err(|e| NostrAuthError::Serialization(e.to_string()))
+}
+
+/// Refuse a key that is not on the curve. `PublicKey`'s `from_hex`, `from_slice` and `from_bech32`
+/// do not check, so a typed key can still be off it.
+pub(crate) fn check_on_curve(key: &PublicKey) -> Result<(), NostrAuthError> {
+    key.xonly()
+        .map(|_| ())
+        .map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))
+}
+
+/// The error quotes no input.
+pub(crate) fn public_key_from_hex(hex: &str) -> Result<PublicKey, NostrAuthError> {
+    let key =
+        PublicKey::from_hex(hex).map_err(|e| NostrAuthError::InvalidPublicKey(e.to_string()))?;
+    check_on_curve(&key)?;
+    Ok(key)
+}
+
+fn encrypt_with_keys(
+    keys: &Keys,
+    peer: &PublicKey,
+    plaintext: &str,
+) -> Result<String, NostrAuthError> {
+    check_on_curve(peer)?;
+    nip44::encrypt(keys.secret_key(), peer, plaintext, nip44::Version::V2)
+        .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
+}
+
+fn decrypt_with_keys(
+    keys: &Keys,
+    peer: &PublicKey,
+    ciphertext: &str,
+) -> Result<String, NostrAuthError> {
+    check_on_curve(peer)?;
+    // Display only: `Debug` of this error prints a source that can hold the decrypted bytes.
+    nip44::decrypt(keys.secret_key(), peer, ciphertext)
+        .map_err(|e| NostrAuthError::EncryptionFailed(e.to_string()))
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+pub(crate) mod test_ws;
+
+// Reads freed memory through a JS view: evidence about one named buffer, nothing more.
+#[cfg(all(test, target_arch = "wasm32"))]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+pub(crate) mod memory_probe {
+    use nostr::key::Keys;
+    use wasm_bindgen::JsCast as _;
+
+    // A fresh view per read, because memory growth detaches the old one.
+    pub fn byte_at(addr: usize) -> u8 {
+        let memory: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
+        js_sys::Uint8Array::new(&memory.buffer()).get_index(u32::try_from(addr).unwrap())
+    }
+
+    pub fn matches(addr: usize, expected: &[u8]) -> usize {
+        expected
+            .iter()
+            .zip(addr..)
+            .filter(|&(byte, at)| byte_at(at) == *byte)
+            .count()
+    }
+
+    // 64 runtime-generated bytes, so it is not in the data section.
+    pub fn sentinel() -> String {
+        let mut value = Keys::generate().secret_key().to_secret_hex();
+        value.truncate(32);
+        value.push_str(&Keys::generate().secret_key().to_secret_hex());
+        value.truncate(64);
+        value
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "ssr")]
+mod server_tests {
+    use super::*;
+    use core::future::Future;
+    use core::pin::pin;
+    use core::task::{Context, Poll, Waker};
+    use nostr::event::AsyncSignEvent;
+    use nostr::key::AsyncGetPublicKey;
+
+    pub(super) fn ready<F: Future>(fut: F) -> F::Output {
+        match pin!(fut).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(out) => out,
+            Poll::Pending => unreachable!("server stubs never suspend"),
+        }
+    }
+
+    pub(super) fn text<T>(result: Result<T, NostrAuthError>) -> String {
+        result.map_or_else(|e| e.to_string(), |_| "Ok".to_owned())
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test]
+    fn server_futures_are_send() {
+        let h = Nip07Handle {
+            public_key: Keys::generate().public_key(),
+        };
+        let s = nip46::server_tests::bunker();
+        let peer = Keys::generate().public_key();
+        assert_send(Nip07Handle::get_public_key());
+        assert_send(h.sign_event("{}"));
+        assert_send(h.nip44_encrypt(&peer, "b"));
+        assert_send(h.nip44_decrypt(&peer, "b"));
+        assert_send(BunkerSession::connect("bunker://x", 1));
+        assert_send(s.sign_event("{}"));
+        assert_send(s.nip44_encrypt(&peer, "b"));
+        assert_send(s.nip44_decrypt(&peer, "b"));
+        assert_send(PasskeySession::create("rp", "name"));
+        assert_send(PasskeySession::authenticate("rp", None));
+        let auth = AuthResult::Extension(h);
+        assert_send(auth.get_public_key_async());
+        assert_send(auth.sign_event_async(signer_traits::tests::unsigned(auth.public_key())));
+        assert_send(auth.sign_event("{}"));
+        assert_send(auth.nip44_encrypt(&peer, "b"));
+        assert_send(auth.nip44_decrypt(&peer, "b"));
+    }
+}
