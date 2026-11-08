@@ -23,7 +23,8 @@ pub use crate::types::AuthResult;
 pub use nip07::Nip07Handle;
 pub use nip46::BunkerSession;
 pub(crate) use nip46::{
-    current_auth_url, dismiss_auth_prompt, register_auth_presenter, unregister_auth_presenter,
+    auth_url_host, current_auth_url, dismiss_auth_prompt, register_auth_presenter,
+    unregister_auth_presenter,
 };
 pub use passkey::PasskeySession;
 pub(crate) use passkey::PendingPasskey;

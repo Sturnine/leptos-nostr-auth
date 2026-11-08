@@ -177,6 +177,15 @@ pub fn current_auth_url() -> Option<String> {
     imp::current_auth_url()
 }
 
+/// The host of an approval link, as the user should read it (punycode for an IDN).
+#[cfg_attr(
+    feature = "ssr",
+    expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
+)]
+pub fn auth_url_host(url: &str) -> Option<String> {
+    imp::auth_url_host(url)
+}
+
 /// Stop showing the current approval link. Its request continues until its deadline.
 #[cfg_attr(
     feature = "ssr",
@@ -241,6 +250,10 @@ mod imp {
 
     pub(super) fn current_auth_url() -> Option<String> {
         PROMPTS.with(|prompts| prompts.read().current().map(str::to_owned))
+    }
+
+    pub(super) fn auth_url_host(url: &str) -> Option<String> {
+        crate::signers::nip46_protocol::auth_url_host(url)
     }
 
     pub(super) fn dismiss_auth_prompt() {
@@ -1002,6 +1015,10 @@ mod imp {
 
     /// No state may cross requests.
     pub(super) const fn current_auth_url() -> Option<String> {
+        None
+    }
+
+    pub(super) const fn auth_url_host(_url: &str) -> Option<String> {
         None
     }
 

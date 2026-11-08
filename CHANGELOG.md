@@ -178,6 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A bunker session now encrypts or decrypts only after its signer has produced a valid signature for the account. If the app has not signed yet, the first NIP-44 call sends one signing request for an unpublished check event, which some signers ask the user to approve. A stored session pointed at another signer can no longer receive NIP-44 plaintext.
 - Extension error text is now sanitized and capped like bunker text, and both now also drop line separators, the Arabic letter mark, interlinear annotation and tag characters, and blank Hangul fillers.
 - A passkey PRF result or credential id that is not a byte buffer is now refused. Before, a number was coerced into zero bytes, giving a key anyone could compute. Keys from conforming browsers, and byte buffers from another JavaScript realm, are unchanged.
+- An approval link now ignores a primary click for half a second after it appears and names the signer's host, so a hostile signer cannot time it under the user's next primary click. Middle-click and "open in new tab" are not guarded.
 
 ## [0.1.0] - 2026-07-22
 

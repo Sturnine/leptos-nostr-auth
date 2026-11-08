@@ -249,6 +249,10 @@ impl PromptList {
     }
 }
 
+pub(super) fn auth_url_host(url: &str) -> Option<String> {
+    Url::parse(url).ok()?.host_str().map(str::to_owned)
+}
+
 /// Accept a link only if it is https with a host and no credentials. The stored form is the parsed
 /// one, never the raw string.
 pub(super) fn parse_auth_url(raw: &str) -> Option<HttpsUrl> {
@@ -1738,6 +1742,15 @@ mod tests {
             assert!(!fx.pending());
         }
         assert!(parse_auth_url(TOKEN_URL).is_some());
+    }
+
+    #[test]
+    fn auth_url_host_table() {
+        assert_eq!(
+            auth_url_host("https://xn--80ak6aa92e.com/a?b").as_deref(),
+            Some("xn--80ak6aa92e.com")
+        );
+        assert_eq!(auth_url_host("not a url"), None);
     }
 
     fn seen(fx: &mut Fx) {

@@ -15,7 +15,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::platform::{Os, Platform, effective_rp_id, passkey_option_visible, prf_capability};
 use crate::signers::{
     BunkerSession, Nip07Handle, PasskeySession, PendingPasskey, RawKeySession, ReadOnlyHandle,
-    current_auth_url, dismiss_auth_prompt, register_auth_presenter, unregister_auth_presenter,
+    auth_url_host, current_auth_url, dismiss_auth_prompt, register_auth_presenter,
+    unregister_auth_presenter,
 };
 use crate::types::{AuthResult, LoginMethod, NostrAuthConfig, NostrAuthError};
 
@@ -439,18 +440,38 @@ pub fn NostrAuthModal(
     }
 }
 
+/// A hostile signer can time its link to land under the user's next click.
+const AUTH_LINK_ARM_MS: f64 = 500.0;
+
+fn approval_click_armed(shown_at_ms: f64, now_ms: f64) -> bool {
+    now_ms - shown_at_ms >= AUTH_LINK_ARM_MS
+}
+
 /// The signer's approval link. A click link, never a popup, with the full URL as its text, because
 /// a hostile signer can send a phishing link.
 #[component]
 fn AuthUrlPrompt() -> impl IntoView {
+    let shown_at = StoredValue::new(f64::INFINITY);
+    Effect::new(move |_| {
+        if current_auth_url().is_some() {
+            shown_at.set_value(js_sys::Date::now());
+        }
+    });
     view! {
         {move || current_auth_url().map(|url| {
             let href = url.clone();
+            let host = auth_url_host(&url);
             view! {
                 <div data-nostr-auth-prompt="">
                     <p>"Your remote signer asks you to approve a pending request"</p>
+                    {host.map(|host| view! { <p>"Approve at " <strong>{host}</strong></p> })}
                     <a
                         href=href
+                        on:click=move |e| {
+                            if !approval_click_armed(shown_at.get_value(), js_sys::Date::now()) {
+                                e.prevent_default();
+                            }
+                        }
                         target="_blank"
                         rel="noopener noreferrer"
                         data-nostr-auth-url=""
@@ -1249,6 +1270,13 @@ mod tests {
         assert_eq!(escape_action(true, true), EscapeAction::Close);
         assert_eq!(escape_action(false, true), EscapeAction::DismissPrompt);
         assert_eq!(escape_action(false, false), EscapeAction::Nothing);
+    }
+
+    #[test]
+    fn approval_click_armed_table() {
+        assert!(!approval_click_armed(0.0, 499.0));
+        assert!(approval_click_armed(0.0, 500.0));
+        assert!(!approval_click_armed(f64::INFINITY, 1e12));
     }
 
     #[test]
