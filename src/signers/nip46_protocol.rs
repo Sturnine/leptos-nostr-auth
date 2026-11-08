@@ -11,6 +11,7 @@ use nostr::nips::nip44;
 use nostr::nips::nip46::{
     NostrConnectMessage, NostrConnectMethod, NostrConnectRequest, NostrConnectUri, ResponseResult,
 };
+use nostr::types::url::RelayUrlScheme;
 use nostr::types::{RelayUrl, Timestamp, Url};
 use serde::Deserialize;
 
@@ -78,6 +79,14 @@ pub(super) fn parse_bunker_uri(uri: &str) -> Result<BunkerTarget, NostrAuthError
     }
     if relays.is_empty() {
         return Err(NostrAuthError::InvalidBunkerUri("missing relay URL".into()));
+    }
+    if relays
+        .iter()
+        .any(|r| r.scheme() == RelayUrlScheme::Ws && !r.is_localhost())
+    {
+        return Err(NostrAuthError::InvalidBunkerUri(
+            "relay must use wss://".into(),
+        ));
     }
     if relays.len() > MAX_BUNKER_RELAYS {
         return Err(NostrAuthError::InvalidBunkerUri(format!(
@@ -1984,6 +1993,15 @@ mod tests {
         assert_eq!(target.remote, remote);
     }
 
+    #[test]
+    fn bunker_uri_refuses_plaintext_relay() {
+        let remote = Keys::generate().public_key().to_hex();
+        let uri = format!("bunker://{remote}?relay=ws%3A%2F%2Frelay.example.com");
+        assert!(parse_bunker_uri(&uri).is_err(), "ws:// relay accepted");
+        let local = format!("bunker://{remote}?relay=ws%3A%2F%2Flocalhost%3A7777");
+        assert!(parse_bunker_uri(&local).is_ok(), "loopback relay refused");
+    }
+
     fn relay_query(count: usize) -> String {
         (0..count)
             .map(|n| format!("relay=wss%3A%2F%2Fr{n}.example"))
@@ -2008,7 +2026,7 @@ mod tests {
         let remote = Keys::generate().public_key();
         let target = parse_bunker_uri(&uri(
             &remote,
-            "relay=wss%3A%2F%2Fa.example&relay=ws%3A%2F%2Fb.example%2Fpath&secret=hush",
+            "relay=wss%3A%2F%2Fa.example&relay=ws%3A%2F%2Flocalhost%2Fpath&secret=hush",
         ))
         .unwrap();
         let stored = persisted_uri(&target.remote, &target.relays).unwrap();

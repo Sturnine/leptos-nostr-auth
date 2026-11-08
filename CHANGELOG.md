@@ -161,6 +161,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Breaking:** Bunker URIs that name a plaintext `ws://` relay are refused, except on localhost. A stored bunker session that uses one no longer restores; log in again with a `wss://` relay.
 - `PersistedSession`'s `Debug` now prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output is unchanged.
 - The secret key and read-only inputs now empty on every submit, and the password input on every submit except one refused for an empty `ncryptsec` field. A mistyped `npub` or `nprofile` must be pasted again. Emptying wipes the signal's buffer only: the DOM value, `event.target.value`, earlier keystrokes' strings and `prop:value` clones remain until collected, and a script on the page could already have read the paste. A secret pasted in the read-only field should be treated as exposed. See [What is wiped](https://github.com/Sturnine/leptos-nostr-auth#what-is-wiped-and-what-is-not).
 - A bunker URI stays after a failed login, as it did before, in clear text with any secret, until the user leaves the step, including under a restore landing on that step or a removal in another tab with no login running. Retrying a URI whose secret was spent fails with the signer's text and needs a new URI. Whether a signer spends a secret on a failed attempt is unknown. What changed: `InvalidBunkerUri` now empties the field, so a typo there is gone. A secret pasted in this field should be treated as exposed.
