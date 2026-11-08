@@ -36,7 +36,7 @@
 //! - `csr`, `hydrate`, `ssr` — the Leptos render mode. Enable one per build; the server build of
 //!   an SSR app needs `ssr`, where every browser call returns an error.
 //! - `insecure_nsec_input` — adds raw nsec/hex key paste, shown only when
-//!   [`LoginMethod`]`::RawNsec` is in [`NostrAuthConfig::allowed_methods`]. Any XSS on the page can
+//!   <code>[LoginMethod]::RawNsec</code> is in [`NostrAuthConfig::allowed_methods`]. Any XSS on the page can
 //!   steal a pasted key. Passkey and ncryptsec sessions also hold the raw key in wasm memory: see
 //!   "Security limits" in the README.
 
