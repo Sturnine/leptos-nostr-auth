@@ -307,7 +307,8 @@ pub enum LoginMethod {
 }
 
 impl LoginMethod {
-    /// Returns all enabled login methods in display order.
+    /// Returns the default login methods in display order. `RawNsec` is never included: list it in
+    /// `allowed_methods` yourself.
     pub fn all() -> Vec<Self> {
         vec![
             Self::Extension,
@@ -315,8 +316,6 @@ impl LoginMethod {
             Self::Passkey,
             Self::ReadOnly,
             Self::Ncryptsec,
-            #[cfg(feature = "insecure_nsec_input")]
-            Self::RawNsec,
         ]
     }
 

@@ -161,6 +161,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Breaking:** With `insecure_nsec_input` enabled, raw nsec paste now also needs `LoginMethod::RawNsec` in `allowed_methods`, so a dependency enabling the feature no longer turns it on in every app's default modal.
 - **Breaking:** Bunker URIs that name a plaintext `ws://` relay are refused, except on localhost. A stored bunker session that uses one no longer restores; log in again with a `wss://` relay.
 - `PersistedSession`'s `Debug` now prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output is unchanged.
 - The secret key and read-only inputs now empty on every submit, and the password input on every submit except one refused for an empty `ncryptsec` field. A mistyped `npub` or `nprofile` must be pasted again. Emptying wipes the signal's buffer only: the DOM value, `event.target.value`, earlier keystrokes' strings and `prop:value` clones remain until collected, and a script on the page could already have read the paste. A secret pasted in the read-only field should be treated as exposed. See [What is wiped](https://github.com/Sturnine/leptos-nostr-auth#what-is-wiped-and-what-is-not).

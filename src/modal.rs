@@ -1258,6 +1258,27 @@ mod tests {
         assert!(has_more_options(&[LoginMethod::RawNsec]));
     }
 
+    #[cfg(all(feature = "ssr", feature = "insecure_nsec_input"))]
+    #[test]
+    fn raw_nsec_needs_listing_in_allowed_methods() {
+        assert!(!LoginMethod::all().contains(&LoginMethod::RawNsec));
+        let owner = Owner::new();
+        let html = owner.with(|| {
+            let (platform, _) = signal(Platform {
+                os: Os::Other,
+                has_nostr_extension: false,
+                supports_webauthn: true,
+            });
+            let (_, set_step) = signal(ModalStep::MethodSelect);
+            view! { <StepMethodSelect platform=platform config=NostrAuthConfig::default() set_step=set_step /> }
+                .to_html()
+        });
+        assert!(!html.contains("Secret Key"), "{html}");
+        let mut listed = LoginMethod::all();
+        listed.push(LoginMethod::RawNsec);
+        assert!(method_list_html(Os::Other, listed).contains("Secret Key"));
+    }
+
     #[cfg(feature = "ssr")]
     fn method_list_html(os: Os, allowed_methods: Vec<LoginMethod>) -> String {
         let owner = Owner::new();

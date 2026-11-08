@@ -13,7 +13,7 @@ Drop-in login modal supporting every Nostr authentication method. Headless — b
 | Passkey (WebAuthn PRF) | macOS/iOS: **top position** (Face ID/Touch ID); others: if WebAuthn available |
 | Read-Only (npub) | Always |
 | Encrypted Key / ncryptsec (NIP-49) | Always |
-| Raw nsec paste | Only with `insecure_nsec_input` feature (opt-in) |
+| Raw nsec paste | Only with `insecure_nsec_input` feature, and `LoginMethod::RawNsec` in `allowed_methods` (opt-in) |
 
 Passkeys use the WebAuthn PRF extension with a fixed salt (`"nostr-key-v1"`) to deterministically derive the same secp256k1 key from the same passkey. A synced passkey gives the same key on every device that uses the same RP ID and salt; there is no backup if the passkey is lost. No passwords, no clipboard.
 
@@ -109,7 +109,7 @@ You must select exactly one rendering mode feature:
 leptos-nostr-auth = { version = "0.2", features = ["csr", "insecure_nsec_input"] }
 ```
 
-Shows a raw `nsec1...` / hex private key input behind a two-click security warning. **Not recommended** for production — any XSS on the page can steal the key. Prefer a browser extension or a bunker, where the key stays out of the page. Passkey and ncryptsec sessions avoid pasting a key, but they also hold the raw key in wasm memory: see [Security limits](#security-limits).
+Also list `LoginMethod::RawNsec` in `allowed_methods`: the defaults never include it, so a dependency enabling the feature cannot turn it on in your modal. It shows a raw `nsec1...` / hex private key input behind a two-click security warning. **Not recommended** for production — any XSS on the page can steal the key. Prefer a browser extension or a bunker, where the key stays out of the page. Passkey and ncryptsec sessions avoid pasting a key, but they also hold the raw key in wasm memory: see [Security limits](#security-limits).
 
 ## Release Profile
 
