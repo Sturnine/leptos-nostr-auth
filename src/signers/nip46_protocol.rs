@@ -37,7 +37,7 @@ const RECONNECT_CANCELLED: &str = "reconnect cancelled";
 
 pub(super) struct BunkerTarget {
     pub(super) remote: PublicKey,
-    /// Relays to try, in order, without duplicates.
+    /// In order, without duplicates.
     pub(super) relays: Vec<RelayUrl>,
     /// One-time pairing secret. Never persisted.
     pub(super) secret: Option<String>,
@@ -108,7 +108,7 @@ pub(super) fn persisted_uri(
     Ok(uri.into())
 }
 
-/// Move the relay that worked to the front, so the next restore tries it first.
+/// So the next restore tries the working relay first.
 pub(super) fn rotate_to_front(relays: &mut Vec<RelayUrl>, working: &RelayUrl) {
     if let Some(position) = relays.iter().position(|relay| relay == working) {
         let relay = relays.remove(position);
@@ -204,7 +204,6 @@ pub(super) fn event_frame(event: &Event) -> String {
 pub(super) struct HttpsUrl(String);
 
 impl HttpsUrl {
-    /// The parsed URL, the only form ever rendered.
     pub(super) fn as_str(&self) -> &str {
         &self.0
     }
@@ -494,7 +493,7 @@ pub(super) enum Effect<W> {
         waker: W,
         outcome: Result<ResponseResult, RpcFailure>,
     },
-    /// Show an approval link. The request stays pending.
+    /// The request stays pending.
     Prompt { request_id: String, url: HttpsUrl },
     /// Close the socket, so the next call resubscribes.
     CloseSocket,
@@ -802,7 +801,7 @@ impl<W> Inflight<W> {
         })
     }
 
-    /// Fail every request with a relay's reason. Each takes `signer_answered` from its own entry.
+    /// Each takes `signer_answered` from its own entry.
     pub(super) fn fail_all(&mut self, reason: &str) -> Vec<Effect<W>> {
         let reason = sanitize_remote_text(reason);
         self.fail_all_with(|signer_answered| RpcFailure::Relay {
