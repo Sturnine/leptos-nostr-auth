@@ -166,6 +166,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented that a bunker restore's matching public key does not prove the signer holds the key, and that a one-time localStorage write can redirect a stored bunker session, or swap in another identity, until logout.
 - A bunker session now encrypts or decrypts only after its signer has produced a valid signature for the account. If the app has not signed yet, the first NIP-44 call sends one signing request for an unpublished check event, which some signers ask the user to approve. A stored session pointed at another signer can no longer receive NIP-44 plaintext.
 - Extension error text is now sanitized and capped like bunker text, and both now also drop line separators, the Arabic letter mark, interlinear annotation and tag characters, and blank Hangul fillers.
+- A passkey PRF result or credential id that is not a byte buffer is now refused. Before, a number was coerced into zero bytes, giving a key anyone could compute. Keys from conforming browsers, and byte buffers from another JavaScript realm, are unchanged.
 
 ## [0.1.0] - 2026-07-22
 

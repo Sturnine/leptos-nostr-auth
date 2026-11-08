@@ -397,19 +397,44 @@ mod imp {
             NostrAuthError::PasskeyFailed(format!("no PRF first output: {}", js_err_msg(&e)))
         })?;
 
-        Ok(PrfOutcome::Output(Zeroizing::new(
-            Uint8Array::new(&first).to_vec(),
-        )))
+        let Some(bytes) = buffer_bytes(&first) else {
+            let enabled =
+                Reflect::get(&prf, &"enabled".into()).is_ok_and(|v| v.as_bool() == Some(true));
+            return Ok(if enabled {
+                PrfOutcome::EnabledWithoutOutput
+            } else {
+                PrfOutcome::Unavailable
+            });
+        };
+        Ok(PrfOutcome::Output(Zeroizing::new(bytes)))
+    }
+
+    /// Tags, not `instanceof`, which fails for buffers from another realm. Accepted values take
+    /// the same `new Uint8Array(value)` copy as before, so the bytes cannot change; that
+    /// constructor coerces anything else (a number `n` becomes `n` zero bytes).
+    fn buffer_bytes(value: &JsValue) -> Option<Vec<u8>> {
+        let to_string: js_sys::Function = Reflect::get(
+            &Object::get_prototype_of(&Object::new()),
+            &"toString".into(),
+        )
+        .ok()?
+        .dyn_into()
+        .ok()?;
+        let tag = to_string.call0(value).ok()?.as_string()?;
+        let byte_view = js_sys::ArrayBuffer::is_view(value)
+            && matches!(
+                tag.as_str(),
+                "[object Uint8Array]" | "[object Int8Array]" | "[object Uint8ClampedArray]"
+            );
+        (tag == "[object ArrayBuffer]" || byte_view).then(|| Uint8Array::new(value).to_vec())
     }
 
     fn credential_id_of(credential: &JsValue) -> Result<Vec<u8>, NostrAuthError> {
         let raw_id = Reflect::get(credential, &"rawId".into())
             .map_err(|e| NostrAuthError::PasskeyFailed(format!("no rawId: {}", js_err_msg(&e))))?;
-        let id = Uint8Array::new(&raw_id).to_vec();
-        if id.is_empty() {
-            return Err(NostrAuthError::PasskeyFailed("no rawId".into()));
-        }
-        Ok(id)
+        buffer_bytes(&raw_id)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| NostrAuthError::PasskeyFailed("no rawId".into()))
     }
 
     fn derive_from_credential(credential: &JsValue) -> Result<PasskeySession, NostrAuthError> {
@@ -515,6 +540,59 @@ mod imp {
         }
 
         #[wasm_bindgen_test]
+        fn non_buffer_prf_output_is_rejected() {
+            for first in [
+                "32",
+                "[1, 2, 3]",
+                "new Uint16Array(32)",
+                "new DataView(new ArrayBuffer(32))",
+                "({ [Symbol.toStringTag]: 'ArrayBuffer' })",
+            ] {
+                let session = derive_from_credential(&credential(&format!(
+                    "{{ prf: {{ results: {{ first: {first} }} }} }}"
+                )));
+                assert!(session.is_err(), "{first} became a key");
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn byte_buffers_from_any_realm_derive_the_same_key() {
+            let local = derive_from_credential(&credential(OUTPUT_0_TO_31)).unwrap();
+            for first in [
+                "Uint8Array.from({ length: 32 }, (_, i) => i)",
+                "new Int8Array(Uint8Array.from({ length: 32 }, (_, i) => i).buffer)",
+                "new Uint8Array(Uint8Array.from({ length: 40 }, (_, i) => i - 4).buffer, 4, 32)",
+                "new (process.getBuiltinModule('vm').runInNewContext('Uint8Array'))(Array.from({ length: 32 }, (_, i) => i)).buffer",
+                "new (process.getBuiltinModule('vm').runInNewContext('Uint8Array'))(Array.from({ length: 32 }, (_, i) => i))",
+            ] {
+                let got = derive_from_credential(&credential(&format!(
+                    "{{ prf: {{ results: {{ first: {first} }} }} }}"
+                )))
+                .unwrap();
+                assert_eq!(got.public_key, local.public_key, "{first}");
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn raw_id_must_be_a_byte_buffer() {
+            let with_raw_id = |raw_id: &str| {
+                js_sys::eval(&format!(
+                    "({{ rawId: {raw_id}, getClientExtensionResults() {{ return {OUTPUT_0_TO_31}; }} }})"
+                ))
+                .unwrap()
+            };
+            let got = derive_from_credential(&with_raw_id("'3'")).map(|s| s.credential_id);
+            assert!(got.is_err(), "a string rawId became {got:?}");
+            let foreign = with_raw_id(
+                "new (process.getBuiltinModule('vm').runInNewContext('Uint8Array'))([251, 255, 191]).buffer",
+            );
+            assert_eq!(
+                derive_from_credential(&foreign).unwrap().credential_id,
+                vec![251, 255, 191]
+            );
+        }
+
+        #[wasm_bindgen_test]
         fn derive_from_fake_credential() {
             let session = derive_from_credential(&credential(OUTPUT_0_TO_31)).unwrap();
             assert_eq!(
@@ -557,10 +635,7 @@ mod imp {
             let expected: Vec<u8> = (0..32).collect();
             for (extensions, want) in [
                 (OUTPUT_0_TO_31, PrfOutcome::Output(Zeroizing::new(expected))),
-                (
-                    "{ prf: { results: {} } }",
-                    PrfOutcome::Output(Zeroizing::new(Vec::new())),
-                ),
+                ("{ prf: { results: {} } }", PrfOutcome::Unavailable),
                 (
                     "{ prf: { enabled: true } }",
                     PrfOutcome::EnabledWithoutOutput,
