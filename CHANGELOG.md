@@ -190,6 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The stored bunker URI is now built from the session's own signer key and relays, so a bunker secret put back into the public `bunker_uri` field is never persisted.
 - A relay URL the browser refuses is no longer quoted in the bunker error, so credentials in it are not shown on screen.
 - The examples no longer clone the session in views or keep a signed event across logins, and the SSR example sends a strict Content-Security-Policy.
+- `sign_event` errors for malformed event JSON no longer quote the event's values.
 
 ## [0.1.0] - 2026-07-22
 

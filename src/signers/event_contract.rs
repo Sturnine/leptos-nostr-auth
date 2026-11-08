@@ -7,20 +7,28 @@ use crate::types::NostrAuthError;
 
 /// NIP-46 lists `sign_event` params without `pubkey`, so an absent one is filled in. A `pubkey` or
 /// `id` the session could not sign is refused here, so nothing reaches a signer.
+///
+/// Fixed texts: `serde_json` messages quote values.
 pub(super) fn prepare(
     event_json: &str,
     session: PublicKey,
 ) -> Result<UnsignedEvent, NostrAuthError> {
-    let mut value: serde_json::Value = serde_json::from_str(event_json)
-        .map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
+    let mut value: serde_json::Value = serde_json::from_str(event_json).map_err(|e| {
+        NostrAuthError::Serialization(format!(
+            "event is not valid JSON at line {}, column {}",
+            e.line(),
+            e.column()
+        ))
+    })?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| NostrAuthError::Serialization("event must be a JSON object".into()))?;
     object
         .entry("pubkey")
         .or_insert_with(|| session.to_hex().into());
-    let unsigned: UnsignedEvent =
-        serde_json::from_value(value).map_err(|e| NostrAuthError::Serialization(e.to_string()))?;
+    let unsigned: UnsignedEvent = serde_json::from_value(value).map_err(|_error| {
+        NostrAuthError::Serialization("event fields are missing or have the wrong type".into())
+    })?;
     if unsigned.pubkey != session {
         return Err(NostrAuthError::SigningFailed(
             "event pubkey differs from the session key".into(),
@@ -104,6 +112,19 @@ mod tests {
             AuthResult::Ncryptsec(RawKeySession::for_tests(keys.clone())),
             AuthResult::Passkey(PasskeySession::for_tests(keys.clone(), vec![1])),
         ]
+    }
+
+    #[test]
+    fn serialization_errors_quote_no_input() {
+        let key = Keys::generate().public_key();
+        for json in [
+            r#"{"kind":1,"content":"x","tags":[],"created_at":"secret-time"}"#,
+            r#"{"kind":"secret-kind","content":"x","tags":[],"created_at":1}"#,
+            r#"{"kind":1,"content":"secret-text""#,
+        ] {
+            let err = prepare(json, key).unwrap_err().to_string();
+            assert!(!err.contains("secret"), "{err}");
+        }
     }
 
     #[test]
