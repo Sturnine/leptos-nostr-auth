@@ -461,13 +461,15 @@ With `persist_session: false` the crate writes nothing on login, starts no resto
 | Method | Restore behavior |
 |---|---|
 | Extension | Re-calls `window.nostr.getPublicKey()`, verifies pubkey matches |
-| Bunker | Opens a socket to the stored relays, in order, and sends `get_public_key` with the stored client key; verifies pubkey matches |
+| Bunker | Opens a socket to the stored relays, in order, and sends `get_public_key` with the stored client key; the answer must equal the stored key. That does not prove the signer holds the key: see Bunker sessions. |
 | Passkey | From the login click only: calls `navigator.credentials.get()` → biometric → re-derives same key, verifies pubkey matches |
 | Read-Only | Restores directly from stored hex pubkey, which must be on the curve |
 | ncryptsec | **Not persisted** — user must decrypt again (password not stored) |
 | Raw nsec | **Not persisted** — user must paste again |
 
-**Bunker sessions**: restoring a bunker session does **not** replay your bunker's original pairing secret (which per [NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) is single-use and should already be considered spent). Instead, the library persists the local pairing keypair generated the first time you connected, the key your bunker already recognizes and has authorized. This key is unrelated to your Nostr identity key, but it is a live credential, held in clear in localStorage. Anyone who reads it, including any script on your page, can use it from any machine for whatever the signer allows this client, including `sign_event` and `nip44_decrypt`, until you revoke that client in your bunker or signer app. `logout` does not revoke it: it deletes this browser's copy and closes the session, and a copy taken earlier keeps working. Unlike an `HttpOnly` session cookie, it cannot be hidden from scripts.
+**Bunker sessions**: restoring a bunker session does **not** replay your bunker's original pairing secret (which per [NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) is single-use and should already be considered spent). Instead, the library persists the local pairing keypair generated the first time you connected, the key your bunker already recognizes and has authorized. This key is unrelated to your Nostr identity key, but it is a live credential, held in clear in localStorage. Anyone who reads it, including any script on your page, can use it from any machine for whatever the signer allows this client, including `sign_event` and `nip44_decrypt`, until you revoke that client in your bunker or signer app. `logout` does not revoke it: it deletes this browser's copy and closes the session, and a copy taken earlier keeps working. Unlike an `HttpOnly` session cookie, it cannot be hidden from scripts. The stored record also names the signer and relays. A script that once wrote localStorage can point a restored session at its own signer, which then answers `get_public_key` with your public key. Signing through it fails, because signatures are checked. Encryption is the exposure: see the next paragraph.
+
+A bunker session encrypts or decrypts only after its signer has produced one valid signature for your key. If the app has not signed anything yet, the first `nip44_encrypt` or `nip44_decrypt` sends one signing request for a short unpublished check event first, which some signers ask you to approve.
 
 Restore sends `get_public_key`, not `connect`, so signers that require a secret still restore.
 Behaviour on a revoked client varies by signer: one that answers `get_public_key` to anyone
@@ -549,6 +551,10 @@ NostrAuthConfig { persist_session: false, ..Default::default() }
 ### Secret keys in the page
 
 Passkey, ncryptsec and raw nsec sessions hold the raw secret key in wasm memory for as long as the session lives. A same-origin script can read that memory, or hook `navigator.credentials.get` and read the PRF output before the crate does, which gives it the key. Extension and bunker sessions keep the identity key out of the page, but a script there can still ask them to sign or decrypt.
+
+### A stored bunker session can be redirected
+
+A script that writes localStorage once, then is gone, can point the stored bunker session at a signer of its choosing until logout. See Session Restore, Bunker sessions. It can also replace the stored identity with another one; show the logged-in npub where users compose private messages.
 
 ### What is wiped, and what is not
 
