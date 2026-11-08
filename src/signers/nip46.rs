@@ -39,9 +39,7 @@ pub struct BunkerSession {
 impl BunkerSession {
     /// Establish a NIP-46 connection from a `bunker://` URI (fresh login).
     ///
-    /// Generates a new ephemeral local pairing keypair for this session. To restore a
-    /// previously-authorized session without the bunker's one-time secret, the crate-internal
-    /// `BunkerSession::reconnect` (used by session restore) is used instead.
+    /// Generates a new ephemeral local pairing keypair for this session.
     ///
     /// A URI may list up to five relays after duplicates are removed. If the signer sends an
     /// approval link, a mounted [`crate::modal::NostrAuthModal`] shows it, also while `open` is
@@ -75,14 +73,6 @@ impl BunkerSession {
     /// one that answers `get_public_key` to anyone restores it as authenticated, and it fails at
     /// the first signature. A signer that refuses makes this call fail, and the caller should fall
     /// back to prompting the user to reconnect from scratch.
-    ///
-    /// Only called from `storage::restore_session`, which never runs on the server; the server
-    /// stub exists so that caller compiles there.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `client_secret_hex` is not a valid secret key, or when
-    /// reconnection fails.
     pub(crate) async fn reconnect(
         uri_without_secret: &str,
         timeout_secs: u32,
@@ -188,7 +178,6 @@ pub fn dismiss_auth_prompt() {
     imp::dismiss_auth_prompt();
 }
 
-/// Record a mounted `NostrAuthModal`, which can show approval links.
 #[cfg_attr(
     feature = "ssr",
     expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
@@ -197,7 +186,6 @@ pub fn register_auth_presenter() {
     imp::register_auth_presenter();
 }
 
-/// Record an unmounted `NostrAuthModal`.
 #[cfg_attr(
     feature = "ssr",
     expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
@@ -321,19 +309,15 @@ mod imp {
 
     pub(super) type ConnectLock = Rc<ReconnectGate<Waker<ReconnectOutcome>>>;
 
-    /// What every clone of a session shares.
-    ///
     /// A socket handler must not capture this: the socket would keep it alive through the closure
     /// it owns, and its last-owner cleanup would never run.
     #[derive(Default)]
     pub(super) struct Connection {
         ws: RefCell<Option<web_sys::WebSocket>>,
-        /// Current `onmessage` and `onclose` handlers. Replacing them on reconnect drops the
-        /// previous closures' `client_keys` clones instead of leaking them.
+        /// Replacing them on reconnect drops the previous closures' `client_keys` clones instead
+        /// of leaking them.
         handlers: RefCell<Option<SocketHandlers>>,
         inflight: InflightSlot,
-        /// Serializes reconnects: a concurrent caller waits for the running one's outcome, up to
-        /// its own timeout, instead of racing a second WebSocket into existence. See `ensure_ws`.
         connect_lock: ConnectLock,
         /// Set once by `close`, and never cleared.
         pub(super) closed: Cell<bool>,
@@ -353,8 +337,6 @@ mod imp {
     }
 
     impl Connection {
-        /// Close the session for good.
-        ///
         /// Must stay free of signal access: `Drop` can run while `set_auth` holds its write guard.
         /// The failure pass goes before `retire_socket`, so waiters get the closed error rather
         /// than a lost socket. Handlers stay alive until `Connection` drops; every socket's hooks
@@ -589,7 +571,7 @@ mod imp {
             Err(failures.finish().into_connect_error())
         }
 
-        /// One relay attempt. Its socket closes on any exit but success.
+        /// Its socket closes on any exit but success.
         async fn handshake_on(
             &self,
             relay: &RelayUrl,
@@ -609,9 +591,6 @@ mod imp {
             Ok((public_key, attempt.disarm()))
         }
 
-        /// Ensure the persistent WebSocket is open, reconnecting if necessary.
-        /// Returns the WebSocket ready to send messages.
-        ///
         /// Concurrent callers serialize on `connect_lock`: only the first caller
         /// actually reconnects; subsequent callers wait for that attempt's outcome, up to
         /// `timeout_secs`, instead of each opening their own socket (which would orphan all but
@@ -652,8 +631,7 @@ mod imp {
             }
         }
 
-        /// Tears down any stale socket and opens a new one, trying each relay in order.
-        /// Only ever called from `ensure_ws`, which serializes concurrent callers.
+        /// Only called from `ensure_ws`, which serializes concurrent callers.
         async fn do_reconnect(&self) -> Result<web_sys::WebSocket, NostrAuthError> {
             let old_ws = self.conn.ws.borrow().clone();
             if let Some(old_ws) = old_ws {
@@ -729,8 +707,6 @@ mod imp {
             Ok(attempt)
         }
 
-        /// Install the handlers for `ws`. The closures are stored in `handlers`, which drops any
-        /// previous handler's captured `client_keys` clone instead of leaking it.
         fn install_handlers(&self, ws: &web_sys::WebSocket) {
             let inflight = Rc::clone(&self.conn.inflight);
             let peer = Peer {
