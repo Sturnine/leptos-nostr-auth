@@ -242,7 +242,7 @@ mod wasm_tests {
 
     fn holds_run(start: usize, len: usize, run: &[u8; 32]) -> bool {
         let end = start.saturating_add(len).saturating_sub(run.len());
-        (start..end).any(|at| {
+        (start..=end).any(|at| {
             run.iter()
                 .zip(at..)
                 .all(|(byte, address)| byte_at(address) == *byte)
@@ -267,5 +267,13 @@ mod wasm_tests {
         let boxed = Box::new(run);
         let start = core::ptr::from_ref::<[u8; 32]>(&boxed).addr();
         assert!(holds_run(start.checked_sub(4).unwrap(), 72, &run));
+    }
+
+    #[wasm_bindgen_test]
+    fn holds_run_checks_the_last_offset() {
+        let run = Keys::generate().secret_key().secret_bytes();
+        let boxed = Box::new(run);
+        let start = core::ptr::from_ref::<[u8; 32]>(&boxed).addr();
+        assert!(holds_run(start, 32, &run));
     }
 }
