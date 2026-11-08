@@ -212,6 +212,9 @@ mod imp {
         peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, NostrAuthError> {
+        if !method_is_callable(&["window", "nostr", "nip44", "encrypt"]) {
+            return Err(NostrAuthError::ExtensionNotFound);
+        }
         ensure_account(handle).await?;
         settle(
             nostr_nip44_encrypt(&peer.to_hex(), plaintext),
@@ -237,6 +240,9 @@ mod imp {
         peer: &PublicKey,
         ciphertext: &str,
     ) -> Result<String, NostrAuthError> {
+        if !method_is_callable(&["window", "nostr", "nip44", "decrypt"]) {
+            return Err(NostrAuthError::ExtensionNotFound);
+        }
         ensure_account(handle).await?;
         settle(
             nostr_nip44_decrypt(&peer.to_hex(), ciphertext),
@@ -516,6 +522,24 @@ mod wasm_tests {
             sign_shim(body);
             assert_signing_failed(h.sign_event(&request(&keys)).await, STATIC_TEXT);
         }
+    }
+
+    #[wasm_bindgen_test]
+    async fn nip44_without_nip44_never_asks_for_the_key() {
+        let (keys, h) = session();
+        let key = keys.public_key().to_hex();
+        shim(&format!(
+            "globalThis.__n = {{ gpk: 0 }}; globalThis.window = {{ nostr: {{ getPublicKey: async () => {{ globalThis.__n.gpk += 1; return '{key}'; }} }} }};"
+        ));
+        assert!(matches!(
+            h.nip44_encrypt(&peer(), "x").await,
+            Err(NostrAuthError::ExtensionNotFound)
+        ));
+        assert!(matches!(
+            h.nip44_decrypt(&peer(), "x").await,
+            Err(NostrAuthError::ExtensionNotFound)
+        ));
+        assert_eq!(count("gpk"), 0.0);
     }
 
     #[wasm_bindgen_test]

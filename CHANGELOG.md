@@ -135,6 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An extension without NIP-44 is no longer asked for its public key (and possibly a permission prompt)
+  before NIP-44 fails with `ExtensionNotFound`.
 - A signed event returned with an off-curve `pubkey` now fails as an invalid event instead of
   `SignerKeyMismatch`, so apps do not tell users to switch accounts when the signer is broken.
 - A remote signer that answers `connect` with anything but `ack` or the echoed secret is now treated as
