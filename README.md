@@ -15,7 +15,7 @@ Drop-in login modal supporting every Nostr authentication method. Headless — b
 | Encrypted Key / ncryptsec (NIP-49) | Always |
 | Raw nsec paste | Only with `insecure_nsec_input` feature (opt-in) |
 
-Passkeys use the WebAuthn PRF extension with a fixed salt (`"nostr-key-v1"`) to deterministically derive the same secp256k1 key from the same passkey. A synced passkey gives the same key on devices using this crate with the same RP ID. No passwords, no clipboard.
+Passkeys use the WebAuthn PRF extension with a fixed salt (`"nostr-key-v1"`) to deterministically derive the same secp256k1 key from the same passkey. A synced passkey gives the same key on every device that uses the same RP ID and salt; there is no backup if the passkey is lost. No passwords, no clipboard.
 
 ## Quick Start (CSR)
 
@@ -137,7 +137,7 @@ codegen-units = 1
 panic         = "abort"
 ```
 
-Do not set `strip = "symbols"`: it removes the `target_features` section, and the wasm-opt pass that Trunk runs then fails on bulk-memory instructions. In `basic-csr`, `opt-level = "z"` shrank the wasm from 2669143 to 1979248 bytes and roughly doubled the ncryptsec decrypt time in Chromium, from about 190-255 ms to about 455 ms, because scrypt runs on the main thread.
+Do not set `strip = "symbols"`: it removes the `target_features` section, and the wasm-opt pass that Trunk runs then fails on bulk-memory instructions. In `basic-csr`, `opt-level = "z"` shrank the wasm from 2669143 to 1979248 bytes and roughly doubled the ncryptsec decrypt time in Chromium, from about 190-255 ms to about 455 ms, because scrypt runs on the main thread. The decrypt also grows the page's wasm memory by 64 MiB at `log_n = 16` and 256 MiB at 18, and wasm memory never shrinks. On a low-memory phone the allocation at 17 or 18 can fail, which aborts the whole app.
 
 ## Configuration
 
@@ -157,9 +157,8 @@ let config = NostrAuthConfig {
     // Close modal on Escape key (default: true)
     close_on_escape: true,
 
-    // WebAuthn relying party ID (no https:// prefix). Set it to share passkeys across subdomains.
-    // Default: window.location.hostname
-    rp_id: Some("myapp.com".into()),
+    // WebAuthn RP ID. Leave it unset: the default, this page's hostname, is the safe choice.
+    rp_id: None,
 
     // WebAuthn relying party display name (default: "Nostr App")
     rp_name: "My App".to_string(),
@@ -188,11 +187,11 @@ view! {
 
 ## Passkey Setup
 
-Passkeys are scoped to a **Relying Party ID**. `rp_id` defaults to the page's hostname. Set it to share credentials across subdomains:
+Passkeys are scoped to a **Relying Party ID**. `rp_id` defaults to the page's hostname, and that default is the safe choice. Every origin that can use the RP ID can derive the user's Nostr key after one ordinary passkey prompt, because the PRF salt is public. A parent-domain `rp_id` (or a Related Origins file) therefore hands the key to every host under it. Set one only if you control and trust every such host:
 
 ```rust
 NostrAuthConfig {
-    rp_id: Some("myapp.com".into()), // this host, or a registrable-domain suffix of it
+    rp_id: Some("myapp.com".into()), // only if every host under myapp.com is yours and trusted
     ..Default::default()
 }
 ```
@@ -209,7 +208,7 @@ Every ceremony sends the RP ID, so changing `rp_id` strands credentials made und
 4. SHA-256 of that output becomes the secp256k1 private key
 5. Only the passkey credential ID is stored in localStorage — no private key bytes
 
-A synced passkey gives the same Nostr identity on devices using this crate with the same RP ID. Whether a passkey syncs depends on its provider.
+A synced passkey gives the same Nostr identity on every device. The key is scoped to the RP ID and the salt, not to this app: any software that uses salt `nostr-key-v1` on the same RP ID derives the same key. There is no backup: losing or deleting the passkey loses this Nostr identity, so use passkey login for keys you can afford to lose, or keep the identity in a signer that can export it.
 
 **Logging back in.** A stored passkey never prompts on page load. The app stays logged out with the session kept, and the prompt comes from `show_login`:
 
@@ -228,7 +227,7 @@ Two runnable examples are included in the `examples/` directory:
 
 Both examples show a login button, a restore indicator, a forget-session button and logout. `basic-csr` also signs events.
 
-Open `localhost`, not `127.0.0.1`. Both examples set `rp_id` to `localhost`, and WebAuthn refuses an IP address as an RP ID, so creating a passkey on `127.0.0.1` throws `SecurityError`.
+Open `localhost`, not `127.0.0.1`. The default RP ID is the page's hostname, and WebAuthn refuses an IP address as an RP ID, so creating a passkey on `127.0.0.1` throws `SecurityError`.
 
 ## Raw Modal (without context provider)
 
@@ -431,7 +430,7 @@ untrusted payloads first.
 
 ## Session Restore
 
-When `persist_session: true` (default), successful logins are cached in localStorage. **Private keys are never persisted.**
+When `persist_session: true` (default), successful logins are cached in localStorage. **Your Nostr identity key is never persisted.** A bunker session does persist its pairing key, a live credential: see Bunker sessions below.
 
 A failed or cancelled prompt never clears the session. Only a logout or a successful login as a different identity does:
 
@@ -552,6 +551,10 @@ NostrAuthConfig { persist_session: false, ..Default::default() }
 
 Passkey, ncryptsec and raw nsec sessions hold the raw secret key in wasm memory for as long as the session lives. A same-origin script can read that memory, or hook `navigator.credentials.get` and read the PRF output before the crate does, which gives it the key. Extension and bunker sessions keep the identity key out of the page, but a script there can still ask them to sign or decrypt.
 
+### Passkeys and the RP ID
+
+Any page on an origin allowed to use the RP ID can derive the passkey's Nostr key. With the default RP ID that is this host only. With a parent domain it is every host under it.
+
 ### A stored bunker session can be redirected
 
 A script that writes localStorage once, then is gone, can point the stored bunker session at a signer of its choosing until logout. See Session Restore, Bunker sessions. It can also replace the stored identity with another one; show the logged-in npub where users compose private messages.
@@ -570,6 +573,7 @@ Nothing here reaches these:
 - JS strings: `event.target.value`, the DOM input's value and the credential's `ArrayBuffer`. Emptying a field takes the value off the screen and wipes the signal's buffer. It does not undo a paste, and a script on the page could already have read it, so treat a secret pasted in the wrong field as exposed.
 - Earlier keystrokes' strings and `prop:value` clones, so a copy of a pasted value can sit in freed memory.
 - The hash digest and hash state in the passkey derivation.
+- scrypt's scratch buffers during ncryptsec decryption. One of them is a single-iteration PBKDF2 of the password, so a later memory read can test password guesses cheaply.
 - Key bytes the compiler moved or copied, the bunker one-time secret in `nostr`'s URI parsing and in this crate's parsed target and handshake, and `nostr`'s decoded bech32 bytes.
 - The bunker pairing key's hex strings, made for the stored session, and its copy in localStorage.
 - Key-session NIP-44: the per-call conversation key, message keys, plaintext buffers and returned plaintext.

@@ -146,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result could log a user back in or delete a session a login had just saved.
 - A login with a method that cannot persist, as a different identity, now clears the stored session,
   so a reload no longer returns the old identity. So does a login whose write fails.
-- A passkey created under a configured `rp_id` now logs in on a subdomain. A site with no configured `rp_id` sees no change.
+- A passkey created under a configured `rp_id` now logs in on a subdomain. A site with no configured `rp_id` sees no change. Every host that can use the RP ID can derive the key, so keep the hostname default unless you trust every such host.
 - Escape with a modal closed no longer fires `on_close`.
 - A bunker socket is no longer torn down after an approval link expires or the signer sends an unusable
   answer, which failed other pending requests as "relay connection lost". A request failed because the
@@ -160,6 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A bunker URI stays after a failed login, as it did before, in clear text with any secret, until the user leaves the step, including under a restore landing on that step or a removal in another tab with no login running. Retrying a URI whose secret was spent fails with the signer's text and needs a new URI. Whether a signer spends a secret on a failed attempt is unknown. What changed: `InvalidBunkerUri` now empties the field, so a typo there is gone. A secret pasted in this field should be treated as exposed.
 - An `ncryptsec` string now stays only after `WrongPassword`, where anyone who reads it can attack it offline at its scrypt cost. `InvalidNcryptsec`, including a pasted `nsec1...` and the `log_n` refusal, empties the field, and the error says why. A secret pasted in this field should be treated as exposed.
 - The bunker, ncryptsec, password, secret key and read-only inputs now carry `autocomplete="off"` and `spellcheck="false"`. Browsers may ignore `autocomplete="off"`.
+- Documented that every origin allowed to use the passkey RP ID can derive the user's Nostr key, that the hostname default is the safe choice, and that a passkey identity has no backup. The examples no longer set `rp_id`.
 - Documented that a bunker restore's matching public key does not prove the signer holds the key, and that a one-time localStorage write can redirect a stored bunker session, or swap in another identity, until logout.
 - A bunker session now encrypts or decrypts only after its signer has produced a valid signature for the account. If the app has not signed yet, the first NIP-44 call sends one signing request for an unpublished check event, which some signers ask the user to approve. A stored session pointed at another signer can no longer receive NIP-44 plaintext.
 

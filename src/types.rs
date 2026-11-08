@@ -340,8 +340,8 @@ impl LoginMethod {
 /// ```rust
 /// use leptos_nostr_auth::NostrAuthConfig;
 ///
-/// let config = NostrAuthConfig { rp_id: Some("myapp.com".to_owned()), ..Default::default() };
-/// assert_eq!(config.rp_id.as_deref(), Some("myapp.com"));
+/// let config = NostrAuthConfig { rp_name: "My App".to_owned(), ..Default::default() };
+/// assert_eq!(config.rp_name, "My App");
 /// ```
 #[derive(Clone)]
 #[expect(
@@ -370,8 +370,9 @@ pub struct NostrAuthConfig {
     pub bunker_timeout_secs: u32,
     /// WebAuthn relying party ID (default: `window.location.hostname`), with no `https://` prefix.
     ///
-    /// Set it to share credentials across subdomains, e.g. `"myapp.com"`. It must equal the host or
-    /// be a registrable-domain suffix of it, not a public suffix.
+    /// Every origin that can use the RP ID can derive the user's Nostr key, so the hostname default
+    /// is the safe choice; a parent domain hands the key to every host under it. A parent domain,
+    /// e.g. `"myapp.com"`, must be a registrable-domain suffix of the host, not a public suffix.
     ///
     /// Every ceremony sends it, so changing it strands credentials made under the old value,
     /// including ones made under the hostname before it was set. Reverting the config recovers them.

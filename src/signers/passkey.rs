@@ -9,10 +9,12 @@ use crate::types::NostrAuthError;
 /// derived keys and plaintext unwiped.
 ///
 /// A same-origin script can hook `navigator.credentials.get` and read the PRF output before this
-/// crate does, so the key is only as safe as the page.
+/// crate does, so the key is only as safe as the page and as every origin that shares the RP ID.
+/// Other software using the same salt on the same RP ID derives the same key, and there is no
+/// backup if the passkey is lost.
 ///
-/// A synced passkey gives the same key on devices using this crate with the same RP ID. Whether a
-/// passkey syncs is up to its provider.
+/// A synced passkey gives the same key on every device that uses the same RP ID. Whether a passkey
+/// syncs is up to its provider.
 #[derive(Clone)]
 pub struct PasskeySession {
     /// The authenticated user's public key.

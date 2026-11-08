@@ -22,8 +22,7 @@ fn main() {
 #[component]
 fn App() -> impl IntoView {
     let config = NostrAuthConfig {
-        persist_session: true,
-        rp_id: Some("localhost".into()),
+        rp_name: "Nostr Auth Example".into(),
         ..Default::default()
     };
 

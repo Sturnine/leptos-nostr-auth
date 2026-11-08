@@ -22,6 +22,10 @@ impl RawKeySession {
     /// scrypt runs synchronously and blocks the calling thread. `spawn_local` does not move it off
     /// the main thread, so callers wanting a spinner must let the browser paint first.
     ///
+    /// The decrypt also grows the page's wasm memory by 64 MiB at `log_n = 16` and 256 MiB at 18,
+    /// and wasm memory never shrinks. On a low-memory phone the allocation at 17 or 18 can fail,
+    /// which aborts the whole app.
+    ///
     /// # Errors
     ///
     /// Returns an error when decrypting fails.
