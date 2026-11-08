@@ -488,7 +488,7 @@ relays, at most 5, the longest a call can take is:
 | Call | Bound | No approval link | T = 30, n = 5: no link / with link |
 |---|---|---|---|
 | Call that reconnects | (n+1)T + 300 s | (n+1)T | 180 s / 480 s |
-| Call waiting on another call's reconnect | 2T + 300 s | 2T | 60 s / 360 s |
+| Call waiting on another call's reconnect | (n+1)T + 300 s | (n+1)T | 180 s / 480 s |
 | Login | (2n+1)T + 600 s | | 930 s with link |
 | Restore | 2nT + 300 s | | 600 s with link |
 

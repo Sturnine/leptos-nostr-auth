@@ -664,9 +664,9 @@ mod imp {
         }
 
         /// Concurrent callers serialize on `connect_lock`: only the first caller
-        /// actually reconnects; subsequent callers wait for that attempt's outcome, up to
-        /// `timeout_secs`, instead of each opening their own socket (which would orphan all but
-        /// one in-flight RPC until timeout).
+        /// actually reconnects; subsequent callers wait for that attempt's outcome instead of each
+        /// opening their own socket (which would orphan all but one in-flight RPC until timeout).
+        /// A follower waits as long as the leader can take: one open per relay.
         async fn ensure_ws(&self) -> Result<web_sys::WebSocket, NostrAuthError> {
             if self.conn.closed.get() {
                 return Err(closed_error());
@@ -680,27 +680,38 @@ mod imp {
                 return Ok(ws);
             }
 
-            let (woken, slot, waker) = wake_pair();
-            if let Some(lead) = self.conn.connect_lock.join(waker) {
-                let result = self.do_reconnect().await;
-                lead.finish(result.as_ref().map(|_| ()).map_err(Clone::clone));
-                return result;
-            }
+            let rounds = u32::try_from(self.relays.len()).unwrap_or(u32::MAX);
+            let wait_secs = self.timeout_secs.saturating_mul(rounds).saturating_add(1);
+            for _ in 0..3 {
+                let (woken, slot, waker) = wake_pair();
+                if let Some(lead) = self.conn.connect_lock.join(waker) {
+                    let result = self.do_reconnect().await;
+                    lead.finish(result.as_ref().map(|_| ()).map_err(Clone::clone));
+                    return result;
+                }
 
-            let timer = RpcTimer::start(self.timeout_secs);
-            let race = Promise::race(&Array::of2(&woken, timer.fired()));
-            let _ = JsFuture::from(race).await;
-            let outcome = slot.borrow_mut().take();
-            if self.conn.closed.get() {
-                return Err(closed_error());
+                let timer = RpcTimer::start(wait_secs);
+                let race = Promise::race(&Array::of2(&woken, timer.fired()));
+                let _ = JsFuture::from(race).await;
+                let outcome = slot.borrow_mut().take();
+                if self.conn.closed.get() {
+                    return Err(closed_error());
+                }
+                match outcome {
+                    None => return Err(NostrAuthError::BunkerTimeout),
+                    Some(Err(NostrAuthError::BunkerConnectionFailed(m)))
+                        if m == RECONNECT_CANCELLED => {}
+                    Some(Err(e)) => return Err(e),
+                    Some(Ok(())) => {
+                        return self.conn.ws.borrow().as_ref().cloned().ok_or_else(|| {
+                            NostrAuthError::BunkerConnectionFailed("reconnect failed".into())
+                        });
+                    }
+                }
             }
-            match outcome {
-                None => Err(NostrAuthError::BunkerTimeout),
-                Some(Err(e)) => Err(e),
-                Some(Ok(())) => self.conn.ws.borrow().as_ref().cloned().ok_or_else(|| {
-                    NostrAuthError::BunkerConnectionFailed("reconnect failed".into())
-                }),
-            }
+            Err(NostrAuthError::BunkerConnectionFailed(
+                RECONNECT_CANCELLED.into(),
+            ))
         }
 
         /// Only called from `ensure_ws`, which serializes concurrent callers.
@@ -888,6 +899,52 @@ mod imp {
             let _ = write!(acc, "{b:02X}");
             acc
         })
+    }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+    mod ws_tests {
+        use super::*;
+        use crate::signers::test_ws;
+        use wasm_bindgen_test::wasm_bindgen_test;
+
+        fn session_on(relays: &[&str]) -> BunkerSession {
+            let client_keys = Keys::generate();
+            BunkerSession {
+                public_key: client_keys.public_key(),
+                bunker_uri: String::new(),
+                timeout_secs: 1,
+                remote_pubkey: Keys::generate().public_key(),
+                client_keys,
+                relays: relays.iter().map(|r| RelayUrl::parse(r).unwrap()).collect(),
+                conn: SendWrapper::new(Rc::default()),
+            }
+        }
+
+        #[wasm_bindgen_test]
+        async fn follower_outlives_a_slow_first_relay() {
+            test_ws::install();
+            let s = session_on(&["wss://hang.example", "wss://ok.example"]);
+            let (lead, follow) = futures::future::join(s.ensure_ws(), s.ensure_ws()).await;
+            assert!(lead.is_ok(), "leader failed: {:?}", lead.err());
+            assert!(follow.is_ok(), "follower failed: {:?}", follow.err());
+        }
+
+        #[wasm_bindgen_test]
+        async fn follower_survives_a_cancelled_leader() {
+            use futures::FutureExt as _;
+            test_ws::install();
+            let s = session_on(&["wss://ok.example"]);
+            let mut lead = Box::pin(s.ensure_ws());
+            let mut follow = Box::pin(s.ensure_ws());
+            assert!((&mut lead).now_or_never().is_none());
+            assert!((&mut follow).now_or_never().is_none());
+            drop(lead);
+            assert!(
+                follow.await.is_ok(),
+                "follower failed after its leader was dropped"
+            );
+        }
     }
 }
 

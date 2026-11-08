@@ -155,6 +155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A NIP-44 encrypt result from an extension or remote signer that is not a NIP-44 v2 payload (for example NIP-04 output or the plaintext) is now refused with `EncryptionFailed` instead of being returned as ciphertext.
 - After a passkey is created, every failure now says the passkey exists and should be used rather than recreated; a passkey created on an authenticator without PRF gets a warning in the modal. Ceremony errors no longer show a JavaScript debug dump. A missing or empty credential id is refused instead of being stored.
 - A bunker timeout on a relay that merely sent a NIP-42 challenge no longer claims the relay requires authentication; that diagnosis is kept for relays that refuse with `auth-required:`.
+- A bunker request waiting on another request's reconnect now waits as long as that reconnect can take, and survives the other request being cancelled, instead of failing while the reconnect still succeeds.
 
 ### Security
 

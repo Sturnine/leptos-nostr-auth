@@ -365,7 +365,7 @@ pub struct NostrAuthConfig {
     ///
     /// This is not a limit on a whole call. With `n` relays, at most 5, and this value as `T`, the
     /// most a call can take is: `(n+1)T`, plus 300 s with an approval link, for a call that
-    /// reconnects; `2T`, plus 300 s with a link, for a call waiting on another call's reconnect;
+    /// reconnects; `(n+1)T`, plus 300 s with a link, for a call waiting on another call's reconnect;
     /// `(2n+1)T + 600 s` for login; `2nT + 300 s` for restore.
     pub bunker_timeout_secs: u32,
     /// WebAuthn relying party ID (default: `window.location.hostname`), with no `https://` prefix.
