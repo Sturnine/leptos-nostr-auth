@@ -479,3 +479,101 @@ mod tests {
         assert_eq!(dec(BUNKER_JSON), Some(bunker()));
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+#[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+mod stale_restore {
+    use super::*;
+    use crate::signers::test_ws::tick;
+    use crate::types::PersistedMethod;
+    use codee::Encoder as _;
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    const USER: &str = "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2";
+    const OTHER: &str = "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa";
+
+    fn stored(pk: &str) -> String {
+        JsonSerdeCodec::encode(&Some(PersistedSession {
+            public_key_hex: pk.to_owned(),
+            method: PersistedMethod::Extension,
+            bunker_uri: None,
+            bunker_client_secret_hex: None,
+            passkey_credential_id: None,
+        }))
+        .unwrap()
+    }
+
+    #[component]
+    fn Probe(out: StoredValue<Option<NostrAuthContext>>) -> impl IntoView {
+        out.set_value(Some(use_nostr_auth()));
+    }
+
+    #[wasm_bindgen_test]
+    async fn restore_landing_after_another_tab_stored_is_dropped() {
+        let key = NostrAuthConfig::default().storage_key;
+        js_sys::eval(&format!(
+            "globalThis.window = globalThis;
+            const node = () => new Proxy(function () {{}}, {{
+              get: (_, p) => (p === 'then' ? undefined : p === Symbol.toPrimitive ? () => '' : node()),
+              set: () => true,
+              apply: () => node(),
+            }});
+            globalThis.document = node();
+            globalThis.__mountPoint = node();
+            globalThis.Window = class {{ static [Symbol.hasInstance]() {{ return true; }} }};
+            const bus = new EventTarget();
+            globalThis.addEventListener = bus.addEventListener.bind(bus);
+            globalThis.removeEventListener = bus.removeEventListener.bind(bus);
+            globalThis.dispatchEvent = bus.dispatchEvent.bind(bus);
+            const items = new Map([[{key:?}, {user:?}]]);
+            Object.defineProperty(globalThis, 'localStorage', {{ configurable: true, value: {{
+              getItem: (k) => items.has(k) ? items.get(k) : null,
+              setItem: (k, v) => {{ items.set(k, String(v)); }},
+              removeItem: (k) => {{ items.delete(k); }},
+            }} }});
+            globalThis.nostr = {{ getPublicKey: () => new Promise((r) => {{ globalThis.__answer = () => r({USER:?}); }}) }};",
+            user = stored(USER),
+        ))
+        .unwrap();
+        // Mounting nothing is the public way to start leptos's wasm executor.
+        let mount_point = js_sys::eval("globalThis.__mountPoint").unwrap();
+        leptos::mount::mount_to(mount_point.unchecked_into(), || ()).forget();
+
+        let owner = Owner::new();
+        let out = owner.with(|| StoredValue::new(None));
+        let view =
+            owner.with(|| view! { <NostrAuthProvider><Probe out=out /></NostrAuthProvider> });
+        let ctx = out.get_value().unwrap();
+        tick(20).await;
+        assert!(ctx.is_restoring.get_untracked(), "restore did not start");
+
+        js_sys::eval(&format!(
+            "localStorage.setItem({key:?}, {other:?});
+            const e = new Event('storage');
+            Object.defineProperties(e, {{ key: {{ value: {key:?} }}, newValue: {{ value: {other:?} }}, storageArea: {{ value: localStorage }} }});
+            dispatchEvent(e);",
+            other = stored(OTHER),
+        ))
+        .unwrap();
+        tick(20).await;
+        js_sys::eval("globalThis.__answer()").unwrap();
+        tick(20).await;
+
+        let landed = ctx
+            .auth
+            .with_untracked(|a| a.as_ref().map(AuthResult::public_key));
+        let settled = (
+            ctx.is_restoring.get_untracked(),
+            ctx.restore_error.get_untracked(),
+        );
+        js_sys::eval(
+            "delete globalThis.nostr; delete globalThis.localStorage; delete globalThis.document;",
+        )
+        .unwrap();
+        drop(view);
+        drop(owner);
+        assert_eq!(landed, None, "a stale restore logged this tab in");
+        assert!(matches!(settled, (false, None)), "{settled:?}");
+    }
+}
