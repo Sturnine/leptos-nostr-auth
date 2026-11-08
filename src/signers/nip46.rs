@@ -168,6 +168,17 @@ impl BunkerSession {
     }
 }
 
+impl BunkerSession {
+    /// Built from the private fields, so a reassigned `bunker_uri` cannot persist a secret.
+    #[cfg_attr(
+        feature = "ssr",
+        expect(clippy::missing_const_for_fn, reason = "only the server stub is const")
+    )]
+    pub(crate) fn uri_to_persist(&self) -> Option<String> {
+        imp::uri_to_persist(self)
+    }
+}
+
 /// The approval link on show, if any. A tracked read, so modal closures react.
 #[cfg_attr(
     feature = "ssr",
@@ -254,6 +265,10 @@ mod imp {
 
     pub(super) fn auth_url_host(url: &str) -> Option<String> {
         crate::signers::nip46_protocol::auth_url_host(url)
+    }
+
+    pub(super) fn uri_to_persist(session: &BunkerSession) -> Option<String> {
+        persisted_uri(&session.remote_pubkey, &session.relays).ok()
     }
 
     pub(super) fn dismiss_auth_prompt() {
@@ -1022,6 +1037,10 @@ mod imp {
         None
     }
 
+    pub(super) const fn uri_to_persist(_session: &BunkerSession) -> Option<String> {
+        None
+    }
+
     pub(super) const fn dismiss_auth_prompt() {}
 
     pub(super) const fn register_auth_presenter() {}
@@ -1170,6 +1189,22 @@ mod tests {
         assert!(matches!(enc, Err(NostrAuthError::BunkerSessionClosed)));
         let dec = auth.nip44_decrypt_async(&pk, "x").await;
         assert!(matches!(dec, Err(NostrAuthError::BunkerSessionClosed)));
+    }
+
+    #[test]
+    fn persisted_uri_never_carries_a_secret() {
+        let mut s = session();
+        s.relays = vec![RelayUrl::parse("wss://r.example").unwrap()];
+        s.bunker_uri = format!(
+            "bunker://{}?relay=wss%3A%2F%2Fr.example&secret=s3",
+            s.remote_pubkey.to_hex()
+        );
+        let stored = crate::types::AuthResult::Bunker(Box::new(s))
+            .to_persisted_session()
+            .unwrap()
+            .bunker_uri
+            .unwrap();
+        assert!(!stored.contains("secret"), "{stored}");
     }
 
     #[test]

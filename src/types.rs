@@ -175,8 +175,7 @@ impl AuthResult {
             Self::Bunker(s) => Some(PersistedSession {
                 public_key_hex: s.public_key.to_hex(),
                 method: PersistedMethod::Bunker,
-                // `persisted_uri` already removed the secret.
-                bunker_uri: Some(s.bunker_uri.clone()),
+                bunker_uri: s.uri_to_persist(),
                 bunker_client_secret_hex: Some(s.client_secret_hex()),
                 passkey_credential_id: None,
             }),
