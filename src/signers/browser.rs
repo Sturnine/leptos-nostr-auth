@@ -1,4 +1,4 @@
-use js_sys::{Object, Promise, Reflect, Uint8Array};
+use js_sys::{Object, Promise, Reflect};
 use nostr::types::Timestamp;
 use wasm_bindgen::prelude::*;
 
@@ -75,18 +75,11 @@ pub(super) fn now_timestamp() -> Timestamp {
 
 #[expect(
     clippy::unwrap_used,
-    clippy::cast_possible_truncation,
-    reason = "window and crypto exist in a tab, and callers pass 8-32 bytes, under the 64KiB quota and u32"
+    reason = "every browser tab has crypto.getRandomValues"
 )]
 pub(super) fn random_bytes(len: usize) -> Vec<u8> {
-    let window = web_sys::window().unwrap();
-    let crypto = window.crypto().unwrap();
     let mut buf = vec![0u8; len];
-    let u8arr = Uint8Array::new_with_length(len as u32);
-    crypto
-        .get_random_values_with_array_buffer_view(&u8arr)
-        .unwrap();
-    u8arr.copy_to(&mut buf);
+    getrandom::fill(&mut buf).unwrap();
     buf
 }
 

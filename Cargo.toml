@@ -62,7 +62,6 @@ web-sys = { version = "0.3", features = [
   "CredentialsContainer",
   "CredentialCreationOptions",
   "CredentialRequestOptions",
-  "Crypto",
   "WebSocket",
   "MessageEvent",
   "ErrorEvent",
@@ -86,7 +85,6 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 
 # nostr 0.45 randomness (rand 0.10 -> getrandom 0.4) needs the browser backend explicitly
-[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dev-dependencies]
