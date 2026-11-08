@@ -381,7 +381,8 @@ impl RpcFailure {
                 signer_answered: false,
                 relay_asked_auth: true,
             } => NostrAuthError::BunkerConnectionFailed(
-                "the relay requires NIP-42 authentication, which this client does not support"
+                "the remote signer did not answer; the relay also asked for NIP-42 authentication, \
+                 which this client does not support"
                     .into(),
             ),
             Self::Timeout { .. } => NostrAuthError::BunkerTimeout,
@@ -391,6 +392,12 @@ impl RpcFailure {
                 NostrAuthError::BunkerConnectionFailed(SOCKET_REPLACED.into())
             }
             Self::SocketLost { .. } => NostrAuthError::BunkerConnectionFailed(SOCKET_LOST.into()),
+            Self::Relay { reason, .. } if reason.starts_with("auth-required:") => {
+                NostrAuthError::BunkerConnectionFailed(
+                    "the relay requires NIP-42 authentication, which this client does not support"
+                        .into(),
+                )
+            }
             Self::Relay { reason, .. } => {
                 NostrAuthError::BunkerConnectionFailed(format!("relay refused: {reason}"))
             }
@@ -1862,13 +1869,34 @@ mod tests {
             .timeout_failure(false)
             .into_connect_error()
             .to_string();
-        assert!(text.contains("NIP-42"));
+        assert!(
+            text.contains("did not answer") && text.contains("NIP-42"),
+            "{text}"
+        );
         assert!(!text.contains("challenge"));
         fx.inflight.reset_socket();
         assert!(matches!(
             fx.inflight.timeout_failure(false).into_signing_error(),
             NostrAuthError::BunkerTimeout
         ));
+    }
+
+    #[test]
+    fn nip42_named_only_for_auth_required_refusals() {
+        let timeout = RpcFailure::Timeout {
+            signer_answered: false,
+            relay_asked_auth: true,
+        }
+        .into_signing_error()
+        .to_string();
+        assert!(timeout.contains("did not answer"), "{timeout}");
+        let refused = RpcFailure::Relay {
+            reason: "auth-required: sign in first".into(),
+            signer_answered: false,
+        }
+        .into_signing_error()
+        .to_string();
+        assert!(refused.contains("requires NIP-42"), "{refused}");
     }
 
     #[test]
