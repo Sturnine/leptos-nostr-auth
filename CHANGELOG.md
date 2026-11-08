@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-11-07
+## [0.2.0] - 2026-11-08
 
 ### Changed
 
@@ -87,12 +87,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Bunker URIs that name a plaintext `ws://` relay are refused, except on localhost. A stored bunker session that uses one no longer restores; log in again with a `wss://` relay.
 - `PersistedSession`'s `Debug` prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output is unchanged. The stored bunker URI is built from the session's own signer key and relays, so a secret put back into the public `bunker_uri` field is never persisted.
 - Typing in a secret field wipes the previous value instead of leaving each keystroke's prefix in freed memory.
+- The Rust copy of the passkey PRF output is wiped once the key is derived. The browser's own `ArrayBuffer` is not.
 - The secret key and read-only inputs empty on every submit, and the password input on every submit except one refused for an empty `ncryptsec` field, so a mistyped `npub` or `nprofile` must be pasted again. Emptying wipes the signal's buffer only: the DOM value, `event.target.value` and `prop:value` clones remain until collected, and a script on the page could already have read the paste. See [What is wiped](https://github.com/Sturnine/leptos-nostr-auth#what-is-wiped-and-what-is-not).
 - `InvalidBunkerUri` empties the bunker URI field. Any other failed login leaves the URI in clear text with any secret, as before, until the user leaves the step, including under a restore landing on that step or a removal in another tab with no login running. Retrying a URI whose secret was spent fails with the signer's text and needs a new URI; whether a signer spends a secret on a failed attempt is unknown.
 - An `ncryptsec` string stays only after `WrongPassword`, where anyone who reads it can attack it offline at its scrypt cost. `InvalidNcryptsec`, including a pasted `nsec1...` and the `log_n` refusal, empties the field and says why.
 - Treat a secret pasted in the read-only, bunker or ncryptsec field as exposed.
 - The bunker, ncryptsec, password, secret key and read-only inputs carry `autocomplete="off"`, which browsers may ignore, and `spellcheck="false"`.
-- Relay frames over 256 KiB are dropped before parsing, so a hostile relay cannot grow the page's memory with huge frames.
+- In a bunker login, any relay message over 256 KiB is ignored unread, so a hostile relay cannot grow the page's memory.
 - Extension error text is sanitized and capped like bunker text, and both also drop line separators, the Arabic letter mark, interlinear annotation and tag characters, and blank Hangul fillers. A relay URL the browser refuses is no longer quoted in the bunker error, so credentials in it are not shown, and `sign_event` errors for malformed event JSON no longer quote the event's values.
 - An approval link ignores a primary click for half a second after it appears and names the signer's host, so a hostile signer cannot time it under the user's next primary click. Middle-click and "open in new tab" are not guarded.
 - Documented that every origin allowed to use the passkey RP ID can derive the user's Nostr key, that the hostname default is the safe choice, and that a passkey identity has no backup; the examples no longer set `rp_id`. Documented that a bunker restore's matching public key does not prove the signer holds the key, and that a one-time localStorage write can redirect a stored bunker session, or swap in another identity, until logout.
