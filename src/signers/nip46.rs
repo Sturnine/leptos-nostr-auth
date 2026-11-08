@@ -537,6 +537,9 @@ mod imp {
         Ok(checked)
     }
 
+    /// The browser's own message quotes the URL, which can carry credentials.
+    const RELAY_URL_REFUSED: &str = "the browser refused this relay URL";
+
     const PROOF_KIND: u16 = 29_421;
     const PROOF_FAILED: &str = "the remote signer did not prove it holds this account's key";
 
@@ -771,10 +774,13 @@ mod imp {
             Err(last)
         }
 
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the error text quotes the relay URL, which can carry credentials"
+        )]
         async fn open_relay(&self, relay: &RelayUrl) -> Result<AttemptGuard, NostrAuthError> {
-            let ws = web_sys::WebSocket::new(relay.as_str()).map_err(|e| {
-                NostrAuthError::BunkerConnectionFailed(format!("WebSocket: {}", js_err_msg(&e)))
-            })?;
+            let ws = web_sys::WebSocket::new(relay.as_str())
+                .map_err(|_| NostrAuthError::BunkerConnectionFailed(RELAY_URL_REFUSED.into()))?;
             let attempt = AttemptGuard {
                 ws: ws.clone(),
                 armed: true,
@@ -967,6 +973,18 @@ mod imp {
             let (lead, follow) = futures::future::join(s.ensure_ws(), s.ensure_ws()).await;
             assert!(lead.is_ok(), "leader failed: {:?}", lead.err());
             assert!(follow.is_ok(), "follower failed: {:?}", follow.err());
+        }
+
+        #[wasm_bindgen_test]
+        async fn refused_relay_url_is_never_quoted() {
+            test_ws::install();
+            js_sys::eval("globalThis.WebSocket = class { constructor(url) { throw new SyntaxError(`The URL '${url}' is invalid.`); } };").unwrap();
+            let uri = format!(
+                "bunker://{}?relay=wss%3A%2F%2Fu%3Atok%40r.example",
+                Keys::generate().public_key().to_hex()
+            );
+            let err = BunkerSession::connect(&uri, 1).await.err().unwrap();
+            assert!(!format!("{err:?}").contains("tok"), "{err:?}");
         }
 
         #[wasm_bindgen_test]
