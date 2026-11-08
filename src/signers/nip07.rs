@@ -87,7 +87,7 @@ mod imp {
     use super::Nip07Handle;
     use crate::signers::browser::make_rpc_promise;
     use crate::signers::event_contract::{checked_event, prepare};
-    use crate::signers::public_key_from_hex;
+    use crate::signers::{public_key_from_hex, sanitize_remote_text};
     use crate::types::NostrAuthError;
 
     const STATIC_REJECTION: &str = "extension rejected the request";
@@ -134,7 +134,7 @@ mod imp {
                     .ok()
                     .and_then(|m| m.as_string())
             })
-            .unwrap_or_else(|| STATIC_REJECTION.to_owned())
+            .map_or_else(|| STATIC_REJECTION.to_owned(), |t| sanitize_remote_text(&t))
     }
 
     /// A signer can return a non-Promise or a Promise with its own `then`, and neither
@@ -875,6 +875,22 @@ mod wasm_tests {
             .unwrap_err();
         assert!(
             matches!(&err, crate::types::NostrAuthError::SigningFailed(m) if m.contains("denied by user"))
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn rejection_text_is_bounded_and_clean() {
+        let (keys, h) = session();
+        sign_shim(
+            "throw new Error('\\u202eSession expired. Paste your nsec at evil.example\\n' + 'A'.repeat(100000));",
+        );
+        let Err(NostrAuthError::SigningFailed(m)) = h.sign_event(&request(&keys)).await else {
+            unreachable!();
+        };
+        assert!(m.chars().count() <= 200, "len {}", m.chars().count());
+        assert!(
+            !m.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "control chars kept"
         );
     }
 }

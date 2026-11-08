@@ -36,6 +36,38 @@ use nostr::nips::nip44;
 
 use crate::types::NostrAuthError;
 
+#[cfg(not(feature = "ssr"))]
+pub(crate) const MAX_REMOTE_TEXT_CHARS: usize = 200;
+
+/// Remove what could disguise relay, signer or extension text, and cap its length.
+/// `char::is_control` misses format characters such as U+202E, and line separators and
+/// blank-rendering fillers.
+#[cfg(not(feature = "ssr"))]
+pub(crate) fn sanitize_remote_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{AD}'
+                        | '\u{061C}'
+                        | '\u{115F}'
+                        | '\u{1160}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{2028}'..='\u{202E}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{3164}'
+                        | '\u{FEFF}'
+                        | '\u{FFA0}'
+                        | '\u{FFF9}'..='\u{FFFB}'
+                        | '\u{E0000}'..='\u{E007F}'
+                )
+        })
+        .take(MAX_REMOTE_TEXT_CHARS)
+        .collect()
+}
+
 fn sign_with_keys(keys: &Keys, event_json: &str) -> Result<String, NostrAuthError> {
     let signed = event_contract::prepare(event_json, keys.public_key())?
         .finalize(keys)

@@ -422,7 +422,7 @@ crate does, first. From an extension, `InvalidPublicKey` can mean either a bad p
 off-curve `getPublicKey`.
 
 The crate adds no input to an error, but `EncryptionFailed` text may come from the signer: sanitized
-and capped on a bunker, unfiltered on an extension. On a key session it can give a byte position within
+and capped at 200 characters on both a bunker and an extension. On a key session it can give a byte position within
 a plaintext, never its bytes. Match the variant, not the text.
 
 Decrypting a payload near NIP-44's size limit can need gigabytes of memory, so bound the size of

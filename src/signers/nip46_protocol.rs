@@ -14,6 +14,7 @@ use nostr::nips::nip46::{
 use nostr::types::{RelayUrl, Timestamp, Url};
 use serde::Deserialize;
 
+use super::sanitize_remote_text;
 use crate::types::NostrAuthError;
 
 /// Most relays accepted from one URI, counted after de-duplication.
@@ -23,7 +24,6 @@ pub(super) const AUTH_URL_TIMEOUT_SECS: u32 = 300;
 pub(super) const SUBSCRIPTION_ID: &str = "nip46-persistent";
 pub(super) const CONNECT_PERMS: &str = "sign_event,get_public_key,nip44_encrypt,nip44_decrypt";
 const MAX_AUTH_URL_BYTES: usize = 2048;
-const MAX_REMOTE_TEXT_CHARS: usize = 200;
 
 const MALFORMED_RESPONSE: &str = "remote signer sent a malformed response";
 const MISSING_RESULT: &str = "remote signer sent a response with no result";
@@ -256,25 +256,6 @@ pub(super) fn parse_auth_url(raw: &str) -> Option<HttpsUrl> {
     }
     let parsed: String = url.into();
     (parsed.len() <= MAX_AUTH_URL_BYTES).then_some(HttpsUrl(parsed))
-}
-
-/// Remove what could disguise relay or signer text, and cap its length. `char::is_control` misses
-/// format characters such as U+202E.
-fn sanitize_remote_text(text: &str) -> String {
-    text.chars()
-        .filter(|c| {
-            !c.is_control()
-                && !matches!(
-                    c,
-                    '\u{AD}'
-                        | '\u{200B}'..='\u{200F}'
-                        | '\u{202A}'..='\u{202E}'
-                        | '\u{2060}'..='\u{206F}'
-                        | '\u{FEFF}'
-                )
-        })
-        .take(MAX_REMOTE_TEXT_CHARS)
-        .collect()
 }
 
 pub(super) enum RpcFailure {
@@ -906,6 +887,7 @@ impl<W> Inflight<W> {
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
+    use crate::signers::MAX_REMOTE_TEXT_CHARS;
     use crate::signers::event_contract::prepare;
     use nostr::event::Tags;
 
@@ -1475,6 +1457,23 @@ mod tests {
                 Err(RpcFailure::Malformed(MISSING_RESULT | MALFORMED_RESPONSE))
             ));
             assert!(!fx.pending());
+        }
+    }
+
+    #[test]
+    fn sanitizer_drops_all_format_characters() {
+        for c in [
+            '\u{061C}',
+            '\u{180E}',
+            '\u{FFF9}',
+            '\u{E0001}',
+            '\u{E0041}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{3164}',
+        ] {
+            let out = sanitize_remote_text(&format!("a{c}b"));
+            assert_eq!(out, "ab", "U+{:04X} kept", c as u32);
         }
     }
 
