@@ -135,6 +135,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A remote signer that answers `connect` with anything but `ack` or the echoed secret is now treated as
+  refusing, and its reply is shown, instead of counting as paired.
 - A missing `window.nostr`, `nip44` or method, or a non-callable one, is now always
   `ExtensionNotFound`, including from `Nip07Handle::get_public_key`. Before, it raised an uncaught
   `TypeError` and the future never finished.

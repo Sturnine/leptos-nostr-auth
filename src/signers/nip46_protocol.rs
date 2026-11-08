@@ -440,11 +440,28 @@ impl AttemptLog {
 }
 
 /// `connect` either succeeded or failed: returning `()` means it cannot carry an identity. The
-/// echoed value is discarded, because it may be the secret.
-pub(super) fn connect_result(result: ResponseResult) -> Result<(), RpcFailure> {
+/// echoed value is discarded, because it may be the secret. Any reply but `ack` or the echoed
+/// secret is the signer's refusal.
+pub(super) fn connect_result(
+    result: ResponseResult,
+    secret: Option<&str>,
+) -> Result<(), RpcFailure> {
+    let secret = secret.filter(|s| !s.is_empty());
     match result {
         ResponseResult::Ack => Ok(()),
-        ResponseResult::ConnectSecret(echo) if !echo.is_empty() => Ok(()),
+        ResponseResult::ConnectSecret(echo) if secret == Some(echo.as_str()) => Ok(()),
+        ResponseResult::ConnectSecret(text) => {
+            let shown = sanitize_remote_text(&text);
+            let quotes_secret = secret.is_some_and(|s| {
+                let s = sanitize_remote_text(s);
+                !s.is_empty() && shown.contains(&s)
+            });
+            if shown.is_empty() || quotes_secret {
+                Err(RpcFailure::Malformed(UNEXPECTED_RESULT))
+            } else {
+                Err(RpcFailure::Signer(shown))
+            }
+        }
         _ => Err(RpcFailure::Malformed(UNEXPECTED_RESULT)),
     }
 }
@@ -1400,7 +1417,7 @@ mod tests {
         let mut fx = Fx::new(NostrConnectMethod::Connect);
         let event = fx.response(&echo);
         let result = only_outcome(fx.feed(&frame(&event))).unwrap();
-        connect_result(result).unwrap();
+        connect_result(result, Some(&echo)).unwrap();
         assert!(public_key_result(ResponseResult::ConnectSecret(echo)).is_err());
         let key = Keys::generate().public_key();
         assert_eq!(
@@ -1410,10 +1427,41 @@ mod tests {
     }
 
     #[test]
+    fn connect_accepts_only_ack_or_the_echoed_secret() {
+        let echo = |t: &str| ResponseResult::parse(NostrConnectMethod::Connect, t).unwrap();
+        for text in ["denied", "unauthorized", "invalid secret", "no"] {
+            assert!(
+                connect_result(echo(text), Some("s3")).is_err(),
+                "{text} accepted as ack"
+            );
+        }
+        assert!(connect_result(echo("s3"), Some("s3")).is_ok());
+        assert!(connect_result(echo("s3"), None).is_err());
+        assert!(connect_result(ResponseResult::Ack, None).is_ok());
+        assert!(
+            connect_result(ResponseResult::ConnectSecret(String::new()), Some("")).is_err(),
+            "empty reply accepted as paired"
+        );
+        for reply in ["bad secret s3", "bad s\u{200B}3"] {
+            let refused = connect_result(echo(reply), Some("s3")).unwrap_err();
+            assert!(
+                !format!("{refused:?}").contains("s3"),
+                "refusal quotes the secret: {refused:?}"
+            );
+        }
+        let Err(RpcFailure::Signer(text)) = connect_result(echo("denied"), Some("s3")) else {
+            unreachable!("refusal text lost");
+        };
+        assert_eq!(text, "denied");
+    }
+
+    #[test]
     fn connect_result_allow_list() {
-        assert!(connect_result(ResponseResult::Ack).is_ok());
-        assert!(connect_result(ResponseResult::ConnectSecret("s".into())).is_ok());
-        assert!(connect_result(ResponseResult::ConnectSecret(String::new())).is_err());
+        assert!(connect_result(ResponseResult::Ack, None).is_ok());
+        assert!(connect_result(ResponseResult::ConnectSecret("s".into()), Some("s")).is_ok());
+        assert!(connect_result(ResponseResult::ConnectSecret("s".into()), None).is_err());
+        assert!(connect_result(ResponseResult::ConnectSecret(String::new()), None).is_err());
+        assert!(connect_result(ResponseResult::ConnectSecret(String::new()), Some("")).is_err());
         for (literal, expect) in [("auth_url", "AuthUrl"), ("error", "Error")] {
             let mut fx = Fx::new(NostrConnectMethod::Connect);
             let event = fx.signed(&format!(
@@ -1422,7 +1470,7 @@ mod tests {
             let result = only_outcome(fx.feed(&frame(&event))).unwrap();
             assert_eq!(expect == "AuthUrl", result.is_auth_url());
             assert!(matches!(
-                connect_result(result),
+                connect_result(result, Some("s")),
                 Err(RpcFailure::Malformed(_))
             ));
         }

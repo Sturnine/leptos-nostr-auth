@@ -653,7 +653,11 @@ mod imp {
             let attempt = self.open_relay(relay).await.map_err(RpcFailure::Socket)?;
             if needs_connect(handshake, *paired) {
                 let request = connect_request(handshake, self.remote_pubkey);
-                connect_result(self.send_on(&attempt.ws, &request).await?)?;
+                let secret = match handshake {
+                    Handshake::Pair { secret } => secret.as_deref(),
+                    Handshake::Restore => None,
+                };
+                connect_result(self.send_on(&attempt.ws, &request).await?, secret)?;
                 *paired = true;
             }
             let public_key = public_key_result(
