@@ -155,7 +155,6 @@ mod imp {
     /// its own context. Changing them changes every user's identity.
     pub(super) const PRF_SALT: &[u8] = b"nostr-key-v1";
 
-    /// Takes the browser's prompt down when the ceremony's future is dropped.
     struct AbortOnDrop(web_sys::AbortController);
 
     impl Drop for AbortOnDrop {
@@ -172,8 +171,6 @@ mod imp {
         Ok(AbortOnDrop(controller))
     }
 
-    /// A ceremony already started, whose result is not yet read.
-    ///
     /// The promise is converted when the ceremony starts. An attempt aborted before its first poll
     /// would otherwise leave a rejection with no handler.
     pub struct Pending {
@@ -185,7 +182,6 @@ mod imp {
     }
 
     impl Pending {
-        /// Await the ceremony and derive the session.
         pub async fn finish(self) -> Result<PasskeySession, NostrAuthError> {
             let credential = await_credential(self.credential).await?;
             let Some(rp_id) = self.create_rp_id else {
@@ -204,7 +200,6 @@ mod imp {
         }
     }
 
-    /// Read the key of a credential just created that gave no PRF output.
     async fn follow_up_get(rp_id: &str, raw_id: &[u8]) -> Result<PasskeySession, NostrAuthError> {
         let pending = begin_authenticate(rp_id, Some(raw_id))?;
         let credential = await_credential(pending.credential).await?;
@@ -257,7 +252,6 @@ mod imp {
         let challenge = Uint8Array::from(random_bytes(32).as_slice());
         set(&pk_opts, "challenge", &challenge);
 
-        // ES256
         let param = Object::new();
         set_str(&param, "type", "public-key");
         Reflect::set(&param, &"alg".into(), &(-7_i32).into())
@@ -313,8 +307,6 @@ mod imp {
         let extensions = Object::new();
         let prf = Object::new();
 
-        // Always include eval — required by browsers that don't support evalByCredential
-        // (Safari ≤16.x, older Firefox). Same salt → same PRF output as evalByCredential.
         let prf_eval = Object::new();
         let salt_u8 = Uint8Array::from(PRF_SALT);
         Reflect::set(&prf_eval, &"first".into(), &salt_u8)
@@ -329,7 +321,6 @@ mod imp {
             let allow_creds = Array::of1(&cred_descriptor);
             set(&pk_opts, "allowCredentials", &allow_creds);
 
-            // evalByCredential for spec-compliant browsers that prefer it over eval
             let cred_id_b64 =
                 base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id);
             let eval_by_cred = Object::new();
@@ -449,7 +440,6 @@ mod imp {
         Ok(Keys::new(secret_key))
     }
 
-    /// Compute SHA-256 synchronously.
     pub(super) fn sha256_bytes(input: &[u8]) -> [u8; 32] {
         use bitcoin_hashes::sha256;
         sha256::Hash::hash(input).to_byte_array()
@@ -538,11 +528,9 @@ mod imp {
     use crate::signers::NOT_ON_SERVER;
     use crate::types::NostrAuthError;
 
-    /// Server stub for the browser's in-flight ceremony.
     pub struct Pending;
 
     impl Pending {
-        /// Server stub for `finish`.
         #[expect(
             clippy::unused_async,
             reason = "matches the browser signature, which awaits"
