@@ -147,9 +147,9 @@ pub const fn page_has_been_active() -> Option<bool> {
     None
 }
 
-/// `show_login` may prompt unless the browser says the user has not interacted yet.
+/// Unknown counts as inactive: every browser with WebAuthn PRF reports activation.
 pub fn prompt_allowed(been_active: Option<bool>) -> bool {
-    been_active != Some(false)
+    been_active == Some(true)
 }
 
 #[cfg(not(feature = "ssr"))]
@@ -214,7 +214,7 @@ mod tests {
     fn prompt_allowed_table() {
         assert!(prompt_allowed(Some(true)));
         assert!(!prompt_allowed(Some(false)));
-        assert!(prompt_allowed(None));
+        assert!(!prompt_allowed(None));
     }
 }
 

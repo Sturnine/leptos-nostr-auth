@@ -138,6 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `show_login` no longer starts a passkey prompt on a browser that does not report user activation; it
+  opens the modal instead.
 - A session restore that finishes after another tab stored a different identity is now dropped instead of
   logging this tab in as the old identity.
 - An extension without NIP-44 is no longer asked for its public key (and possibly a permission prompt)
