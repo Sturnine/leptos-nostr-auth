@@ -138,6 +138,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Breaking:** A remote signer that answers `connect` with anything but `ack` or the echoed secret is
+  now treated as refusing, and its reply is shown, instead of counting as paired. A signer that answers
+  with another token can no longer pair: use one that follows NIP-46.
 - `show_login` no longer starts a passkey prompt on a browser that does not report user activation; it
   opens the modal instead.
 - A session restore that finishes after another tab stored a different identity is now dropped instead of
@@ -146,8 +149,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before NIP-44 fails with `ExtensionNotFound`.
 - A signed event returned with an off-curve `pubkey` now fails as an invalid event instead of
   `SignerKeyMismatch`, so apps do not tell users to switch accounts when the signer is broken.
-- A remote signer that answers `connect` with anything but `ack` or the echoed secret is now treated as
-  refusing, and its reply is shown, instead of counting as paired.
 - A missing `window.nostr`, `nip44` or method, or a non-callable one, is now always
   `ExtensionNotFound`, including from `Nip07Handle::get_public_key`. Before, it raised an uncaught
   `TypeError` and the future never finished.
@@ -172,7 +173,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Breaking:** With `insecure_nsec_input` enabled, raw nsec paste now also needs `LoginMethod::RawNsec` in `allowed_methods`, so a dependency enabling the feature no longer turns it on in every app's default modal.
+- **Breaking:** With `insecure_nsec_input` enabled, raw nsec paste now also needs `LoginMethod::RawNsec` in `allowed_methods`, and `LoginMethod::all()` and the default `allowed_methods` no longer include it, so a dependency enabling the feature no longer turns it on in every app's default modal. An app that offers raw nsec paste must list `LoginMethod::RawNsec` in `allowed_methods`.
+- **Breaking:** A bunker session now encrypts or decrypts only after its signer has produced a valid signature for the account. If the app has not signed yet, the first NIP-44 call sends one signing request for an unpublished check event, which some signers ask the user to approve. A stored session pointed at another signer can no longer receive NIP-44 plaintext. Apps that use NIP-44 on a bunker session get that one extra signing request per session, and a signer that refuses it fails the call with `EncryptionFailed`.
+- **Breaking:** A passkey PRF result or credential id that is not a byte buffer is now refused. Before, a number was coerced into zero bytes, giving a key anyone could compute. Keys from conforming browsers, and byte buffers from another JavaScript realm, are unchanged. A user whose passkey provider returned anything else can no longer log in with that passkey, and a stored session of it no longer restores. That key may be publicly computable: move the identity to a new key.
 - **Breaking:** Bunker URIs that name a plaintext `ws://` relay are refused, except on localhost. A stored bunker session that uses one no longer restores; log in again with a `wss://` relay.
 - `PersistedSession`'s `Debug` now prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output is unchanged.
 - Typing in a secret field now wipes the previous value instead of leaving each keystroke's prefix in freed memory.
@@ -183,9 +186,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The bunker, ncryptsec, password, secret key and read-only inputs now carry `autocomplete="off"` and `spellcheck="false"`. Browsers may ignore `autocomplete="off"`.
 - Documented that every origin allowed to use the passkey RP ID can derive the user's Nostr key, that the hostname default is the safe choice, and that a passkey identity has no backup. The examples no longer set `rp_id`.
 - Documented that a bunker restore's matching public key does not prove the signer holds the key, and that a one-time localStorage write can redirect a stored bunker session, or swap in another identity, until logout.
-- A bunker session now encrypts or decrypts only after its signer has produced a valid signature for the account. If the app has not signed yet, the first NIP-44 call sends one signing request for an unpublished check event, which some signers ask the user to approve. A stored session pointed at another signer can no longer receive NIP-44 plaintext.
 - Extension error text is now sanitized and capped like bunker text, and both now also drop line separators, the Arabic letter mark, interlinear annotation and tag characters, and blank Hangul fillers.
-- A passkey PRF result or credential id that is not a byte buffer is now refused. Before, a number was coerced into zero bytes, giving a key anyone could compute. Keys from conforming browsers, and byte buffers from another JavaScript realm, are unchanged.
 - An approval link now ignores a primary click for half a second after it appears and names the signer's host, so a hostile signer cannot time it under the user's next primary click. Middle-click and "open in new tab" are not guarded.
 - The stored bunker URI is now built from the session's own signer key and relays, so a bunker secret put back into the public `bunker_uri` field is never persisted.
 - A relay URL the browser refuses is no longer quoted in the bunker error, so credentials in it are not shown on screen.
