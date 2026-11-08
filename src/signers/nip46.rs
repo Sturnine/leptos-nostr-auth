@@ -25,7 +25,8 @@ use crate::types::NostrAuthError;
 pub struct BunkerSession {
     /// The authenticated user's public key.
     pub public_key: PublicKey,
-    /// Stored for session restore
+    /// This session's `bunker://` URI without its secret, working relay first. Informational: the
+    /// stored session is built from the session's own signer key and relays, not from this field.
     pub bunker_uri: String,
     timeout_secs: u32,
     client_keys: Keys,

@@ -78,7 +78,8 @@ impl AsyncSignEvent for AuthResult {
 ///
 /// `nip59` is a `nostr` feature, which you enable. On `wasm32-unknown-unknown` the gift-wrap builders
 /// reach `Timestamp::now`, which needs `universal_time::define_time_provider!` in your binary. See
-/// the README. Unwrapping needs no provider.
+/// the README. Unwrapping needs no provider. On an extension each NIP-44 call also calls
+/// `getPublicKey`, so an unwrap makes two of each.
 impl AsyncNip44 for AuthResult {
     type Error = NostrAuthError;
 

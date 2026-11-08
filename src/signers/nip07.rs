@@ -50,7 +50,7 @@ impl Nip07Handle {
     /// account, and the account check can also return [`NostrAuthError::ExtensionRejected`]. A
     /// missing `nip44` is [`NostrAuthError::ExtensionNotFound`]. A throw, rejection or non-string
     /// return from `nip44` is [`NostrAuthError::EncryptionFailed`], whose text comes from the
-    /// extension, unfiltered. With SSR features a valid `peer` gets
+    /// extension, sanitized and capped. With SSR features a valid `peer` gets
     /// [`NostrAuthError::EncryptionUnavailable`].
     pub async fn nip44_encrypt(
         &self,

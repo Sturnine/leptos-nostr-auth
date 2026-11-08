@@ -66,9 +66,11 @@ pub struct NostrAuthContext {
     ///
     /// Call `show_login` from a user gesture, such as a click handler, with nothing deferred before
     /// it, so that restoring a passkey takes one tap. Before the user's first interaction with the
-    /// page it opens the login modal and never prompts. After that the crate does not check that
-    /// the call is in a gesture: a call from a timer or Effect can prompt where the browser allows
-    /// it. A failed or cancelled prompt keeps the session and opens the modal.
+    /// page, or in a browser that does not report user activation, it opens the login modal and
+    /// never prompts. After that the crate does not check that the call is in a gesture: a call
+    /// from a timer or Effect can prompt where the browser allows it. A failed or cancelled prompt
+    /// keeps the session and opens the modal. While a prompt or restore is running, or when logged
+    /// in, it only opens the modal.
     pub show_login: Callback<()>,
     /// Log out: clears auth state, removes the localStorage session and closes a bunker session
     /// for good, including for clones kept elsewhere. It also closes the login modal and cancels a
@@ -117,6 +119,73 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 /// passkey, which restores only from [`NostrAuthContext::show_login`] and never prompts on load.
 /// Renders [`NostrAuthModal`] internally so you don't need to add it yourself.
 ///
+/// # Session restore
+///
+/// A login is saved under [`NostrAuthConfig::storage_key`] unless it is an ncryptsec or raw nsec
+/// login, and never with the user's Nostr secret key. A failed or cancelled prompt never clears the
+/// stored session:
+///
+/// | Case | Stored session | Result |
+/// |---|---|---|
+/// | `logout`, logged in or not | Deleted | Logged out. An open modal closes, a login in it is cancelled and typed input is discarded |
+/// | Stored passkey at page load | Kept | Logged out, no prompt. `restore_error` stays `None` unless the stored data can never restore. The login click restores it |
+/// | Failed or cancelled restore, any method | Kept | Logged out, retried on the next load (once per load, no timers), or for a passkey on the next login click, whose failure also opens the modal |
+/// | Another key on restore, any method | Kept | The other key is never adopted. `restore_error` is `SignerKeyMismatch`; switching the signer back restores it |
+/// | Extension returns an invalid key string on restore | Kept | `restore_error` is `InvalidPublicKey`; restores once the extension returns the stored key |
+/// | Stored data can never restore (bad hex, missing fields, bad base64) | Kept | Logged out, no prompt or network call; `restore_error` says why |
+/// | Stored method not in `allowed_methods` | Kept | Logged out, no prompt or network call; `restore_error` is `RestoreMethodNotAllowed` |
+/// | Stored JSON cannot be decoded | Kept | Reads as nothing stored. `logout` removes it |
+/// | New login, persistable method | Overwritten | |
+/// | New login, not persistable, same public key | Kept | A reload restores the stored login |
+/// | New login, not persistable, different public key | Cleared | A reload is logged out instead of returning the old identity |
+/// | New login whose write fails (quota), different public key | Cleared | The same |
+/// | New login whose write fails, same public key | Kept | A reload restores the same identity |
+/// | Login or logout during a restore | As above | The restore is cancelled, its result discarded, and `is_restoring` ends at once |
+/// | Failed or cancelled login in the modal | Untouched | A restore in flight continues |
+///
+/// Per method, restore re-asks the extension for its key; opens a socket to the stored bunker relays
+/// in order and sends `get_public_key` with the stored pairing key; or, for a passkey, runs
+/// `navigator.credentials.get` from the login click. Each must return the stored key. A read-only
+/// session restores from the stored key, which must be on the curve. A bunker's matching key does
+/// not prove that the signer holds it, and a signer that answers `get_public_key` to a revoked
+/// client restores as logged in, then fails at the first signature. Restore never resends the
+/// bunker's one-time secret.
+///
+/// A bunker approval link during restore keeps `is_restoring` true while it waits. A cancelled
+/// restore clears that link at once and closes its socket, and takes a
+/// passkey prompt down where the browser honours it. An extension prompt stays until answered, and
+/// its result is discarded. A restore that lands while this provider's modal shows its method list
+/// closes the modal. On a login step the modal stays open: closing it keeps the restored session,
+/// and finishing the login replaces it like any new login.
+///
+/// # Other tabs
+///
+/// Any removal of the stored session logs out other tabs, through the browser's `storage` event,
+/// and drops their in-memory keys, with no reason signal. A bunker session there closes for good.
+/// Removals include another tab's `logout`, its login as a different identity with a method that
+/// cannot persist, and its quota-failure clear. Limits:
+///
+/// - A removal cancels a login running in this tab's modal and closes the modal, with no reason
+///   shown. A bunker login's one-time secret may be spent, so a retry can need a new URI. With no
+///   login running the modal stays open with what was typed, and submitting it is a new login.
+/// - A persistable login elsewhere leaves this tab logged in. A non-persistable login elsewhere logs
+///   this tab out only when it replaces a stored session of another identity, even if this tab
+///   holds the new login's identity.
+/// - With nothing stored, removing it fires no `storage` event, so a logout in another tab does not
+///   reach this one, which keeps its in-memory keys.
+/// - `localStorage.clear()` in another tab logs this tab out whenever the browser fires a `storage`
+///   event for it, even if nothing of ours was stored, because the event does not say what was
+///   removed. An in-memory ncryptsec or nsec login ends too. Use `removeItem` for your own keys.
+///   Chromium fires no event when the origin's storage was already empty.
+/// - Undecodable bytes under our key count the same: removing them logs this tab out.
+/// - A restore still running when another tab stores a different identity is dropped.
+/// - A page restored from the back/forward cache gets no `storage` event for a logout that happened
+///   meanwhile.
+/// - `restore_error` can go stale if another tab logs in persistably while this tab stays logged
+///   out.
+/// - A persistable login in another tab during a held passkey prompt does not cancel the prompt.
+///   Its result lands here while the other identity is stored.
+///
 /// # Example
 /// ```rust,no_run
 /// use leptos::prelude::*;
@@ -138,7 +207,8 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 )]
 #[component]
 pub fn NostrAuthProvider(
-    /// Optional configuration (default: all methods enabled, persistence on).
+    /// Optional configuration (default: [`NostrAuthConfig::default`]: every method but `RawNsec`,
+    /// persistence on).
     #[prop(optional)]
     config: Option<NostrAuthConfig>,
     children: Children,

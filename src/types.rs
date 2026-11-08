@@ -12,8 +12,8 @@ pub enum AuthResult {
     Extension(Nip07Handle),
     /// NIP-46: remote bunker signer (also covers Amber via NIP-46 mode)
     Bunker(Box<BunkerSession>),
-    /// Passkey: WebAuthn PRF-derived secp256k1 key. A synced passkey gives the same key on devices
-    /// using this crate with the same RP ID.
+    /// Passkey: WebAuthn PRF-derived secp256k1 key. A synced passkey gives the same key on every
+    /// device with the same RP ID, as does any software using the same PRF salt.
     Passkey(PasskeySession),
     /// Read-only: public key only, no signing capability
     ReadOnly(ReadOnlyHandle),
@@ -40,16 +40,25 @@ impl AuthResult {
 
     /// Sign a Nostr event using whichever backend is active.
     ///
-    /// All backends present a uniform async interface. Sync backends (Passkey, Ncryptsec)
-    /// return immediately without suspending.
+    /// All backends present a uniform async interface. Key sessions (Passkey, Ncryptsec, `RawNsec`)
+    /// return without suspending.
     ///
-    /// `event_json` takes `kind`, `tags`, `content` and `created_at`, on every method. An absent
-    /// `pubkey` is filled in with the session key. A `pubkey` that differs from it, or an `id` that
-    /// does not match the fields, is refused before anything reaches a signer.
+    /// `event_json` must carry `kind`, `tags`, `content` and `created_at`, on every method; a
+    /// missing or invalid one is [`NostrAuthError::Serialization`]. An absent `pubkey` is filled in
+    /// with the session key. A `pubkey` that differs from it, or an `id` that does not match the
+    /// fields, is refused before anything reaches a signer.
     ///
-    /// An event from a remote signer is returned only if its `pubkey` is the session key, its
-    /// `kind`, `tags`, `content` and `created_at` equal the request, and its id and signature
-    /// verify. The returned JSON is that verified event, without any extra fields the signer added.
+    /// An event from an extension or bunker is returned only if its `pubkey` is the session key, its
+    /// `kind`, `tags` (in order), `content` and `created_at` equal the request, and its id and
+    /// signature verify. The returned JSON is that verified event, without any extra fields the
+    /// signer added. A return that is not a full event, such as an object holding only `sig`, is
+    /// refused, never completed from the request.
+    ///
+    /// A mismatch does not log out, so a signer cannot end a session by returning a bad event, and
+    /// switching the extension back to the session's account makes the same session work again. An
+    /// extension that keeps the supplied `pubkey` while signing with another account fails the
+    /// signature check, so it reports `SigningFailed`, not `SignerKeyMismatch`. These checks catch a
+    /// switched account or a faulty or dishonest signer, not a compromised page.
     ///
     /// # Errors
     ///
@@ -114,6 +123,9 @@ impl AuthResult {
     ///
     /// The same as [`Self::nip44_encrypt`]. On a key session a wrong key or bad payload is
     /// [`NostrAuthError::EncryptionFailed`].
+    ///
+    /// A payload near NIP-44's size limit can need gigabytes of memory to decrypt, so bound the
+    /// size of untrusted ciphertext first.
     pub async fn nip44_decrypt(
         &self,
         peer: &PublicKey,
@@ -223,8 +235,8 @@ impl core::fmt::Debug for AuthResult {
 /// What gets written to localStorage.
 ///
 /// Never contains the user's Nostr identity secret key. **Does** contain a live NIP-46 pairing key
-/// (`bunker_client_secret_hex`) for a bunker session, which `logout` does not revoke. See "Session
-/// Restore" in the README.
+/// (`bunker_client_secret_hex`) for a bunker session, which `logout` does not revoke. See
+/// "Bunkers" and "Security limits" in the README.
 ///
 /// `Debug` prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output carries
 /// them in full.
@@ -347,7 +359,10 @@ impl LoginMethod {
     reason = "consumers construct this with struct update syntax"
 )]
 pub struct NostrAuthConfig {
-    /// Persist session to localStorage after login (default: `true`)
+    /// Persist session to localStorage after login (default: `true`).
+    ///
+    /// With `false` the crate writes nothing on login, starts no restore and ignores removal in
+    /// other tabs. `logout` still deletes a stored session.
     pub persist_session: bool,
     /// localStorage key (default: `"leptos_nostr_auth_session"`)
     pub storage_key: String,
@@ -355,16 +370,18 @@ pub struct NostrAuthConfig {
     pub close_on_backdrop_click: bool,
     /// Close modal on Escape key (default: `true`)
     pub close_on_escape: bool,
-    /// Which login methods to expose (default: all)
+    /// Which login methods to show, in order (default: [`LoginMethod::all()`], which never
+    /// includes `RawNsec`). A stored session whose method is not listed is kept but not restored:
+    /// `restore_error` is [`NostrAuthError::RestoreMethodNotAllowed`].
     pub allowed_methods: Vec<LoginMethod>,
     /// NIP-46 timeout in seconds (default: `30`), applied per relay and per step: each socket open
     /// and each request gets the full value. A request whose signer sends an approval link waits
     /// one extra 300 s, only while a mounted [`crate::modal::NostrAuthModal`] can show the link.
     ///
     /// This is not a limit on a whole call. With `n` relays, at most 5, and this value as `T`, the
-    /// most a call can take is: `(n+1)T`, plus 300 s with an approval link, for a call that
-    /// reconnects; `(n+1)T`, plus 300 s with a link, for a call waiting on another call's reconnect;
-    /// `(2n+1)T + 600 s` for login; `2nT + 300 s` for restore.
+    /// most a call can take is `(n+1)T` for a call that reconnects or waits on another call's
+    /// reconnect, `(2n+1)T` for login and `2nT` for restore. Approval links add up to 300 s to a
+    /// call or a restore, and up to 600 s to a login.
     pub bunker_timeout_secs: u32,
     /// WebAuthn relying party ID (default: this page's hostname, or `localhost` if it has none), with no `https://` prefix.
     ///
@@ -459,8 +476,9 @@ pub enum NostrAuthError {
         "This session cannot encrypt or decrypt: it is read-only, or its signer is only reachable in the browser"
     )]
     EncryptionUnavailable,
-    /// NIP-44 failed, in either direction. The text may come from the signer. On a key session it can
-    /// give a byte position within a plaintext, never its bytes.
+    /// NIP-44 failed, in either direction. The text may come from the signer, sanitized and capped at
+    /// 200 characters. On a key session it can give a byte position within a plaintext, never its
+    /// bytes.
     #[error("NIP-44 encryption or decryption failed: {0}")]
     EncryptionFailed(String),
     /// JSON serialization/deserialization failed.

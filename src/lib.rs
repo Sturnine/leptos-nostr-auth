@@ -28,10 +28,17 @@
 //! # fn main() {}
 //! ```
 //!
+//! The [README](https://github.com/Sturnine/leptos-nostr-auth#readme) is the guide: setup, each
+//! login method, configuration and security limits.
+//!
 //! # Feature flags
 //!
-//! - `insecure_nsec_input` — enables raw nsec/hex key paste (XSS risk; opt-in only). Passkey and
-//!   ncryptsec sessions also hold the raw key in wasm memory: see "Security limits" in the README.
+//! - `csr`, `hydrate`, `ssr` — the Leptos render mode. Enable one per build; the server build of
+//!   an SSR app needs `ssr`, where every browser call returns an error.
+//! - `insecure_nsec_input` — adds raw nsec/hex key paste, shown only when
+//!   [`LoginMethod`]`::RawNsec` is in [`NostrAuthConfig::allowed_methods`]. Any XSS on the page can
+//!   steal a pasted key. Passkey and ncryptsec sessions also hold the raw key in wasm memory: see
+//!   "Security limits" in the README.
 
 // Layout queries on the modal's view tree exceed the default depth limit under `ssr`.
 #![recursion_limit = "256"]
