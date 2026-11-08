@@ -1,5 +1,6 @@
 target/
 dist/
 .direnv/
-result*
+/result
+/result-*
 .claude/

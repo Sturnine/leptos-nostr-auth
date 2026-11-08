@@ -95,6 +95,10 @@ wasm-bindgen-test = "0.3.80"
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 nostr = { version = "0.45.7", default-features = false, features = ["nip59"] }
 
+[package.metadata.docs.rs]
+features     = ["ssr", "insecure_nsec_input"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [profile.dev]
 opt-level = 1 # scrypt test vectors are slow at opt-level 0
 

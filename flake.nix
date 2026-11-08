@@ -46,6 +46,13 @@
             p: p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
           );
 
+          msrvCraneLib = (inputs.crane.mkLib pkgs).overrideToolchain (
+            p:
+            p.rust-bin.stable.${(lib.importTOML ./Cargo.toml).package.rust-version + ".0"}.minimal.override {
+              targets = [ "wasm32-unknown-unknown" ];
+            }
+          );
+
           llvm = pkgs.llvmPackages;
           clangMajor = lib.versions.major llvm.clang-unwrapped.version;
 
@@ -106,7 +113,7 @@
           };
           csrTachysSsrArgs = commonArgs // {
             cargoExtraArgs = "--locked --features csr,insecure_nsec_input,leptos/ssr";
-            env = commonArgs.env // {
+            env = ssrArgs.env // {
               CARGO_PROFILE_DEV_OPT_LEVEL = "0";
             };
             doCheck = false;
@@ -147,6 +154,35 @@
               };
             in
             craneLib.cargoBuild (args // leaf // { cargoArtifacts = craneLib.buildDepsOnly args; });
+
+          auditExample =
+            dir:
+            craneLib.cargoAudit {
+              inherit (inputs) advisory-db;
+              src = craneLib.cleanCargoSource ./.;
+              cargoLock = ./examples/${dir}/Cargo.lock;
+            };
+
+          msrvCheck =
+            args: cargoArtifacts:
+            msrvCraneLib.cargoBuild (
+              args
+              // leaf
+              // {
+                inherit cargoArtifacts;
+                buildPhaseCargoCommand = "cargoWithProfile check ${args.cargoExtraArgs}";
+                installPhaseCommand = "mkdir -p $out";
+              }
+            );
+
+          msrvSsrArgs = commonArgs // {
+            cargoExtraArgs = "--locked --features ssr";
+          };
+          msrvCsrArgs = commonArgs // {
+            cargoExtraArgs = "--locked --target wasm32-unknown-unknown --features csr --lib";
+          };
+          msrvSsrArtifacts = msrvCraneLib.buildDepsOnly msrvSsrArgs;
+          msrvCsrArtifacts = msrvCraneLib.buildDepsOnly msrvCsrArgs;
         in
         {
           _module.args.pkgs = import inputs.nixpkgs {
@@ -158,13 +194,13 @@
             clippy-ssr = clippy ssrArgs ssrArtifacts "--all-targets";
             clippy-ssr-nsec = clippy (withNsec ssrArgs) ssrArtifacts "--all-targets";
             clippy-hydrate = clippy hydrateArgs hydrateArtifacts "";
-            clippy-hydrate-nsec = clippy (withNsec hydrateArgs) hydrateArtifacts "";
+            clippy-hydrate-nsec = clippy (withNsec hydrateArgs) hydrateArtifacts "--all-targets";
             clippy-csr = clippy csrArgs csrArtifacts "--all-targets";
-            clippy-csr-nsec = clippy (withNsec csrArgs) csrArtifacts "";
+            clippy-csr-nsec = clippy (withNsec csrArgs) csrArtifacts "--all-targets";
             clippy-native = clippy nativeArgs nativeArtifacts "--all-targets";
 
             doc = craneLib.cargoDoc (
-              ssrArgs
+              withNsec ssrArgs
               // leaf
               // {
                 cargoArtifacts = ssrArtifacts;
@@ -175,7 +211,7 @@
             );
 
             test = craneLib.cargoTest (nativeArgs // leaf // { cargoArtifacts = nativeArtifacts; });
-            test-ssr = craneLib.cargoTest (ssrArgs // leaf // { cargoArtifacts = ssrArtifacts; });
+            test-ssr = craneLib.cargoTest ((withNsec ssrArgs) // leaf // { cargoArtifacts = ssrArtifacts; });
             # Runs under Node: no window, localStorage, credentials or WebSocket.
             test-wasm = craneLib.cargoTest (
               csrArgs
@@ -204,6 +240,11 @@
               inherit (inputs) advisory-db;
               inherit (commonArgs) src;
             };
+            audit-example-basic-csr = auditExample "basic-csr";
+            audit-example-axum-ssr = auditExample "with-axum-ssr";
+
+            msrv-ssr = msrvCheck msrvSsrArgs msrvSsrArtifacts;
+            msrv-csr = msrvCheck msrvCsrArgs msrvCsrArtifacts;
           };
 
           treefmt = {

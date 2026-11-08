@@ -35,6 +35,7 @@
 
 // Layout queries on the modal's view tree exceed the default depth limit under `ssr`.
 #![recursion_limit = "256"]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Context provider and reactive auth state.
 pub mod context;
