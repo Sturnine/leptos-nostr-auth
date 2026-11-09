@@ -9,6 +9,7 @@ const NOT_ON_SERVER: &str = "not available on server";
 #[cfg(not(feature = "ssr"))]
 mod browser;
 mod event_contract;
+mod ncryptsec_worker;
 mod nip07;
 mod nip46;
 /// JS-free NIP-46 protocol decisions, so that native `cargo test` covers them.
@@ -20,6 +21,7 @@ mod read_only;
 mod signer_traits;
 
 pub use crate::types::AuthResult;
+pub use ncryptsec_worker::run_ncryptsec_worker;
 pub use nip07::Nip07Handle;
 pub use nip46::BunkerSession;
 pub(crate) use nip46::{
@@ -194,6 +196,7 @@ mod server_tests {
         assert_send(s.sign_event("{}"));
         assert_send(s.nip44_encrypt(&peer, "b"));
         assert_send(s.nip44_decrypt(&peer, "b"));
+        assert_send(RawKeySession::from_ncryptsec_off_thread("x", "y", None));
         assert_send(PasskeySession::create("rp", "name"));
         assert_send(PasskeySession::authenticate("rp", None));
         let auth = AuthResult::Extension(h);
