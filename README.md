@@ -26,7 +26,7 @@ Rust 1.89 or later. Enable one render mode:
 ```toml
 [dependencies]
 leptos = { version = "0.8", features = ["csr"] }
-leptos-nostr-auth = { version = "0.2", features = ["csr"] }
+leptos-nostr-auth = { version = "0.3", features = ["csr"] }
 js-sys = "0.3" # only for the timestamp in the signing example
 ```
 
@@ -184,6 +184,7 @@ The defaults suit most apps.
 | `bunker_timeout_secs` | `30` | Per relay and per step, not per call |
 | `rp_id` | `None`: the page's hostname, or `localhost` | Leave it unset. See [Passkeys](#passkeys) |
 | `rp_name` | `"Nostr App"` | Shown in the passkey prompt |
+| `ncryptsec_worker_url` | `None` | Worker script for `ncryptsec` decryption. See [Decrypting `ncryptsec` off the main thread](#decrypting-ncryptsec-off-the-main-thread) |
 
 `NostrAuthModal` also works without the provider. You own `open`, and it returns to its method
 list after a login:
@@ -249,6 +250,125 @@ platform, security key or another device.
   is a live credential: anyone who reads it can use the signer from anywhere until the client is
   revoked in the signer app. `logout` deletes it but does not revoke it.
 
+## Decrypting `ncryptsec` off the main thread
+
+Without a worker, scrypt runs on the main thread. The page freezes for the whole decrypt, and wasm
+memory grows for good (64 MiB at `log_n = 16`, 256 MiB at 18). In a worker the page keeps painting,
+and the memory is freed when the worker is terminated after each decrypt.
+
+```rust
+# use leptos_nostr_auth::NostrAuthConfig;
+let config = NostrAuthConfig {
+    ncryptsec_worker_url: Some("/nostr-auth-worker_loader.js".to_owned()),
+    ..Default::default()
+};
+```
+
+`ncryptsec_worker_url` defaults to `None`: the app then decrypts on the main thread exactly as
+before, silently. Nothing is tried by default. The URL needs:
+
+- An absolute same-origin path, including any public URL prefix.
+- Module workers: Chrome 80, Safari 15, Firefox 114 or later. Older browsers fall back.
+- CSP: `script-src 'self'` covers a same-origin worker. A page CSP that sets `worker-src` or
+  `child-src` explicitly must include `'self'` there. A CSP sent on the worker script's own
+  response must allow what the page needs to load its wasm: `'wasm-unsafe-eval'`, plus
+  `connect-src` or `default-src` `'self'`.
+
+The worker script depends on your build tool.
+
+### Trunk
+
+Add a bin that runs the worker. Cargo finds `src/bin/*.rs` unless `autobins = false`:
+
+```rust,no_run
+// src/bin/nostr-auth-worker.rs
+fn main() {
+    leptos_nostr_auth::run_ncryptsec_worker();
+}
+```
+
+Add both links to `index.html`. With two bins in the package, the app link needs `data-bin` too:
+
+```html
+<link data-trunk rel="rust" data-bin="my-app" />
+<link data-trunk rel="rust" data-bin="nostr-auth-worker" data-type="worker" data-bindgen-target="web" data-loader-shim />
+```
+
+Trunk emits three files: `nostr-auth-worker_loader.js` (about 55 bytes), `nostr-auth-worker.js`
+(glue, about 23 KB) and `nostr-auth-worker_bg.wasm` (about 283 KB, about 170 KB gzipped, with the
+[release profile](#release-profile)). The URL is `/nostr-auth-worker_loader.js`.
+
+**Serve the three `nostr-auth-worker*` files with `Cache-Control: no-cache`.** Trunk does not
+content-hash worker files, so their names stay the same across deploys and a browser could keep
+stale copies. Glue and wasm from different builds fail to load: the user waits out the 10 s
+timeout, then falls back. An old protocol falls back on the version check. `no-cache` makes the
+browser revalidate on each load, a cheap 304 when nothing changed.
+
+### cargo-leptos
+
+cargo-leptos has no worker support. A 3-line module in `public/nostr-auth-worker.js` loads the
+app's own hydrate bundle and calls the crate's export. The URL is `/nostr-auth-worker.js`:
+
+```js
+import init, { leptosNostrAuthNcryptsecWorker } from "/pkg/my-app.js";
+await init({ module_or_path: "/pkg/my-app.wasm" });
+leptosNostrAuthNcryptsecWorker();
+```
+
+cargo-leptos names the wasm `<output-name>.wasm`, not wasm-bindgen's default `<name>_bg.wasm`. A
+bare `init()` 404s, fires no worker event, and every decrypt waits out the 10 s timeout before
+falling back. The paths sit under `site-pkg-dir` (default `pkg`), and `my-app` is the cargo-leptos
+output name (default: the project `name`).
+
+It needs these in `Cargo.toml` (or `[[workspace.metadata.leptos]]`). Leave `LEPTOS_HASH_FILES`
+unset, because it overrides the setting:
+
+```toml
+[package.metadata.leptos]
+assets-dir = "public"
+hash-files = false
+```
+
+Each decrypt fetches the whole app wasm (usually from cache) and compiles it again in the worker.
+That starts slower and uses more memory than Trunk's small worker. `init()` runs no app code unless
+your crate or a dependency defines `#[wasm_bindgen(start)]`: Leptos' `hydrate()` is called by the
+page's inline script.
+
+Unhashed `/pkg` files need the same `Cache-Control: no-cache` treatment: `/pkg/*` and
+`/nostr-auth-worker.js`.
+
+### When it falls back to the main thread
+
+The decision is made before the password is sent, and the fallback decrypts exactly as without a
+worker.
+
+- No URL configured: the main-thread path, silently.
+- With a URL configured, these cases fall back:
+  - the `Worker` constructor throws (an unsupported browser, or a bad or cross-origin URL);
+  - an `error` event before the worker is ready (a 404, or a syntax error);
+  - no ready message within 10 s. A wasm load failure inside a worker fires no event, so this case
+    costs the user 10 s;
+  - a protocol version mismatch (a stale cached worker; see `Cache-Control` above).
+
+When a configured worker fails, the first such fallback on a page logs one `console.warn` naming
+the cause, and later ones are silent. If you see it, you are on the slow path. With no URL
+configured nothing is logged.
+
+### `NcryptsecDecryptAborted`
+
+This happens only with `ncryptsec_worker_url` set, when the worker died after the request was sent
+(an `error` event mid-decrypt, usually out of memory at `log_n` 17 to 18) or sent a malformed
+reply.
+
+There is no main-thread retry: the same allocation on the main thread would abort the whole app,
+and would grow the page's memory for good. The modal shows "Decrypting stopped before it finished,
+most likely for lack of memory. Close other tabs and try again, or use another login method." and
+keeps the `ncryptsec` field. Users can close tabs and retry, or use another method. Key owners can
+re-encrypt with a lower `log_n`. Match the variant, not the text.
+
+Closing the modal, Back, logout or unmount terminates the worker, which stops scrypt and frees its
+memory.
+
 ## Session restore
 
 A successful login is saved to localStorage, except encrypted-key and raw `nsec` logins. The Nostr
@@ -302,7 +422,7 @@ Every element has a `data-nostr-*` attribute:
 ## Raw nsec paste
 
 ```toml
-leptos-nostr-auth = { version = "0.2", features = ["csr", "insecure_nsec_input"] }
+leptos-nostr-auth = { version = "0.3", features = ["csr", "insecure_nsec_input"] }
 ```
 
 The feature alone shows nothing: add `LoginMethod::RawNsec` to `allowed_methods` too. The user
@@ -329,13 +449,17 @@ pasted key. Prefer an extension or a bunker, which keep the key out of the page.
 
 Wiped: the login fields' Rust buffers (on submit, on rejection and on leaving the step), the
 submitted bunker URI and `ncryptsec` copies, the passkey PRF bytes, and the key inside `Keys` on
-drop (`nostr`'s best-effort `non_secure_erase`).
+drop (`nostr`'s best-effort `non_secure_erase`). With the `ncryptsec` worker, the password, the
+encrypted payload and the decrypted key cross to and from the worker only as transferred byte
+buffers. The worker zero-fills the inputs it receives, the main thread zero-fills the returned
+key, and the outgoing buffers are detached by the transfer (zero-filled only if posting fails).
 
 Not wiped: browser strings (the input's DOM value, `event.target.value`, the credential's
 `ArrayBuffer`), `prop:value` clones, the passkey hash state, scrypt's buffers (one allows cheap
-password guessing from a memory read), copies the compiler made, the bunker one-time secret
-inside `nostr`'s parser, the bunker pairing key's hex strings and localStorage copy, NIP-44 keys
-and plaintext on key sessions, and every clone you hold.
+password guessing from a memory read), the worker's memory (scrypt's buffers and its key copies:
+released when the worker is terminated, not wiped), copies the compiler made, the bunker one-time
+secret inside `nostr`'s parser, the bunker pairing key's hex strings and localStorage copy, NIP-44
+keys and plaintext on key sessions, and every clone you hold.
 
 Clearing a field does not undo a paste: treat a secret pasted into the wrong field as exposed.
 Logout ends use of a key; it does not prove memory is clean.
@@ -357,9 +481,13 @@ With cargo-leptos, put these in a wasm-only profile (`[profile.wasm-release]` wi
 does not reach the server. Do not set `strip = "symbols"`: Trunk's wasm-opt then fails on
 bulk-memory instructions.
 
-`opt-level = "z"` roughly doubles `ncryptsec` decrypt time (about 0.5 s in Chromium), and scrypt
-blocks the main thread. Decrypting also grows wasm memory for good, by 64 MiB at `log_n = 16` and
-256 MiB at 18. On a low-memory phone that can abort the app.
+- `opt-level = "z"` roughly doubles `ncryptsec` decrypt time (about 0.5 s in Chromium), in a
+  worker too.
+- Without the worker, scrypt blocks the main thread for that time, and wasm memory grows for good,
+  by 64 MiB at `log_n = 16` and 256 MiB at 18. On a low-memory phone that can abort the app.
+- With `ncryptsec_worker_url` set (see
+  [Decrypting `ncryptsec` off the main thread](#decrypting-ncryptsec-off-the-main-thread)), neither
+  happens. Only the fallback path behaves as before.
 
 ## Examples
 
@@ -385,7 +513,12 @@ The changes most apps hit:
   (`BunkerSessionClosed`).
 - Raw `nsec` paste also needs `LoginMethod::RawNsec` in `allowed_methods`.
 - Bunker `ws://` relays are refused except on localhost, and `ncryptsec` keys with `log_n` above 18
-  are refused.
+  are refused (`InvalidNcryptsec`): "this key's scrypt cost (log_n 19) is above the supported
+  maximum of 18; re-encrypt it with a lower log_n".
+- `NostrAuthConfig` gained `ncryptsec_worker_url`, so struct literals that list every field need
+  `..Default::default()`. Until you set up the worker, `ncryptsec` decryption stays on the main
+  thread (see
+  [Decrypting `ncryptsec` off the main thread](#decrypting-ncryptsec-off-the-main-thread)).
 - On wasm, `EventBuilder` needs a time provider (see [Using the session](#using-the-session)).
 - CSS: `data-nostr-icon-amber` (with the Amber button) and `[data-nostr-restoring]` (with the
   built-in restore indicator) are gone. Style the new `[data-nostr-auth-prompt]`.
