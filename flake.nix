@@ -252,6 +252,30 @@
 
             msrv-ssr = msrvCheck msrvSsrArgs msrvSsrArtifacts;
             msrv-csr = msrvCheck msrvCsrArgs msrvCsrArtifacts;
+
+            workflows =
+              pkgs.runCommand "workflows"
+                {
+                  src = lib.fileset.toSource {
+                    root = ./.;
+                    fileset = lib.fileset.unions [
+                      ./.github
+                      ./scripts
+                    ];
+                  };
+                  nativeBuildInputs = [
+                    pkgs.actionlint
+                    pkgs.shellcheck
+                    pkgs.zizmor
+                  ];
+                }
+                ''
+                  cd "$src"
+                  actionlint .github/workflows/*.yml
+                  shellcheck scripts/*.sh
+                  zizmor --offline --persona pedantic .
+                  touch "$out"
+                '';
           };
 
           treefmt = {
