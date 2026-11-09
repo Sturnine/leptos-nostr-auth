@@ -13,14 +13,6 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-current=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-
-# If the current version already has a tag, the release is done — nothing to prepare.
-if git rev-parse -q --verify "refs/tags/v$current" >/dev/null; then
-  echo "v$current is already tagged; nothing to prepare"
-  exit 0
-fi
-
 # The previous released version is the highest semver tag reachable from HEAD.
 previous=$(git tag --merged HEAD --sort=-v:refname | grep -E -m 1 '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
 
