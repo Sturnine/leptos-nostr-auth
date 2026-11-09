@@ -69,9 +69,16 @@ jobs:
       - name: Create git tag
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git tag "v$VERSION"
-          git push origin "refs/tags/v$VERSION"
+          # Skip if the tag already exists (rerun after a failed GitHub release step).
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "v$VERSION tag already exists, skipping"
+          else
+            git tag "v$VERSION"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              "refs/tags/v$VERSION"
+          fi
 
       - name: Create GitHub release
         env:

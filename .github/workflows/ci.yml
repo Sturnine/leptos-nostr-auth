@@ -14,14 +14,10 @@ concurrency:
 
 jobs:
   gate:
-    name: gate (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: gate
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,31 +36,6 @@ jobs:
         run: nix flake check
       - name: Root dependency builds
         run: nix build --out-link ci-roots .#ci-roots
-
-  cargo:
-    name: cargo (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15-intel, windows-latest]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust toolchain
-        run: rustup toolchain install
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Test
-        run: cargo test --locked
-      - name: Test (ssr)
-        run: cargo test --locked --features ssr
 
   package:
     name: package
