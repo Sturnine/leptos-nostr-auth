@@ -16,6 +16,8 @@ jobs:
     name: Open or update the release PR
     runs-on: ubuntu-latest
     if: ${{ github.ref == 'refs/heads/main' && github.repository_owner == 'Sturnine' }}
+    # Holds the App secrets. crates.io trusts only release.yml, so this job cannot publish.
+    environment: release
     permissions:
       contents: read
     concurrency:
