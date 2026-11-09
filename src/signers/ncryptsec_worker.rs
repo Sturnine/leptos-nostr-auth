@@ -13,10 +13,6 @@ impl RawKeySession {
     ///
     /// The same errors as [`RawKeySession::from_ncryptsec`], plus
     /// [`NostrAuthError::NcryptsecDecryptAborted`].
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the modal does not call it yet")
-    )]
     pub(crate) async fn from_ncryptsec_off_thread(
         ncryptsec: &str,
         password: &str,
