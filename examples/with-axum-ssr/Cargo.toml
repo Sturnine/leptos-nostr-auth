@@ -8,6 +8,9 @@ lib-package  = "with-axum-ssr"
 site-root    = "target/site"
 site-pkg-dir = "pkg"
 style-file   = "style/main.css"
+assets-dir   = "public"
+# public/nostr-auth-worker.js imports the bundle and wasm by their unhashed names.
+hash-files = false
 # Must be an IP. Open http://localhost:3000: WebAuthn refuses an IP as an RP ID.
 site-addr           = "127.0.0.1:3000"
 reload-port         = 3001

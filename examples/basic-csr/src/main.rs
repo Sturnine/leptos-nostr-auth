@@ -23,6 +23,7 @@ fn main() {
 fn App() -> impl IntoView {
     let config = NostrAuthConfig {
         rp_name: "Nostr Auth Example".into(),
+        ncryptsec_worker_url: Some("/nostr-auth-worker_loader.js".into()),
         ..Default::default()
     };
 
