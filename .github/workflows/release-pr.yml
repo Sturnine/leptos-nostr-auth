@@ -56,4 +56,4 @@ jobs:
           git commit -am "chore: release v$VERSION"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
           gh pr create --base main --head "$branch" --title "chore: release v$VERSION" \
-            --body "Bumps the crate to $VERSION and adds its changelog section. After merging, tag the merge commit: \`git tag -a v$VERSION -m v$VERSION <merge-sha> && git push origin v$VERSION\`."
+            --body "Bumps the crate to $VERSION and adds its changelog section. Merging publishes the merge commit to crates.io and tags it v$VERSION."
