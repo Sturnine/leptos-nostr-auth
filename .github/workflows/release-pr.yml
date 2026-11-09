@@ -1,0 +1,59 @@
+name: Release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, X.Y.Z
+        required: true
+
+permissions: {}
+
+jobs:
+  release-pr:
+    name: Open release PR
+    runs-on: ubuntu-latest
+    if: ${{ github.ref == 'refs/heads/main' && github.repository_owner == 'Sturnine' }}
+    permissions:
+      contents: read
+    concurrency:
+      group: release-pr
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - name: Install git-cliff
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: git-cliff@2.14.2
+      - name: Bump version and changelog
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/prepare-release.sh "$VERSION"
+      # An App token, unlike GITHUB_TOKEN, makes the release PR trigger CI.
+      - name: Generate GitHub token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: generate-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          branch="release-v$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "chore: release v$VERSION"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+          gh pr create --base main --head "$branch" --title "chore: release v$VERSION" \
+            --body "Bumps the crate to $VERSION and adds its changelog section. After merging, tag the merge commit: \`git tag -a v$VERSION -m v$VERSION <merge-sha> && git push origin v$VERSION\`."
