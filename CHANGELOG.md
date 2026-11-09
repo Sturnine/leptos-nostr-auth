@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-11-08
+## [0.3.0] - 2026-11-09
 
 ### Changed
 
@@ -38,8 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dropping the future of `PasskeySession::create` or `authenticate` aborts the browser prompt where the browser honours that. Keep polling or spawn it to keep the prompt up.
 - The Apple passkey subtitle no longer claims iCloud sync.
 - **Breaking:** `ReadOnlyHandle::from_str` and the read-only step reject off-curve hex, `npub` and `nprofile`, with new error text. About half of all hex secret keys are also valid public keys; those are still accepted, shown and persisted as a public key.
-- **Breaking:** An `ncryptsec` with `log_n` above 18 is `InvalidNcryptsec`, because nostr 0.45 caps scrypt cost. Re-encrypt the key at a lower cost or use another login method.
-- ncryptsec decrypt starts after two frames or a 200 ms timer, which browsers may throttle in a background tab, instead of a 16 ms timer. No paint is guaranteed, and scrypt still blocks the main thread.
+- **Breaking:** An `ncryptsec` with `log_n` above 18 now reports: "this key's scrypt cost (log_n N) is above the supported maximum of 18; re-encrypt it with a lower log_n". Before, the message was nostr's raw text with no guidance.
+- ncryptsec decrypt runs in a Web Worker when `ncryptsec_worker_url` is set, keeping the main thread free. Without a URL it falls back to the synchronous path. The fallback also fires when the worker can't start or doesn't answer; the first fallback per page logs one `console.warn`.
+- ncryptsec decrypt starts after two frames or a 200 ms timer, which browsers may throttle in a background tab, instead of a 16 ms timer. No paint is guaranteed, and scrypt still blocks the main thread on the fallback path.
 - **Breaking:** `NostrAuthModal`'s `on_auth` and `on_close` accept closures, as in `on_auth=move |result: AuthResult| ...`, which must be `Send + Sync + 'static` like one given to `Callback::new`. `Callback::new(|x| ...)` or `Callback::new(|_| ...)` on these props no longer infers its parameter type, so annotate it: `|x: AuthResult|` or `|_: AuthResult|` on `on_auth`, `|(): ()|` on `on_close`. `Callback` values and annotated closures need no change.
 - **Breaking:** A stored session of any method is kept when restore fails for any reason, including another key, an off-curve key and data that can never restore, until logout or a new login. The user is logged out, `is_restoring` ends false, and restore is retried on the next load, or for a passkey on the next login click. Before, most failures deleted it, and an absent or throwing extension left `is_restoring` stuck true. An extension that asks on every call now prompts on every load until the user forgets the session. A stored off-curve key no longer restores; `restore_error` is `InvalidPublicKey`.
 - **Breaking:** A stored session whose method was removed from `allowed_methods` no longer restores or prompts. `restore_error` is `RestoreMethodNotAllowed`.
@@ -53,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Breaking:** `NostrAuthConfig` gains `ncryptsec_worker_url: Option<String>` (default `None`). Exhaustive struct construction breaks; add `..Default::default()`. With a URL set, ncryptsec decryption runs in a dedicated Web Worker so the main thread stays responsive. See [Decrypting `ncryptsec` off the main thread](https://github.com/Sturnine/leptos-nostr-auth#decrypting-ncryptsec-off-the-main-thread) in the README for Trunk and cargo-leptos setup.
+- New `NostrAuthError::NcryptsecDecryptAborted`: the worker died mid-decrypt, most likely for lack of memory. The ncryptsec field is kept. Close other tabs and try again, or use another login method.
+- New `leptos_nostr_auth::run_ncryptsec_worker()`: call this from the worker binary entry point.
 - `AuthResult` implements `nostr`'s `AsyncGetPublicKey`, `AsyncSignEvent` and `AsyncNip44`, and `Debug`, which prints the variant and public key only.
 - `AuthResult::nip44_encrypt` and `nip44_decrypt`, async, on every login method, and sync `nip44_*` on `PasskeySession` and `RawKeySession`. New `NostrAuthError::EncryptionFailed`, and `NostrAuthError::EncryptionUnavailable` for a read-only session and for an extension or bunker session on a server, where the stubs returned `SigningFailed`.
 - `NostrAuthContext::has_saved_session` and `restore_error`, and `NostrAuthError::RestoreMethodNotAllowed`. A key mismatch on restore reports `SignerKeyMismatch` for every method.
@@ -103,6 +107,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
-[Unreleased]: https://github.com/Sturnine/leptos-nostr-auth/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/Sturnine/leptos-nostr-auth/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/Sturnine/leptos-nostr-auth/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Sturnine/leptos-nostr-auth/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/Sturnine/leptos-nostr-auth/releases/tag/v0.1.0
