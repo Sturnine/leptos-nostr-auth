@@ -1,7 +1,10 @@
 name: Release
 
+# Publish only when the release-pr branch is merged into main.
+# Nothing else — no direct push, no version bump commit, no other PR — can trigger this.
 on:
-  push:
+  pull_request:
+    types: [closed]
     branches: [main]
 
 permissions: {}
@@ -11,94 +14,72 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
-    name: Check for a new version
+  publish:
+    name: Publish to crates.io
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.ref == 'release-pr' &&
+      github.repository_owner == 'Sturnine'
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'Sturnine' }}
+    environment: release
     permissions:
-      contents: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      release: ${{ steps.version.outputs.release }}
+      contents: write  # create the tag and GitHub release
+      id-token: write  # trusted publishing to crates.io
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Read version
-        id: version
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          read_version() { git show "$1:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'; }
-          version=$(read_version HEAD)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          # Only the push that changes the version releases, so a later push never ships or tags other commits.
-          if [[ $version != "$(read_version "$BEFORE")" ]] && ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            echo "release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          fi
 
-  # Publishes the pushed commit itself, so what merged is what ships.
-  publish:
-    name: Publish to crates.io
-    needs: check
-    if: ${{ needs.check.outputs.release == 'true' }}
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write # trusted publishing to crates.io
-    env:
-      VERSION: ${{ needs.check.outputs.version }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - name: Install Rust toolchain
         run: rustup toolchain install
-      # A rerun after a failed GitHub release finds the version already published.
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Check crates.io
         id: registry
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           status=$(curl -s --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' \
             -A "leptos-nostr-auth release workflow (github.com/$GITHUB_REPOSITORY)" \
             "https://crates.io/api/v1/crates/leptos-nostr-auth/$VERSION")
           case "$status" in
-            200) echo "published=true" >> "$GITHUB_OUTPUT" ;;
+            200) echo "published=true"  >> "$GITHUB_OUTPUT" ;;
             404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::crates.io answered $status"; exit 1 ;;
+            *)   echo "::error::crates.io answered $status"; exit 1 ;;
           esac
+
       - name: Authenticate with crates.io
         if: ${{ steps.registry.outputs.published == 'false' }}
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
         id: auth
-      - name: Publish
+
+      - name: Publish to crates.io
         if: ${{ steps.registry.outputs.published == 'false' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --locked
 
-  github-release:
-    name: Tag and GitHub release
-    needs: [check, publish]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write # create the tag and GitHub release
-    env:
-      VERSION: ${{ needs.check.outputs.version }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Create tag and release
+      - name: Create git tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          awk -v h="## [$VERSION]" 'index($0, h) == 1 {f = 1; next} /^## \[/ {f = 0} f' CHANGELOG.md > notes.md
+          awk -v h="## [$VERSION]" \
+            'index($0, h) == 1 { f = 1; next } /^## \[/ { f = 0 } f' \
+            CHANGELOG.md > notes.md
           [[ -s notes.md ]] || { echo "::error::no CHANGELOG section for $VERSION"; exit 1; }
-          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --notes-file notes.md
+          gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md
