@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "leptos-nostr-auth"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "bitcoin_hashes 1.2.0",

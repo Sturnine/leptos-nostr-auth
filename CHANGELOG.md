@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-09
+
+### Added
+
+- Show auth url as an https link
+- Add nostr signer traits and redacted debug
+- Verify events returned by remote signers
+- Add nip-44 to authresult for every login method
+- Accept closures for on_auth and on_close
+
+### Changed
+
+- Share connection state behind one owner
+- Draw random bytes through getrandom
+
+### Fixed
+
+- Remove dead wake branch from send_on
+- Clear timers when a wait ends
+- Share reconnect outcome by value
+- Fail pending requests on socket loss
+- Report signer refusals as signing failures
+- Close the socket when the last owner drops
+- Close bunker sessions on logout and replacement
+- Keep sessions, cancel restores, log out across tabs
+- Detect webauthn and prf capability
+- Split ceremonies, send rpId, finish prf on create
+- Restore passkeys from the login click
+- Cancel left logins and return to the method list
+- Guard submit, closed escape, divider and re-detect
+- Abort a ceremony when its future is dropped
+- Cancel modal logins on logout and session removal
+- Remove the built-in restore indicator
+- Redact bunker secrets from persisted session debug
+- Reject off-curve public keys at every parse site
+- Wipe typed secrets and clear rejected values
+- Wipe the prf output buffer after reading it
+- Read derived signals without cloning the session
+- Wait for a painted frame before ncryptsec decrypt
+- Serve and announce localhost for passkeys
+- Drop the trunk alias that printed a broken url
+- Require a signature before nip44 on a bunker session
+- Keep a healthy relay socket after an expired approval
+- Sanitize and cap extension and relay error text
+- Refuse nip44 ciphertext that is not a nip44 payload
+- Say a passkey was created when its key cannot be read
+- Refuse prf output and raw ids that are not byte buffers
+- Name nip-42 only when the relay refuses for auth
+- Let waiting requests outlive a slow or cancelled reconnect
+- Treat a connect reply other than ack as a refusal
+- **Breaking:** Refuse plaintext ws:// relays except on loopback
+- **Breaking:** Show raw nsec paste only when the app lists it
+- Report an off-curve signer pubkey as an invalid event
+- Check for nip44 support before asking for the key
+- Wipe the previous field value on every keystroke
+- Ignore clicks on a new approval link for half a second
+- Drop a restore whose identity another tab replaced
+- Persist the bunker uri from the session, never the field
+- Clear signed output on logout and send a csp
+- Drop relay frames over 256 KiB before parsing
+- Never prompt when user activation is unknown
+- Never quote a refused relay url in the bunker error
+- Keep event values out of sign_event json errors
+
+### Documentation
+
+- Describe relays, restore and auth prompts
+- Note key order and local build failures
+- Describe socket loss and call bounds
+- Describe session close
+- Correct the try_run comment
+- Describe AuthResult as a signer, add example
+- State the observed custom_created_at result
+- Describe retention, forget control and other tabs
+- Narrow claims and document the login click
+- Document cancellation and the removed elements
+- State what key erasure covers
+- List secret and key validation changes
+- Correct rustdoc, comments and example text
+- Correct claims and state the security limits
+- Add changelog for 0.2.0
+- Describe the release flow
+- Say a bunker restore does not prove the signer's key
+- Warn that a parent rp_id shares the passkey nostr key
+- Correct restore, tab and timeout details in the readme
+- Correct 0.2.0 entries
+- Shorten the readme and compile its snippets as doctests
+- Correct rustdoc and move restore and tab rules there
+- Note that docs.rs documents ssr and nsec api
+- Condense the 0.2.0 entry
+- Fix split code link in feature flag docs
+- Date 0.2.0 and note the prf output wipe
+- Note the merge, actions and tag rules
+- Describe the derived release version
+
 ## [0.2.0] - 2026-11-08
 
 ### Changed
@@ -103,6 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
-[Unreleased]: https://github.com/Sturnine/leptos-nostr-auth/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Sturnine/leptos-nostr-auth/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Sturnine/leptos-nostr-auth/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Sturnine/leptos-nostr-auth/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Sturnine/leptos-nostr-auth/releases/tag/v0.1.0
