@@ -1,7 +1,43 @@
-use nostr::key::{Keys, PublicKey};
+use nostr::key::{Keys, PublicKey, SecretKey};
 use nostr::nips::nip19::FromBech32;
+use nostr::nips::nip49::EncryptedSecretKey;
 
 use crate::types::NostrAuthError;
+
+fn check_cost(encrypted: &EncryptedSecretKey) -> Result<(), NostrAuthError> {
+    let log_n = encrypted.log_n();
+    let max = EncryptedSecretKey::MAX_LOG_N;
+    if log_n > max {
+        return Err(NostrAuthError::InvalidNcryptsec(format!(
+            "this key's scrypt cost (log_n {log_n}) is above the supported maximum of {max}; re-encrypt it with a lower log_n"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn parse_ncryptsec(ncryptsec: &str) -> Result<EncryptedSecretKey, NostrAuthError> {
+    let encrypted = EncryptedSecretKey::from_bech32(ncryptsec)
+        .map_err(|e| NostrAuthError::InvalidNcryptsec(e.to_string()))?;
+    check_cost(&encrypted)?;
+    Ok(encrypted)
+}
+
+pub(super) fn decrypt_payload(
+    encrypted: &[u8],
+    password: &str,
+) -> Result<SecretKey, NostrAuthError> {
+    let encrypted = EncryptedSecretKey::from_slice(encrypted)
+        .map_err(|e| NostrAuthError::InvalidNcryptsec(e.to_string()))?;
+    // Runs ahead of nostr's own cap check so the message says how to fix it, and before any scrypt work.
+    check_cost(&encrypted)?;
+    encrypted.decrypt(password).map_err(|e| {
+        if e.kind() == nostr::error::ErrorKind::Crypto {
+            NostrAuthError::WrongPassword
+        } else {
+            NostrAuthError::InvalidNcryptsec(e.to_string())
+        }
+    })
+}
 
 /// In-memory raw key session. Used for NIP-49 ncryptsec and (feature-gated) raw nsec paste.
 ///
@@ -28,24 +64,20 @@ impl RawKeySession {
     ///
     /// # Errors
     ///
-    /// Returns an error when decrypting fails.
+    /// [`NostrAuthError::InvalidNcryptsec`] for a malformed string or a `log_n` above the supported
+    /// maximum, and [`NostrAuthError::WrongPassword`] for a wrong password.
     pub fn from_ncryptsec(ncryptsec: &str, password: &str) -> Result<Self, NostrAuthError> {
-        let encrypted = nostr::nips::nip49::EncryptedSecretKey::from_bech32(ncryptsec)
-            .map_err(|e| NostrAuthError::InvalidNcryptsec(e.to_string()))?;
+        let encrypted = parse_ncryptsec(ncryptsec)?;
+        let secret_key = decrypt_payload(&encrypted.as_vec(), password)?;
+        Ok(Self::from_secret_key(secret_key))
+    }
 
-        let secret_key = encrypted.decrypt(password).map_err(|e| {
-            if e.kind() == nostr::error::ErrorKind::Crypto {
-                NostrAuthError::WrongPassword
-            } else {
-                NostrAuthError::InvalidNcryptsec(e.to_string())
-            }
-        })?;
-
+    pub(crate) fn from_secret_key(secret_key: SecretKey) -> Self {
         let keys = Keys::new(secret_key);
-        Ok(Self {
+        Self {
             public_key: keys.public_key(),
             keys,
-        })
+        }
     }
 
     /// Parse a raw `nsec1...` bech32 or 64-char hex private key.
@@ -57,8 +89,6 @@ impl RawKeySession {
     /// Returns an error when parsing nsec fails.
     #[cfg(feature = "insecure_nsec_input")]
     pub fn from_nsec_or_hex(input: &str) -> Result<Self, NostrAuthError> {
-        use nostr::key::SecretKey;
-
         let input = input.trim();
         let secret_key = if let Ok(sk) = SecretKey::from_bech32(input) {
             sk
@@ -69,11 +99,7 @@ impl RawKeySession {
                 "Expected nsec1... (bech32) or 64-char hex private key".into(),
             ));
         };
-        let keys = Keys::new(secret_key);
-        Ok(Self {
-            public_key: keys.public_key(),
-            keys,
-        })
+        Ok(Self::from_secret_key(secret_key))
     }
 
     /// Sign a Nostr event with the in-memory key.
@@ -129,13 +155,21 @@ mod tests {
     use crate::types::AuthResult;
     use nostr::event::Event;
     use nostr::nips::nip19::ToBech32;
-    use nostr::nips::nip49::EncryptedSecretKey;
 
     const CRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
     const CRYPTSEC_PUBKEY: &str =
         "672a31bfc59d3f04548ec9b7daeeba2f61814e8ccc40448045007f5479f693a3";
 
+    const SECRET_KEY_HEX: &str = "3501454135014541350145413501453fefb02227e449e57cf4d3a3ce05378683";
+    const CAP_MESSAGE: &str = "this key's scrypt cost (log_n 19) is above the supported maximum of 18; re-encrypt it with a lower log_n";
+
     // The NIP-49 spec test vector.
+
+    fn over_cap() -> Vec<u8> {
+        let mut bytes = EncryptedSecretKey::from_bech32(CRYPTSEC).unwrap().as_vec();
+        *bytes.get_mut(1).unwrap() = EncryptedSecretKey::MAX_LOG_N + 1;
+        bytes
+    }
 
     #[test]
     fn ncryptsec_correct_password() {
@@ -159,6 +193,51 @@ mod tests {
             .unwrap();
         let r = RawKeySession::from_ncryptsec(&over, "nostr");
         assert!(matches!(r, Err(NostrAuthError::InvalidNcryptsec(_))));
+    }
+
+    #[test]
+    fn ncryptsec_cost_cap_message() {
+        let over = EncryptedSecretKey::from_slice(&over_cap())
+            .unwrap()
+            .to_bech32()
+            .unwrap();
+        let Err(error) = RawKeySession::from_ncryptsec(&over, "SENTINELPASSWORD") else {
+            unreachable!("over-cap key opened");
+        };
+        assert!(matches!(&error, NostrAuthError::InvalidNcryptsec(m) if m == CAP_MESSAGE));
+        let shown = format!("{error} {error:?}");
+        assert!(!shown.contains(&over) && !shown.contains("SENTINELPASSWORD"));
+    }
+
+    #[test]
+    fn decrypt_payload_cost_cap_message() {
+        let r = decrypt_payload(&over_cap(), "nostr");
+        assert!(matches!(r, Err(NostrAuthError::InvalidNcryptsec(m)) if m == CAP_MESSAGE));
+    }
+
+    #[test]
+    fn decrypt_payload_spec_vector() {
+        let bytes = EncryptedSecretKey::from_bech32(CRYPTSEC).unwrap().as_vec();
+        let key = decrypt_payload(&bytes, "nostr").unwrap();
+        assert_eq!(key.to_secret_hex(), SECRET_KEY_HEX);
+    }
+
+    #[test]
+    fn decrypt_payload_wrong_password() {
+        let bytes = EncryptedSecretKey::from_bech32(CRYPTSEC).unwrap().as_vec();
+        let r = decrypt_payload(&bytes, "wrong");
+        assert!(matches!(r, Err(NostrAuthError::WrongPassword)));
+    }
+
+    #[test]
+    fn decrypt_payload_malformed() {
+        let r = decrypt_payload(&[2, 16, 0], "nostr");
+        assert!(matches!(r, Err(NostrAuthError::InvalidNcryptsec(_))));
+    }
+
+    #[test]
+    fn parse_ncryptsec_returns_key() {
+        assert_eq!(parse_ncryptsec(CRYPTSEC).unwrap().log_n(), 16);
     }
 
     #[test]
