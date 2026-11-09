@@ -18,7 +18,11 @@ jobs:
   release-pr:
     name: Open or update the release PR
     runs-on: ubuntu-latest
-    if: ${{ github.ref == 'refs/heads/main' && github.repository_owner == 'Sturnine' }}
+    if: >
+      github.ref == 'refs/heads/main' &&
+      github.repository_owner == 'Sturnine' &&
+      !contains(github.event.head_commit.message, 'from Sturnine/release-pr') &&
+      !startsWith(github.event.head_commit.message, 'chore: release v')
     environment: release
     concurrency:
       group: release-pr

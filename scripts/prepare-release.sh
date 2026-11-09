@@ -16,10 +16,19 @@ cd "$(git rev-parse --show-toplevel)"
 # The previous released version is the highest semver tag reachable from HEAD.
 previous=$(git tag --merged HEAD --sort=-v:refname | grep -E -m 1 '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
 
+# Current version in Cargo.toml.
+current_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+
 # Derive or validate the target version.
 version=${1:-$(git cliff --config cliff.toml --bumped-version)}
 version=${version#v}
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version is not X.Y.Z: $version" >&2; exit 1; }
+
+# When auto-deriving without an explicit version, if git-cliff found no reason to bump beyond current, exit 0.
+if [[ -z "${1:-}" && "$version" == "$current_version" ]]; then
+  echo "version $version matches Cargo.toml and no bump is needed; nothing to prepare"
+  exit 0
+fi
 
 # Don't overwrite an already-released version.
 if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
@@ -46,8 +55,8 @@ for lock in examples/*/Cargo.lock; do
 done
 
 # Insert the new section under ## [Unreleased] and update the compare links.
-repo=https://github.com/Sturnine/leptos-nostr-auth
-SECTION=$section V=$version P=${previous:-v0.1.0} R=$repo perl -0pi -e '
+repo="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-Sturnine/leptos-nostr-auth}"
+SECTION=$section V=$version P=${previous:-v$current_version} R=$repo perl -0pi -e '
   s/^## \[Unreleased\]\n/## [Unreleased]\n\n$ENV{SECTION}\n/m
     or die "CHANGELOG.md is missing the ## [Unreleased] heading\n";
   s{^\[Unreleased\]: \S+$}
