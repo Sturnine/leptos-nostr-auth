@@ -23,10 +23,23 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # release-plz reads only the first page (30) of a PR's commits and publishes the 30th as the head.
+      - name: Refuse a release PR over 30 commits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq 'map(select(.head.ref | startswith("release-plz-")))[0].number // empty')
+          if [ -n "$pr" ]; then
+            count=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq .commits)
+            if [ "$count" -gt 30 ]; then
+              echo "::error::release PR #$pr has $count commits; release-plz would publish its 30th commit, not its head"
+              exit 1
+            fi
+          fi
       - name: Install Rust toolchain
         run: rustup toolchain install
       - name: Run release-plz
-        uses: release-plz/action@f67a7e724bdad4a0f6875f186060a0ca2770d76c # v0.5.147
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release
         env:
@@ -60,7 +73,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
       - name: Run release-plz
-        uses: release-plz/action@f67a7e724bdad4a0f6875f186060a0ca2770d76c # v0.5.147
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release-pr
         env:
