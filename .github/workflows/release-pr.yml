@@ -1,0 +1,74 @@
+name: Release PR
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, X.Y.Z. Leave empty to derive it from the commits.
+        required: false
+
+permissions: {}
+
+jobs:
+  release-pr:
+    name: Open or update the release PR
+    runs-on: ubuntu-latest
+    if: ${{ github.ref == 'refs/heads/main' && github.repository_owner == 'Sturnine' }}
+    permissions:
+      contents: read
+    concurrency:
+      group: release-pr
+      cancel-in-progress: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - name: Install git-cliff and cargo-semver-checks
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: git-cliff@2.14.2,cargo-semver-checks@0.51.0
+      - name: Bump version and changelog
+        id: prepare
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/prepare-release.sh "$VERSION"
+      - name: Check the version bump against crates.io
+        if: ${{ steps.prepare.outputs.version != '' }}
+        run: |
+          cargo semver-checks --default-features
+          cargo semver-checks --only-explicit-features --features ssr,insecure_nsec_input
+      # An App token, unlike GITHUB_TOKEN, makes the release PR trigger CI.
+      - name: Generate GitHub token
+        if: ${{ steps.prepare.outputs.version != '' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: generate-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open or update PR
+        if: ${{ steps.prepare.outputs.version != '' }}
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          branch=release-pr
+          title="chore: release v$VERSION"
+          body="Bumps the crate to $VERSION and adds its changelog section. Merging publishes the merge commit to crates.io and tags it v$VERSION. Every push to main regenerates this PR."
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "$title"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+          if [[ $(gh pr view "$branch" --json state --jq .state 2>/dev/null) == OPEN ]]; then
+            gh pr edit "$branch" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head "$branch" --title "$title" --body "$body"
+          fi
