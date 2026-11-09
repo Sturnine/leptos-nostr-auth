@@ -29,3 +29,8 @@ commit_parsers = [
   { message = '^docs', group = "<!-- 3 -->Documentation" },
   { message = '^(test|ci|chore|style|build)', skip = true },
 ]
+
+# Matches Cargo's 0.x rules: a breaking change bumps the minor, anything else the patch.
+[bump]
+features_always_bump_minor = false
+breaking_always_bump_major = false

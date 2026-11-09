@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Usage: scripts/prepare-release.sh 0.3.0
+# Usage: scripts/prepare-release.sh [X.Y.Z]
 # Bumps the crate and example lockfiles, and inserts the git-cliff section for the release.
+# Without a version, git-cliff derives it from the commits since the last tag.
 set -euo pipefail
 
-version=${1:?usage: prepare-release.sh X.Y.Z}
-[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not X.Y.Z: $version" >&2; exit 1; }
 cd "$(git rev-parse --show-toplevel)"
+version=${1:-$(git cliff --config cliff.toml --bumped-version)}
+version=${version#v}
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not X.Y.Z: $version" >&2; exit 1; }
 
 previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
 current=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
@@ -27,3 +29,7 @@ SECTION=$section V=$version P=$previous R=$repo perl -0pi -e '
   s{^\[Unreleased\]: \S+$}{[Unreleased]: $ENV{R}/compare/v$ENV{V}...HEAD\n[$ENV{V}]: $ENV{R}/compare/$ENV{P}...v$ENV{V}}m
     or die "no Unreleased link\n";
 ' CHANGELOG.md
+
+if [[ -n ${GITHUB_OUTPUT:-} ]]; then
+  echo "version=$version" >>"$GITHUB_OUTPUT"
+fi

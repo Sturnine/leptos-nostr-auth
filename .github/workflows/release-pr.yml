@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to release, X.Y.Z
-        required: true
+        description: Version to release, X.Y.Z. Leave empty to derive it from the commits.
+        required: false
 
 permissions: {}
 
@@ -31,10 +31,17 @@ jobs:
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: git-cliff@2.14.2
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-semver-checks@0.51.0
       - name: Bump version and changelog
+        id: prepare
         env:
           VERSION: ${{ inputs.version }}
         run: scripts/prepare-release.sh "$VERSION"
+      - name: Check the version bump against crates.io
+        run: cargo semver-checks --default-features
       # An App token, unlike GITHUB_TOKEN, makes the release PR trigger CI.
       - name: Generate GitHub token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -47,7 +54,7 @@ jobs:
       - name: Open PR
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.prepare.outputs.version }}
         run: |
           branch="release-v$VERSION"
           git config user.name "github-actions[bot]"
