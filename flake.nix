@@ -197,6 +197,14 @@
             overlays = [ inputs.rust-overlay.overlays.default ];
           };
 
+          # CI builds this with an out-link so cache-nix-action's `nix store gc` keeps the
+          # dependency builds; `nix flake check` leaves its outputs unrooted.
+          packages.ci-roots = pkgs.linkFarm "ci-roots" (
+            lib.mapAttrs (_: check: check.cargoArtifacts) (
+              lib.filterAttrs (_: check: check.cargoArtifacts or null != null) config.checks
+            )
+          );
+
           checks = {
             clippy-ssr = clippy ssrArgs ssrArtifacts "--all-targets";
             clippy-ssr-nsec = clippy (withNsec ssrArgs) ssrArtifacts "--all-targets";
