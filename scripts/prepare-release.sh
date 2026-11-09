@@ -9,7 +9,7 @@ version=${1:-$(git cliff --config cliff.toml --bumped-version)}
 version=${version#v}
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not X.Y.Z: $version" >&2; exit 1; }
 
-previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
+previous=$(git tag --merged HEAD --list 'v[0-9]*' --sort=-v:refname | head -n 1)
 current=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
 [[ $previous == "v$current" ]] || { echo "Cargo.toml is $current but the last tag is $previous" >&2; exit 1; }
 git rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "v$version already exists" >&2; exit 1; }
