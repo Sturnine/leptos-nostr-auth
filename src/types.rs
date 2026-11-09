@@ -394,6 +394,13 @@ pub struct NostrAuthConfig {
     pub rp_id: Option<String>,
     /// WebAuthn relying party display name (default: `"Nostr App"`)
     pub rp_name: String,
+    /// URL of the ncryptsec worker script (default: `None`): an absolute same-origin path such as
+    /// `/nostr-auth-worker_loader.js`, started as a module worker.
+    ///
+    /// With `None`, ncryptsec decrypts on the main thread and the page freezes while it runs. A
+    /// configured worker that fails to start falls back to the same path and logs one
+    /// `console.warn`. The README explains how to build and serve the worker script.
+    pub ncryptsec_worker_url: Option<String>,
 }
 
 impl Default for NostrAuthConfig {
@@ -407,6 +414,7 @@ impl Default for NostrAuthConfig {
             bunker_timeout_secs: 30,
             rp_id: None,
             rp_name: "Nostr App".to_owned(),
+            ncryptsec_worker_url: None,
         }
     }
 }
@@ -465,6 +473,15 @@ pub enum NostrAuthError {
     /// The password supplied for ncryptsec decryption was incorrect.
     #[error("Wrong password for ncryptsec")]
     WrongPassword,
+    /// The ncryptsec worker stopped, or sent a reply this version cannot read, after it received
+    /// the request.
+    ///
+    /// The decrypt is not retried on the main thread, where the same allocation would abort the
+    /// whole app.
+    #[error(
+        "Decrypting stopped before it finished, most likely for lack of memory. Close other tabs and try again, or use another login method."
+    )]
+    NcryptsecDecryptAborted,
     /// The supplied secret key string was invalid.
     #[error("Invalid secret key: {0}")]
     InvalidSecretKey(String),

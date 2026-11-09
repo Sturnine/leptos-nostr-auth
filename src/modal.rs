@@ -8,8 +8,6 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_use_event_listener::use_event_listener;
 use leptos_use_window::use_window;
-use wasm_bindgen::JsCast as _;
-use wasm_bindgen::prelude::{Closure, JsValue};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::{Os, Platform, effective_rp_id, passkey_option_visible, prf_capability};
@@ -209,7 +207,8 @@ fn deliver(
 /// on a submit refused for an empty ncryptsec field, which keeps it. A bunker URI stays after a
 /// failed login, in clear text with any secret, until the user leaves the step, unless it is
 /// [`NostrAuthError::InvalidBunkerUri`], which empties it. An ncryptsec string stays after
-/// [`NostrAuthError::WrongPassword`] and empties on [`NostrAuthError::InvalidNcryptsec`].
+/// [`NostrAuthError::WrongPassword`] and [`NostrAuthError::NcryptsecDecryptAborted`], and empties on
+/// [`NostrAuthError::InvalidNcryptsec`].
 #[expect(
     clippy::too_many_lines,
     reason = "one component body wires every login step"
@@ -382,6 +381,7 @@ pub fn NostrAuthModal(
                                         attempt=attempt
                                         on_auth=on_auth
                                         set_error=set_error
+                                        config=config.get_value()
                                     />
                                 }.into_any(),
                                 #[cfg(feature = "insecure_nsec_input")]
@@ -985,33 +985,9 @@ fn StepReadOnly(
     }
 }
 
-/// Give the browser a chance to paint before scrypt blocks the thread: two frames, or a 200 ms timer
-/// that browsers may throttle in a background tab. Best effort, no paint is guaranteed. A frame
-/// slower than the timer also starts scrypt before the paint.
-async fn yield_for_paint() {
-    // rAF never fires in a hidden tab, so a backgrounded login would otherwise stall until refocus.
-    const PAINT_WAIT_MS: i32 = 200;
-    let Some(window) = web_sys::window() else {
-        return;
-    };
-    let promise = js_sys::Promise::new(&mut |resolve, _| {
-        let second_frame = {
-            let resolve = resolve.clone();
-            Closure::once_into_js(move || {
-                let _ = resolve.call0(&JsValue::UNDEFINED);
-            })
-        };
-        let first_frame = {
-            let window = window.clone();
-            Closure::once_into_js(move || {
-                let _ = window.request_animation_frame(second_frame.unchecked_ref());
-            })
-        };
-        let _ = window.request_animation_frame(first_frame.unchecked_ref());
-        let _ =
-            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, PAINT_WAIT_MS);
-    });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+// No password can open this value, and until it parses it may be a pasted nsec.
+const fn clears_ncryptsec(e: &NostrAuthError) -> bool {
+    matches!(e, NostrAuthError::InvalidNcryptsec(_))
 }
 
 #[component]
@@ -1019,7 +995,9 @@ fn StepNcryptsec(
     attempt: Attempt,
     on_auth: Callback<AuthResult>,
     set_error: WriteSignal<Option<String>>,
+    config: NostrAuthConfig,
 ) -> impl IntoView {
+    let worker_url = StoredValue::new(config.ncryptsec_worker_url);
     let (ncryptsec, set_ncryptsec) = secret_signal();
     let (password, set_password) = secret_signal();
     let (loading, set_loading) = signal(false);
@@ -1040,16 +1018,15 @@ fn StepNcryptsec(
         let pw = take_secret(set_password);
         set_error.set(None);
         set_loading.set(true);
+        let url = worker_url.get_value();
         attempt.spawn(async move {
-            yield_for_paint().await;
-            match RawKeySession::from_ncryptsec(&nc, &pw) {
+            match RawKeySession::from_ncryptsec_off_thread(&nc, &pw, url.as_deref()).await {
                 Ok(session) => {
                     set_loading.set(false);
                     on_auth.run(AuthResult::Ncryptsec(session));
                 }
                 Err(e) => {
-                    // No password can open this value, and until it parses it may be a pasted nsec.
-                    if matches!(e, NostrAuthError::InvalidNcryptsec(_)) {
+                    if clears_ncryptsec(&e) {
                         clear_secret(set_ncryptsec);
                     }
                     set_error.set(Some(e.to_string()));
@@ -1390,10 +1367,19 @@ mod tests {
         })
     }
 
+    #[test]
+    fn ncryptsec_field_clears_only_on_invalid() {
+        assert!(clears_ncryptsec(&NostrAuthError::InvalidNcryptsec(
+            String::new()
+        )));
+        assert!(!clears_ncryptsec(&NostrAuthError::WrongPassword));
+        assert!(!clears_ncryptsec(&NostrAuthError::NcryptsecDecryptAborted));
+    }
+
     #[cfg(feature = "ssr")]
     fn ncryptsec_html() -> String {
         in_owner(|set_error, on_auth| {
-            view! { <StepNcryptsec attempt=Attempt::new() on_auth=on_auth set_error=set_error /> }
+            view! { <StepNcryptsec attempt=Attempt::new() on_auth=on_auth set_error=set_error config=NostrAuthConfig::default() /> }
                 .to_html()
         })
     }

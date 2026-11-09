@@ -57,7 +57,9 @@ pub use context::{NostrAuthContext, NostrAuthProvider, try_use_nostr_auth, use_n
 pub use modal::NostrAuthModal;
 pub use nostr;
 
-pub use signers::{BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle};
+pub use signers::{
+    BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle, run_ncryptsec_worker,
+};
 pub use types::{
     AuthResult, LoginMethod, NostrAuthConfig, NostrAuthError, PersistedMethod, PersistedSession,
 };

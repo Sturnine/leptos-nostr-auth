@@ -7,6 +7,10 @@ edition = "2024"
 name = "basic-csr"
 path = "src/main.rs"
 
+[[bin]]
+name = "nostr-auth-worker"
+path = "src/bin/nostr-auth-worker.rs"
+
 [dependencies]
 leptos                   = { version = "0.8", features = ["csr"] }
 leptos-nostr-auth        = { path = "../..", features = ["csr"] }
