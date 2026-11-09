@@ -41,7 +41,9 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: scripts/prepare-release.sh "$VERSION"
       - name: Check the version bump against crates.io
-        run: cargo semver-checks --default-features
+        run: |
+          cargo semver-checks --default-features
+          cargo semver-checks --only-explicit-features --features ssr,insecure_nsec_input
       # An App token, unlike GITHUB_TOKEN, makes the release PR trigger CI.
       - name: Generate GitHub token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -61,6 +63,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
           git commit -am "chore: release v$VERSION"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
-          gh pr create --base main --head "$branch" --title "chore: release v$VERSION" \
-            --body "Bumps the crate to $VERSION and adds its changelog section. Merging publishes the merge commit to crates.io and tags it v$VERSION."
+          # Rerunning after main moves replaces the branch, and the open PR picks it up.
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+          if [[ $(gh pr view "$branch" --json state --jq .state 2>/dev/null) != OPEN ]]; then
+            gh pr create --base main --head "$branch" --title "chore: release v$VERSION" \
+              --body "Bumps the crate to $VERSION and adds its changelog section. Merging publishes the merge commit to crates.io and tags it v$VERSION."
+          fi

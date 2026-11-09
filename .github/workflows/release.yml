@@ -28,13 +28,17 @@ jobs:
           persist-credentials: false
       - name: Read version
         id: version
+        env:
+          BEFORE: ${{ github.event.before }}
         run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          read_version() { git show "$1:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'; }
+          version=$(read_version HEAD)
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          else
+          # Only the push that changes the version releases, so a later push never ships or tags other commits.
+          if [[ $version != "$(read_version "$BEFORE")" ]] && ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
           fi
 
   # Publishes the pushed commit itself, so what merged is what ships.
@@ -56,17 +60,12 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         run: rustup toolchain install
-      - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: cargo-semver-checks@0.51.0
-      - name: Check the version bump against crates.io
-        run: cargo semver-checks --default-features
       # A rerun after a failed GitHub release finds the version already published.
       - name: Check crates.io
         id: registry
         run: |
-          status=$(curl -s -o /dev/null -w '%{http_code}' -A "leptos-nostr-auth release workflow (github.com/$GITHUB_REPOSITORY)" \
+          status=$(curl -s --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' \
+            -A "leptos-nostr-auth release workflow (github.com/$GITHUB_REPOSITORY)" \
             "https://crates.io/api/v1/crates/leptos-nostr-auth/$VERSION")
           case "$status" in
             200) echo "published=true" >> "$GITHUB_OUTPUT" ;;
@@ -95,15 +94,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Install git-cliff
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: git-cliff@2.14.2
       - name: Create tag and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git cliff --config cliff.toml --unreleased --tag "v$VERSION" --strip all > notes.md
+          awk -v h="## [$VERSION]" 'index($0, h) == 1 {f = 1; next} /^## \[/ {f = 0} f' CHANGELOG.md > notes.md
+          [[ -s notes.md ]] || { echo "::error::no CHANGELOG section for $VERSION"; exit 1; }
           gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --notes-file notes.md
