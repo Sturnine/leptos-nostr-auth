@@ -380,7 +380,7 @@ next `show_login`.
   removes it. So show a "forget saved session" button when `has_saved_session` is true and
   `is_authenticated` is false, as in the quick start.
 - **Never hide the login button behind `is_restoring`.** With a relay down a restore can take
-  minutes, and an extension that never answers keeps it true forever. A login or logout ends it at
+  minutes, and an extension restore gives up after 30 s with `ExtensionTimeout`. A login or logout ends it at
   once. It is false on the first hydrated render.
 - An extension that asks permission on every call prompts on every load until the user forgets
   the session.

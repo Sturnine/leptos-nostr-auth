@@ -430,6 +430,11 @@ pub enum NostrAuthError {
     /// to a non-string.
     #[error("Extension request rejected: {0}")]
     ExtensionRejected(String),
+    /// The extension did not answer `getPublicKey` within 30 s while restoring a stored session, for
+    /// example because it is locked or its prompt went unanswered. The session is kept and retried on
+    /// the next load, and a late answer is discarded. A login through the modal waits without a limit.
+    #[error("Browser extension did not answer in time")]
+    ExtensionTimeout,
     /// A public key could not be parsed or is not on the curve.
     ///
     /// As `NostrAuthContext::restore_error` it has two causes, told apart only by text, which is
