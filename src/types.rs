@@ -60,6 +60,9 @@ impl AuthResult {
     /// signature check, so it reports `SigningFailed`, not `SignerKeyMismatch`. These checks catch a
     /// switched account or a faulty or dishonest signer, not a compromised page.
     ///
+    /// The account is checked on the returned event, not asked for beforehand, so an extension on
+    /// another account fails with `SignerKeyMismatch` only after the user approves its prompt.
+    ///
     /// # Errors
     ///
     /// Read-only sessions return an error. Also, returns an error if signing fails. A closed

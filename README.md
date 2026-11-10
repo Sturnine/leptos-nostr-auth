@@ -126,8 +126,8 @@ fn PostButton() -> impl IntoView {
 - `sign_event(&json)` is the same with JSON in and out. The request needs `kind`, `tags`, `content`
   and `created_at`. A missing `pubkey` is filled in, and a different one is refused.
 - Events from an extension or bunker are verified. Another key is `SignerKeyMismatch`, usually an
-  account switch in the extension. The session stays logged in, so switching back makes it work
-  again. Any other altered or invalid event is `SigningFailed`.
+  account switch in the extension, reported after its own signing prompt. The session stays logged
+  in, so switching back makes it work again. Any other altered or invalid event is `SigningFailed`.
 - `nip44_encrypt(&peer, text)` and `nip44_decrypt(&peer, ciphertext)` work on every method except
   read-only (`EncryptionUnavailable`). Limit the size of untrusted ciphertext: one near NIP-44's
   maximum can need gigabytes of memory to decrypt.
