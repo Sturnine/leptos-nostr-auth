@@ -792,7 +792,7 @@ mod tampered_bunker {
     use super::*;
     use crate::signers::test_ws;
     use core::cell::RefCell;
-    use nostr::event::{FinalizeEvent as _, Kind, Tag, UnsignedEvent};
+    use nostr::event::{Event, FinalizeEvent as _, Kind, Tag, Tags, UnsignedEvent};
     use nostr::key::Keys;
     use nostr::message::{ClientMessage, RelayMessage, SubscriptionId};
     use nostr::nips::nip44;
@@ -801,28 +801,36 @@ mod tampered_bunker {
     use std::rc::Rc;
     use wasm_bindgen_test::wasm_bindgen_test;
 
+    // BIP-340's not-on-curve vector, which `from_hex` accepts.
+    const OFF_CURVE: &str = "eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34";
     const VICTIM: &str = "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2";
 
     type Log = Rc<RefCell<Vec<NostrConnectMethod>>>;
+
+    type Forgery = fn(&Keys, UnsignedEvent) -> String;
 
     enum Answers {
         /// Every result is the victim's public key, without holding the victim's key.
         VictimKeyOnly,
         Holds(Keys),
+        /// Holds the key but answers `sign_event` with whatever the function returns.
+        Forges(Keys, Forgery),
     }
 
     impl Answers {
         fn result(&self, method: NostrConnectMethod, params: &[String]) -> String {
-            let Self::Holds(user) = self else {
+            let (Self::Holds(user) | Self::Forges(user, _)) = self else {
                 return VICTIM.to_owned();
             };
             let param = |i: usize| params.get(i).unwrap();
             match method {
-                NostrConnectMethod::SignEvent => UnsignedEvent::from_json(param(0))
-                    .unwrap()
-                    .finalize(user)
-                    .unwrap()
-                    .as_json(),
+                NostrConnectMethod::SignEvent => {
+                    let request = UnsignedEvent::from_json(param(0)).unwrap();
+                    match self {
+                        Self::Forges(_, forge) => forge(user, request),
+                        _ => request.finalize(user).unwrap().as_json(),
+                    }
+                }
                 NostrConnectMethod::Nip44Encrypt => nip44::encrypt(
                     user.secret_key(),
                     &PublicKey::from_hex(param(0)).unwrap(),
@@ -1001,5 +1009,125 @@ mod tampered_bunker {
         };
         futures::pin_mut!(signer, body);
         futures::future::select(body, signer).await;
+    }
+
+    fn changed(
+        user: &Keys,
+        request: UnsignedEvent,
+        change: impl FnOnce(&mut UnsignedEvent),
+    ) -> String {
+        let mut event = request;
+        change(&mut event);
+        event.finalize(user).unwrap().as_json()
+    }
+
+    async fn forged_reply(forge: Forgery) -> NostrAuthError {
+        test_ws::install();
+        let remote = Keys::generate();
+        let client = Keys::generate();
+        let user = Keys::generate();
+        let stored = stored(&user.public_key().to_hex(), &remote, &client);
+        let signer = fake_signer(
+            remote,
+            client.public_key(),
+            Answers::Forges(user, forge),
+            Log::default(),
+        );
+        let body = async {
+            let session = bunker(restore_session(&stored, 2).await);
+            let event = r#"{"kind":1,"content":"hi","tags":[["t","a"]],"created_at":1700000000}"#;
+            session.sign_event(event).await.unwrap_err()
+        };
+        futures::pin_mut!(signer, body);
+        match futures::future::select(body, signer).await {
+            futures::future::Either::Left((err, _)) => err,
+            futures::future::Either::Right(((), _)) => unreachable!("the signer never returns"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn bunker_reply_signed_by_another_key_is_a_key_mismatch() {
+        let err = forged_reply(|_, request| {
+            let other = Keys::generate();
+            changed(&other, request, |e| e.pubkey = other.public_key())
+        })
+        .await;
+        assert!(matches!(err, NostrAuthError::SignerKeyMismatch), "{err:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn bunker_reply_with_a_changed_field_is_refused() {
+        let cases: [(Forgery, &str); 4] = [
+            (|u, r| changed(u, r, |e| e.kind = Kind::Metadata), "kind"),
+            (
+                |u, r| changed(u, r, |e| e.tags = Tags::from_list(vec![Tag::hashtag("b")])),
+                "tags",
+            ),
+            (
+                |u, r| changed(u, r, |e| "other".clone_into(&mut e.content)),
+                "content",
+            ),
+            (
+                |u, r| changed(u, r, |e| e.created_at = Timestamp::from_secs(1_700_000_001)),
+                "created_at",
+            ),
+        ];
+        for (forge, field) in cases {
+            let err = forged_reply(forge).await;
+            assert_eq!(
+                err.to_string(),
+                format!("Signing failed: signer changed the event {field}")
+            );
+        }
+    }
+
+    fn with_field(event_json: &str, field: &str, value: &str) -> String {
+        let mut event: serde_json::Value = serde_json::from_str(event_json).unwrap();
+        event
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_owned(), value.into());
+        event.to_string()
+    }
+
+    #[wasm_bindgen_test]
+    async fn bunker_reply_with_a_bad_signature_is_refused() {
+        let err = forged_reply(|user, request| {
+            let genuine = request.clone().finalize(user).unwrap();
+            let other = changed(user, request, |e| "other".clone_into(&mut e.content));
+            let other_sig = Event::from_json(&other).unwrap().sig.to_string();
+            with_field(&genuine.as_json(), "sig", &other_sig)
+        })
+        .await;
+        assert_eq!(
+            err.to_string(),
+            "Signing failed: signer returned an invalid signature"
+        );
+    }
+
+    // The RPC layer rejects non-event JSON before `checked_event` sees it.
+    #[wasm_bindgen_test]
+    async fn bunker_reply_that_is_not_an_event_is_refused() {
+        let err = forged_reply(|_, _| "not an event".to_owned()).await;
+        assert_eq!(
+            err.to_string(),
+            "Signing failed: remote signer sent an unexpected result"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn bunker_reply_with_an_off_curve_key_is_an_invalid_event() {
+        let err = forged_reply(|user, request| {
+            with_field(
+                &request.finalize(user).unwrap().as_json(),
+                "pubkey",
+                OFF_CURVE,
+            )
+        })
+        .await;
+        assert_eq!(
+            err.to_string(),
+            "Signing failed: signer returned an invalid event"
+        );
     }
 }
