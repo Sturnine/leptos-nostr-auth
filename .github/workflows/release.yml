@@ -1,54 +1,102 @@
 name: Release
 
-# Single release workflow:
-# 1. On push to main: derives version from conventional commits, checks semver,
-#    and opens or updates a single "release-pr" branch PR.
-# 2. On merge of that PR: publishes to crates.io via trusted publishing (OIDC),
-#    tags the merge commit, creates the GitHub release, and deletes the release branch.
-on:
+# Publishing runs on the push to main, not on the release PR's closed event: the release
+# environment only deploys from refs/heads/main.
+# A shared group would cancel a queued run, which may be the one that releases; release-pr and
+# publish set their own.
+on: # zizmor: ignore[concurrency-limits]
   push:
-    branches: [main]
-  pull_request:
-    types: [closed]
     branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (X.Y.Z). Leave empty to derive from commits."
-        required: false
+        description: "Version for the release PR (X.Y.Z), above the current one and at least the derived one. Leave empty to derive it."
 
 permissions: {}
 
 jobs:
-  # Job 1: On push to main, open or update the release PR
-  release-pr:
-    name: Open or update release PR
-    if: >
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      github.repository_owner == 'Sturnine' &&
-      !contains(github.event.head_commit.message, 'from Sturnine/release-pr') &&
-      !startsWith(github.event.head_commit.message, 'chore: release v')
+  check:
+    name: Check for a new version
+    if: ${{ github.repository_owner == 'Sturnine' }}
     runs-on: ubuntu-latest
-    environment: release
-    concurrency:
-      group: release-pr
-      cancel-in-progress: true
     permissions:
       contents: read
+      pull-requests: read # find the PR a push merged
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+      previous: ${{ steps.version.outputs.previous }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Read version
+        id: version
+        env:
+          BEFORE: ${{ github.event.before || github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          read_version() { git show "$1:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'; }
+          version=$(read_version HEAD)
+          before=$(read_version "$BEFORE")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Only the push that changes the version releases, so a later push never ships other commits.
+          if [[ $version == "$before" ]]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # CI enforces this before the merge too; this also catches a merge that bypassed CI.
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            --jq ".[] | select(.merge_commit_sha == \"$GITHUB_SHA\") | .head.repo.full_name + \":\" + .head.ref")
+          if [[ $head != "$GITHUB_REPOSITORY:release-pr" ]]; then
+            echo "::error::$version was not merged from the release PR (${head:-no PR})"
+            exit 1
+          fi
+          if ! grep -qF "## [$version] - " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+          previous=$(git tag --merged HEAD --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n 1p)
+          previous=${previous#v}
+          # A supersede merged after the superseded version shipped deleted that version's section.
+          if ! grep -qF "## [$previous] - " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md lost released $previous; once something releasable lands, run Release by hand with a version above $version"
+            exit 1
+          fi
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+  release-pr:
+    name: Open or update release PR
+    needs: check
+    if: ${{ needs.check.outputs.release == 'false' }}
+    runs-on: ubuntu-latest
+    environment: release
+    # Queued, not cancelled: a cancel can land between the push and the PR edit.
+    concurrency:
+      group: release-pr
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      # The tip, not the triggering commit: runs can finish out of order.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: rustup toolchain install
 
-      - name: Install git-cliff and cargo-semver-checks
+      - name: Install git-cliff
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: git-cliff@2.14.2,cargo-semver-checks@0.51.0
+          tool: git-cliff@2.14.2
+          fallback: none
 
       - name: Bump version and changelog
         id: prepare
@@ -56,13 +104,8 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: scripts/prepare-release.sh "$VERSION"
 
-      - name: Verify semver
-        if: ${{ steps.prepare.outputs.version != '' }}
-        run: |
-          cargo semver-checks --default-features
-          cargo semver-checks --only-explicit-features --features ssr,insecure_nsec_input
-
-      # A GitHub App token (unlike GITHUB_TOKEN) makes the release PR trigger CI checks.
+      # An App token (unlike GITHUB_TOKEN) makes the release PR run CI. Moving the branch onto a
+      # main whose workflows changed needs the workflows permission.
       - name: Generate GitHub App token
         if: ${{ steps.prepare.outputs.version != '' }}
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -72,6 +115,7 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
 
       - name: Push release branch and open or update PR
         if: ${{ steps.prepare.outputs.version != '' }}
@@ -81,11 +125,10 @@ jobs:
         run: |
           branch=release-pr
           title="chore: release v$VERSION"
-          body="Bumps the crate to \`$VERSION\` and updates the changelog. **Merging this PR publishes \`$VERSION\` to crates.io** and creates the git tag and GitHub release. Every push to \`main\` regenerates this PR."
+          body="Bumps the crate to \`$VERSION\` and updates the changelog. **Merging this PR publishes \`$VERSION\` to crates.io** and creates the git tag and GitHub release. Never update this branch: pushes to \`main\` regenerate it, except while a release is untagged, when only a manual Release run with the version does."
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
           git commit -am "$title"
           git push --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
@@ -97,52 +140,58 @@ jobs:
             gh pr create --base main --head "$branch" --title "$title" --body "$body"
           fi
 
-  # Job 2: On merge of the release PR, publish to crates.io and create GitHub release
   publish:
     name: Publish to crates.io
-    if: >
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.merged == true &&
-      github.event.pull_request.head.ref == 'release-pr' &&
-      github.repository_owner == 'Sturnine'
+    needs: check
+    if: ${{ needs.check.outputs.release == 'true' }}
     runs-on: ubuntu-latest
     environment: release
     concurrency:
       group: release-publish
       cancel-in-progress: false
     permissions:
-      contents: write  # create the tag and GitHub release
-      id-token: write  # trusted publishing to crates.io
+      contents: read
+      id-token: write # trusted publishing to crates.io
+      pull-requests: read # an open release PR supersedes this version
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      PREVIOUS: ${{ needs.check.outputs.previous }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust toolchain
         run: rustup toolchain install
 
-      - name: Read version
-        id: version
-        run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
+      # A rerun finds the version already published; it must be this commit's.
       - name: Check crates.io
         id: registry
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          status=$(curl -s --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' \
+          curl -sSf --retry 3 --retry-all-errors -o versions.json \
             -A "leptos-nostr-auth release workflow (github.com/$GITHUB_REPOSITORY)" \
-            "https://crates.io/api/v1/crates/leptos-nostr-auth/$VERSION")
-          case "$status" in
-            200) echo "published=true"  >> "$GITHUB_OUTPUT" ;;
-            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
-            *)   echo "::error::crates.io answered $status"; exit 1 ;;
-          esac
+            https://crates.io/api/v1/crates/leptos-nostr-auth/versions
+          sha=$(jq -r --arg v "$VERSION" '.versions[] | select(.num == $v) | .trustpub_data.sha // "another source"' versions.json)
+          if [[ -n $sha ]]; then
+            [[ $sha == "$GITHUB_SHA" ]] || { echo "::error::crates.io has $VERSION from $sha, not $GITHUB_SHA"; exit 1; }
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch -q --depth=1 origin main
+          main=$(git show FETCH_HEAD:Cargo.toml | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])')
+          [[ $main == "$VERSION" ]] || { echo "::error::main is at $main; $VERSION was superseded"; exit 1; }
+          # None is open while a version is untagged unless someone ran a supersede.
+          open=$(gh pr list --head release-pr --state open \
+            --json isCrossRepository --jq 'map(select(.isCrossRepository | not)) | length')
+          [[ $open == 0 ]] || { echo "::error::an open release PR supersedes $VERSION, or is stale; close it to release $VERSION"; exit 1; }
+          # Inside this job's concurrency group, so a publish still running has finished. A version
+          # above the last tag was superseded by this one, which deleted its changelog section.
+          above=$(jq -r --arg p "$PREVIOUS" 'if .meta.next_page then error("paginated") else . end | [.versions[].num | select((split(".") | map(tonumber)) > ($p | split(".") | map(tonumber)))] | join(", ")' versions.json)
+          [[ -z $above ]] || { echo "::error::crates.io has $above, released after v$PREVIOUS; re-run its release so it is tagged, then once something releasable lands run Release by hand with a version above $VERSION"; exit 1; }
+          echo "published=false" >> "$GITHUB_OUTPUT"
 
       - name: Authenticate with crates.io
         if: ${{ steps.registry.outputs.published == 'false' }}
@@ -155,36 +204,34 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --locked
 
-      - name: Create git tag
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Skip if the tag already exists (rerun after a failed GitHub release step).
-          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "v$VERSION tag already exists, skipping"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "v$VERSION" -m "Release v$VERSION"
-            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "refs/tags/v$VERSION"
-          fi
+  github-release:
+    name: Tag and GitHub release
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag and GitHub release
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Create GitHub release
+      - name: Create tag and release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -o pipefail
+          # gh ignores --target when the tag exists, and would release whatever it points at.
+          tagged=$(git ls-remote origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | tail -n 1 | cut -f 1)
+          [[ -z $tagged || $tagged == "$GITHUB_SHA" ]] || { echo "::error::v$VERSION points at $tagged, not $GITHUB_SHA"; exit 1; }
+          # gh release view also finds a draft, which has no tag yet.
+          if [[ -n $tagged && $(gh release view "v$VERSION" --json isDraft --jq .isDraft 2>/dev/null) == false ]]; then
+            echo "v$VERSION is already released"
+            exit 0
+          fi
           awk -v h="## [$VERSION]" \
             'index($0, h) == 1 { f = 1; next } /^## \[/ { f = 0 } f' \
             CHANGELOG.md > notes.md
-          [[ -s notes.md ]] || { echo "::error::no CHANGELOG section for $VERSION"; exit 1; }
-          gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md
-
-      - name: Delete release branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            --delete release-pr || true
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --notes-file notes.md

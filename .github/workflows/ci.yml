@@ -28,8 +28,6 @@ jobs:
         with:
           extra_nix_config: |
             accept-flake-config = true
-            max-jobs = auto
-            cores = 0
       - name: Cache nix store
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
@@ -47,11 +45,32 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      RELEASE_PR: ${{ github.head_ref == 'release-pr' && github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 3 # HEAD^1 is the base branch, HEAD^2 the PR head, HEAD^2^ its parent
           persist-credentials: false
+      # Merging a version change publishes it, so only the generated release PR may make one, and
+      # only as generated on the current base: a branch updated from main lacks entries and bump for
+      # what came in.
+      - name: Check version change
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          read_version() { git show "$1:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'; }
+          if [[ $RELEASE_PR == true ]]; then
+            # Updating the branch on GitHub merges or rebases, changing the parent or the committer.
+            if [[ $(git rev-parse HEAD^2^) != "$(git rev-parse HEAD^1)" \
+              || $(git log -1 --format=%ce HEAD^2) != '41898282+github-actions[bot]@users.noreply.github.com' ]]; then
+              echo "::error::the release PR is not the generated commit on main; the next push to main regenerates it, or while a release is untagged a manual Release run with its version"
+              exit 1
+            fi
+          elif [[ $(read_version HEAD) != "$(read_version HEAD^1)" ]]; then
+            echo "::error::only the release PR may change the Cargo.toml version"
+            exit 1
+          fi
       - name: Install Rust toolchain
         run: rustup toolchain install
       - name: Cache cargo build
@@ -60,3 +79,14 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Package
         run: cargo package --locked
+      - name: Install cargo-semver-checks
+        if: ${{ env.RELEASE_PR == 'true' }}
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-semver-checks@0.51.0
+          fallback: none
+      - name: Check the version bump
+        if: ${{ env.RELEASE_PR == 'true' }}
+        run: |
+          cargo semver-checks --default-features
+          cargo semver-checks --only-explicit-features --features ssr,insecure_nsec_input
