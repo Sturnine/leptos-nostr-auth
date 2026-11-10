@@ -1,27 +1,115 @@
 name: Release
 
-# Publish only when the release-pr branch is merged into main.
-# Nothing else — no direct push, no version bump commit, no other PR — can trigger this.
+# Single release workflow:
+# 1. On push to main: derives version from conventional commits, checks semver,
+#    and opens or updates a single "release-pr" branch PR.
+# 2. On merge of that PR: publishes to crates.io via trusted publishing (OIDC),
+#    tags the merge commit, creates the GitHub release, and deletes the release branch.
 on:
+  push:
+    branches: [main]
   pull_request:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (X.Y.Z). Leave empty to derive from commits."
+        required: false
 
 permissions: {}
 
-concurrency:
-  group: release
-  cancel-in-progress: false
-
 jobs:
+  # Job 1: On push to main, open or update the release PR
+  release-pr:
+    name: Open or update release PR
+    if: >
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.repository_owner == 'Sturnine' &&
+      !contains(github.event.head_commit.message, 'from Sturnine/release-pr') &&
+      !startsWith(github.event.head_commit.message, 'chore: release v')
+    runs-on: ubuntu-latest
+    environment: release
+    concurrency:
+      group: release-pr
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Install git-cliff and cargo-semver-checks
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: git-cliff@2.14.2,cargo-semver-checks@0.51.0
+
+      - name: Bump version and changelog
+        id: prepare
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/prepare-release.sh "$VERSION"
+
+      - name: Verify semver
+        if: ${{ steps.prepare.outputs.version != '' }}
+        run: |
+          cargo semver-checks --default-features
+          cargo semver-checks --only-explicit-features --features ssr,insecure_nsec_input
+
+      # A GitHub App token (unlike GITHUB_TOKEN) makes the release PR trigger CI checks.
+      - name: Generate GitHub App token
+        if: ${{ steps.prepare.outputs.version != '' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Push release branch and open or update PR
+        if: ${{ steps.prepare.outputs.version != '' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          branch=release-pr
+          title="chore: release v$VERSION"
+          body="Bumps the crate to \`$VERSION\` and updates the changelog. **Merging this PR publishes \`$VERSION\` to crates.io** and creates the git tag and GitHub release. Every push to \`main\` regenerates this PR."
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "$title"
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/$branch"
+
+          if [[ $(gh pr view "$branch" --json state --jq .state 2>/dev/null) == OPEN ]]; then
+            gh pr edit "$branch" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head "$branch" --title "$title" --body "$body"
+          fi
+
+  # Job 2: On merge of the release PR, publish to crates.io and create GitHub release
   publish:
     name: Publish to crates.io
     if: >
+      github.event_name == 'pull_request' &&
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.ref == 'release-pr' &&
       github.repository_owner == 'Sturnine'
     runs-on: ubuntu-latest
     environment: release
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     permissions:
       contents: write  # create the tag and GitHub release
       id-token: write  # trusted publishing to crates.io
@@ -29,6 +117,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -75,7 +164,9 @@ jobs:
           if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
             echo "v$VERSION tag already exists, skipping"
           else
-            git tag "v$VERSION"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "v$VERSION" -m "Release v$VERSION"
             git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
               "refs/tags/v$VERSION"
           fi
@@ -90,3 +181,10 @@ jobs:
             CHANGELOG.md > notes.md
           [[ -s notes.md ]] || { echo "::error::no CHANGELOG section for $VERSION"; exit 1; }
           gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md
+
+      - name: Delete release branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            --delete release-pr || true
