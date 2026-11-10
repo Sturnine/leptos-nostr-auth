@@ -44,8 +44,9 @@ pub struct NostrAuthContext {
     ///
     /// False on the first hydrated render, because server HTML cannot know storage, and false at
     /// load for a stored passkey, which restores only from the login click. It can stay true for
-    /// minutes while a bunker relay is down; an extension restore gives up after 30 s with
-    /// `ExtensionTimeout`, so do not hide the login button behind it. A login, a logout or a logout in another tab ends it at once.
+    /// minutes while a bunker relay is down, and an extension restore gives up after 30 s with
+    /// `ExtensionTimeout`. Do not hide the login button behind it. A login, a logout or a logout in
+    /// another tab ends it at once.
     pub is_restoring: Signal<bool>,
     /// `true` when localStorage holds a decodable session, restored or not, whether or not
     /// `persist_session` is on. Use it with `is_authenticated` to offer a "forget saved session"
@@ -153,11 +154,11 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 /// bunker's one-time secret.
 ///
 /// A bunker approval link during restore keeps `is_restoring` true while it waits. A cancelled
-/// restore clears that link at once and closes its socket, and takes a
-/// passkey prompt down where the browser honours it. An extension prompt stays until answered, and
-/// its result is discarded, as it is after the 30 s restore deadline. A restore that lands while this provider's modal shows its method list
-/// closes the modal. On a login step the modal stays open: closing it keeps the restored session,
-/// and finishing the login replaces it like any new login.
+/// restore clears that link at once and closes its socket, and takes a passkey prompt down where
+/// the browser honours it. An extension prompt stays until answered, and its result is discarded,
+/// as it is after the 30 s restore deadline. A restore that lands while this provider's modal shows
+/// its method list closes the modal. On a login step the modal stays open: closing it keeps the
+/// restored session, and finishing the login replaces it like any new login.
 ///
 /// # Other tabs
 ///

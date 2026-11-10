@@ -134,7 +134,8 @@ pub fn begin_passkey_restore(
     Ok(PendingRestore { pending, stored_pk })
 }
 
-/// How long a restore waits for the extension's getPublicKey: long enough to unlock it or answer its prompt. Public docs and the README quote it as "30 s".
+/// How long a restore waits for the extension's getPublicKey: long enough to unlock it or answer
+/// its prompt. Public docs and the README quote it as "30 s".
 pub const EXTENSION_RESTORE_TIMEOUT_MS: u32 = 30_000;
 
 /// Restore a stored session. A passkey fails closed, never prompting; see
