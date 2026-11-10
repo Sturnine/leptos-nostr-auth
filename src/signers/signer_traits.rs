@@ -58,13 +58,19 @@ impl AsyncSignEvent for AuthResult {
         &self,
         unsigned: UnsignedEvent,
     ) -> Pin<Box<dyn Future<Output = Result<Event, Self::Error>> + Send + '_>> {
-        send_future(move || async move {
-            let signed = self.sign_event(&unsigned.as_json()).await?;
-            Event::from_json(signed).map_err(|e| {
-                NostrAuthError::SigningFailed(format!("signer returned an invalid event: {e}"))
-            })
-        })
+        send_future(
+            move || async move { returned_event(self.sign_event(&unsigned.as_json()).await?) },
+        )
     }
+}
+
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the serde error text quotes event values"
+)]
+fn returned_event(json: String) -> Result<Event, NostrAuthError> {
+    Event::from_json(json)
+        .map_err(|_| NostrAuthError::SigningFailed("signer returned an invalid event".into()))
 }
 
 /// Runs through [`AuthResult::nip44_encrypt`] and [`AuthResult::nip44_decrypt`], and returns
@@ -218,6 +224,15 @@ pub(in crate::signers) mod tests {
     }
 
     fn assert_send<T: Send>(_: T) {}
+
+    #[test]
+    fn invalid_returned_event_quotes_no_text() {
+        let err = returned_event(r#"{"kind":"secret-kind"}"#.into()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Signing failed: signer returned an invalid event"
+        );
+    }
 
     #[test]
     fn auth_result_is_send_sync_nostr_signer() {
