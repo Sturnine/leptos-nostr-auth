@@ -134,17 +134,31 @@ pub fn begin_passkey_restore(
     Ok(PendingRestore { pending, stored_pk })
 }
 
+/// How long a restore waits for the extension's getPublicKey: long enough to unlock it or answer
+/// its prompt. Public docs and the README quote it as "30 s".
+pub const EXTENSION_RESTORE_TIMEOUT_MS: u32 = 30_000;
+
 /// Restore a stored session. A passkey fails closed, never prompting; see
-/// [`begin_passkey_restore`].
+/// [`begin_passkey_restore`]. The extension's answer is bounded by
+/// [`EXTENSION_RESTORE_TIMEOUT_MS`]. A timeout is `ExtensionTimeout`, and the caller keeps the
+/// session as for any failure.
 pub async fn restore_session(
     session: &PersistedSession,
     bunker_timeout_secs: u32,
+) -> Result<AuthResult, NostrAuthError> {
+    restore_session_within(session, bunker_timeout_secs, EXTENSION_RESTORE_TIMEOUT_MS).await
+}
+
+async fn restore_session_within(
+    session: &PersistedSession,
+    bunker_timeout_secs: u32,
+    extension_timeout_ms: u32,
 ) -> Result<AuthResult, NostrAuthError> {
     let stored_pk = public_key_from_hex(&session.public_key_hex)?;
 
     match session.method {
         PersistedMethod::Extension => {
-            let handle = Nip07Handle::get_public_key().await?;
+            let handle = Nip07Handle::get_public_key_within(extension_timeout_ms).await?;
             if handle.public_key != stored_pk {
                 return Err(NostrAuthError::SignerKeyMismatch);
             }
@@ -660,6 +674,7 @@ mod wasm_tests {
     }
 
     fn shim(pk: &str) {
+        crate::signers::test_ws::install();
         js_sys::eval(&format!(
             "globalThis.window = {{ nostr: {{ getPublicKey: function () {{ return Promise.resolve('{pk}'); }} }} }};"
         ))
@@ -691,6 +706,7 @@ mod wasm_tests {
 
     #[wasm_bindgen_test]
     async fn extension_non_string_on_restore_is_rejected() {
+        crate::signers::test_ws::install();
         js_sys::eval(
             "globalThis.window = { nostr: { getPublicKey: function () { return Promise.resolve(null); } } };",
         )
@@ -715,7 +731,54 @@ mod wasm_tests {
     }
 
     #[wasm_bindgen_test]
+    async fn extension_that_never_answers_times_out() {
+        crate::signers::test_ws::install();
+        js_sys::eval(
+            "globalThis.__n = { gpk: 0 }; globalThis.window = { nostr: { getPublicKey: () => { globalThis.__n.gpk += 1; return new Promise(() => {}); } } };",
+        )
+        .unwrap();
+        assert!(matches!(
+            restore_session_within(&extension_session(), 1, 50).await,
+            Err(NostrAuthError::ExtensionTimeout)
+        ));
+        assert_eq!(
+            js_sys::eval("globalThis.__n.gpk").unwrap().as_f64(),
+            Some(1.0)
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn late_answer_after_deadline_is_discarded() {
+        // A late answer to the dropped future is harmless; it cannot log in because a restore lands once.
+        crate::signers::test_ws::install();
+        js_sys::eval(&format!(
+            "globalThis.window = {{ nostr: {{ getPublicKey: () => new Promise((r) => {{ globalThis.__answer = () => r('{USER}'); }}) }} }};"
+        ))
+        .unwrap();
+        assert!(matches!(
+            restore_session_within(&extension_session(), 1, 30).await,
+            Err(NostrAuthError::ExtensionTimeout)
+        ));
+        js_sys::eval("globalThis.__answer()").unwrap();
+        crate::signers::test_ws::tick(20).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn answer_before_deadline_restores() {
+        crate::signers::test_ws::install();
+        js_sys::eval(&format!(
+            "globalThis.window = {{ nostr: {{ getPublicKey: () => new Promise((r) => setTimeout(() => r('{USER}'), 10)) }} }};"
+        ))
+        .unwrap();
+        assert!(matches!(
+            restore_session_within(&extension_session(), 1, 200).await,
+            Ok(AuthResult::Extension(_))
+        ));
+    }
+
+    #[wasm_bindgen_test]
     async fn extension_absent_is_not_found() {
+        crate::signers::test_ws::install();
         js_sys::eval("delete globalThis.window;").unwrap();
         assert!(matches!(
             restore_session(&extension_session(), 1).await,

@@ -25,6 +25,13 @@ impl Nip07Handle {
         imp::get_public_key().await
     }
 
+    /// [`get_public_key`](Self::get_public_key), failing with [`NostrAuthError::ExtensionTimeout`]
+    /// if the extension has not answered after `timeout_ms`. Only restore is bounded: a login, and
+    /// the account check before NIP-44, wait for the user.
+    pub(crate) async fn get_public_key_within(timeout_ms: u32) -> Result<Self, NostrAuthError> {
+        imp::get_public_key_within(timeout_ms).await
+    }
+
     /// Sign a Nostr event via the extension. The request and the returned event follow the contract
     /// on [`crate::AuthResult::sign_event`], so an extension on another account fails, possibly
     /// after its own prompt.
@@ -85,7 +92,7 @@ mod imp {
     use wasm_bindgen_futures::JsFuture;
 
     use super::Nip07Handle;
-    use crate::signers::browser::make_rpc_promise;
+    use crate::signers::browser::{RpcTimer, make_rpc_promise};
     use crate::signers::event_contract::{checked_event, prepare};
     use crate::signers::{is_nip44_payload, public_key_from_hex, sanitize_remote_text};
     use crate::types::NostrAuthError;
@@ -174,6 +181,23 @@ mod imp {
             return Err(NostrAuthError::InvalidPublicKey(INVALID_KEY.into()));
         };
         Ok(Nip07Handle { public_key })
+    }
+
+    /// Dropping the losing `getPublicKey` future leaves its `JsFuture` callbacks alive until the
+    /// extension answers. That is accepted: one pair per load for an extension that never answers,
+    /// as a cancelled restore leaks today.
+    pub(super) async fn get_public_key_within(
+        timeout_ms: u32,
+    ) -> Result<Nip07Handle, NostrAuthError> {
+        use core::pin::pin;
+        use futures::future::{Either, select};
+        // A named local: dropping the timer resolves `fired`.
+        let timer = RpcTimer::start_ms(timeout_ms);
+        let answer = pin!(get_public_key());
+        match select(answer, JsFuture::from(timer.fired().clone())).await {
+            Either::Left((result, _)) => result,
+            Either::Right(_) => Err(NostrAuthError::ExtensionTimeout),
+        }
     }
 
     /// A value that cannot be stringified has no text, which `checked_event` refuses without
@@ -267,6 +291,12 @@ mod imp {
         Err(NostrAuthError::ExtensionNotFound)
     }
 
+    pub(super) async fn get_public_key_within(
+        _timeout_ms: u32,
+    ) -> Result<Nip07Handle, NostrAuthError> {
+        Err(NostrAuthError::ExtensionNotFound)
+    }
+
     pub(super) async fn sign_event(
         _handle: &Nip07Handle,
         _event_json: &str,
@@ -306,6 +336,10 @@ mod server_tests {
         };
         assert_eq!(
             text(ready(Nip07Handle::get_public_key())),
+            "Browser extension (window.nostr) not found"
+        );
+        assert_eq!(
+            text(ready(Nip07Handle::get_public_key_within(1))),
             "Browser extension (window.nostr) not found"
         );
         assert_eq!(

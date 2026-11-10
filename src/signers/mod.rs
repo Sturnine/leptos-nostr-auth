@@ -189,6 +189,7 @@ mod server_tests {
         let s = nip46::server_tests::bunker();
         let peer = Keys::generate().public_key();
         assert_send(Nip07Handle::get_public_key());
+        assert_send(Nip07Handle::get_public_key_within(1));
         assert_send(h.sign_event("{}"));
         assert_send(h.nip44_encrypt(&peer, "b"));
         assert_send(h.nip44_decrypt(&peer, "b"));

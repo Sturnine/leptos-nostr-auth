@@ -25,18 +25,21 @@ pub(super) struct RpcTimer {
 }
 
 impl RpcTimer {
+    pub(super) fn start(timeout_secs: u32) -> Self {
+        Self::start_ms(timeout_secs.saturating_mul(1000))
+    }
+
     #[expect(
         clippy::unwrap_used,
-        clippy::cast_possible_truncation,
-        reason = "window exists whenever this module runs in a tab, setTimeout does not throw for a function callback, and timeout_secs is a small config value, far below i32::MAX milliseconds"
+        reason = "window exists whenever this module runs in a tab, and setTimeout does not throw for a function callback"
     )]
-    pub(super) fn start(timeout_secs: u32) -> Self {
+    pub(super) fn start_ms(ms: u32) -> Self {
         let (fired, resolve, _) = make_rpc_promise();
         let window = web_sys::window().unwrap();
         let id = window
             .set_timeout_with_callback_and_timeout_and_arguments_0(
                 &resolve,
-                (f64::from(timeout_secs) * 1000.0) as i32,
+                i32::try_from(ms).unwrap_or(i32::MAX),
             )
             .unwrap();
         Self {

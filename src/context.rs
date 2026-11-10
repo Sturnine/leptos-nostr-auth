@@ -43,9 +43,10 @@ pub struct NostrAuthContext {
     /// passkey, from the login click.
     ///
     /// False on the first hydrated render, because server HTML cannot know storage, and false at
-    /// load for a stored passkey, which restores only from the login click. It can stay true for a
-    /// long time, or without bound with an extension that never answers, so do not hide the login
-    /// button behind it. A login, a logout or a logout in another tab ends it at once.
+    /// load for a stored passkey, which restores only from the login click. It can stay true for
+    /// minutes while a bunker relay is down, and an extension restore gives up after 30 s with
+    /// `ExtensionTimeout`. Do not hide the login button behind it. A login, a logout or a logout in
+    /// another tab ends it at once.
     pub is_restoring: Signal<bool>,
     /// `true` when localStorage holds a decodable session, restored or not, whether or not
     /// `persist_session` is on. Use it with `is_authenticated` to offer a "forget saved session"
@@ -129,9 +130,10 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 /// |---|---|---|
 /// | `logout`, logged in or not | Deleted | Logged out. An open modal closes, a login in it is cancelled and typed input is discarded |
 /// | Stored passkey at page load | Kept | Logged out, no prompt. `restore_error` stays `None` unless the stored data can never restore. The login click restores it |
-/// | Failed or cancelled restore, any method | Kept | Logged out, retried on the next load (once per load, no timers), or for a passkey on the next login click, whose failure also opens the modal |
+/// | Failed or cancelled restore, any method | Kept | Logged out, retried on the next load (once per load, never retried on a timer), or for a passkey on the next login click, whose failure also opens the modal |
 /// | Another key on restore, any method | Kept | The other key is never adopted. `restore_error` is `SignerKeyMismatch`; switching the signer back restores it |
 /// | Extension returns an invalid key string on restore | Kept | `restore_error` is `InvalidPublicKey`; restores once the extension returns the stored key |
+/// | Extension does not answer within 30 s on restore | Kept | Logged out; `restore_error` is `ExtensionTimeout`. A later answer is discarded; retried on the next load |
 /// | Stored data can never restore (bad hex, missing fields, bad base64) | Kept | Logged out, no prompt or network call; `restore_error` says why |
 /// | Stored method not in `allowed_methods` | Kept | Logged out, no prompt or network call; `restore_error` is `RestoreMethodNotAllowed` |
 /// | Stored JSON cannot be decoded | Kept | Reads as nothing stored. `logout` removes it |
@@ -152,11 +154,11 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 /// bunker's one-time secret.
 ///
 /// A bunker approval link during restore keeps `is_restoring` true while it waits. A cancelled
-/// restore clears that link at once and closes its socket, and takes a
-/// passkey prompt down where the browser honours it. An extension prompt stays until answered, and
-/// its result is discarded. A restore that lands while this provider's modal shows its method list
-/// closes the modal. On a login step the modal stays open: closing it keeps the restored session,
-/// and finishing the login replaces it like any new login.
+/// restore clears that link at once and closes its socket, and takes a passkey prompt down where
+/// the browser honours it. An extension prompt stays until answered, and its result is discarded,
+/// as it is after the 30 s restore deadline. A restore that lands while this provider's modal shows
+/// its method list closes the modal. On a login step the modal stays open: closing it keeps the
+/// restored session, and finishing the login replaces it like any new login.
 ///
 /// # Other tabs
 ///
@@ -581,6 +583,7 @@ mod stale_restore {
 
     #[wasm_bindgen_test]
     async fn restore_landing_after_another_tab_stored_is_dropped() {
+        crate::signers::test_ws::install();
         let key = NostrAuthConfig::default().storage_key;
         js_sys::eval(&format!(
             "globalThis.window = globalThis;
