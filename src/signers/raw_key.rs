@@ -1,6 +1,7 @@
 use nostr::key::{Keys, PublicKey, SecretKey};
 use nostr::nips::nip19::FromBech32;
 use nostr::nips::nip49::EncryptedSecretKey;
+use zeroize::Zeroizing;
 
 use crate::types::NostrAuthError;
 
@@ -15,7 +16,7 @@ fn check_cost(encrypted: &EncryptedSecretKey) -> Result<(), NostrAuthError> {
     Ok(())
 }
 
-pub(super) fn parse_ncryptsec(ncryptsec: &str) -> Result<EncryptedSecretKey, NostrAuthError> {
+pub fn parse_ncryptsec(ncryptsec: &str) -> Result<EncryptedSecretKey, NostrAuthError> {
     let encrypted = EncryptedSecretKey::from_bech32(ncryptsec)
         .map_err(|e| NostrAuthError::InvalidNcryptsec(e.to_string()))?;
     check_cost(&encrypted)?;
@@ -45,11 +46,15 @@ pub(super) fn decrypt_payload(
 /// nostr overwrites that copy with `non_secure_erase`: best effort, not `zeroize`, and it cannot
 /// reach bytes the compiler moved or copied. NIP-44 calls leave derived keys and plaintext unwiped.
 /// Logout ends use of the key; it does not prove the memory is clean.
+///
+/// A session opened from an ncryptsec also holds that ncryptsec string, zeroized on drop, so the
+/// provider can save it. It is useless without the password.
 #[derive(Clone)]
 pub struct RawKeySession {
     /// The authenticated user's public key.
     pub public_key: PublicKey,
     keys: Keys,
+    ncryptsec: Option<Zeroizing<String>>,
 }
 
 impl RawKeySession {
@@ -67,6 +72,11 @@ impl RawKeySession {
     /// [`NostrAuthError::InvalidNcryptsec`] for a malformed string or a `log_n` above the supported
     /// maximum, and [`NostrAuthError::WrongPassword`] for a wrong password.
     pub fn from_ncryptsec(ncryptsec: &str, password: &str) -> Result<Self, NostrAuthError> {
+        Ok(Self::decrypt_bare(ncryptsec, password)?.with_ncryptsec(ncryptsec))
+    }
+
+    /// Without the ncryptsec attached: the off-thread facade attaches it for every path.
+    pub(crate) fn decrypt_bare(ncryptsec: &str, password: &str) -> Result<Self, NostrAuthError> {
         let encrypted = parse_ncryptsec(ncryptsec)?;
         let secret_key = decrypt_payload(&encrypted.as_vec(), password)?;
         Ok(Self::from_secret_key(secret_key))
@@ -77,7 +87,17 @@ impl RawKeySession {
         Self {
             public_key: keys.public_key(),
             keys,
+            ncryptsec: None,
         }
+    }
+
+    pub(crate) fn with_ncryptsec(mut self, ncryptsec: &str) -> Self {
+        self.ncryptsec = Some(Zeroizing::new(ncryptsec.to_owned()));
+        self
+    }
+
+    pub(crate) fn ncryptsec(&self) -> Option<&str> {
+        self.ncryptsec.as_ref().map(|s| s.as_str())
     }
 
     /// Parse a raw `nsec1...` bech32 or 64-char hex private key.
@@ -144,6 +164,7 @@ impl RawKeySession {
         Self {
             public_key: keys.public_key(),
             keys,
+            ncryptsec: None,
         }
     }
 }
@@ -287,10 +308,7 @@ mod tests {
     #[test]
     fn raw_key_rejects_malformed_json_and_names_method() {
         let keys = Keys::generate();
-        let s = RawKeySession {
-            public_key: keys.public_key(),
-            keys,
-        };
+        let s = RawKeySession::for_tests(keys);
         assert!(matches!(
             s.sign_event("{"),
             Err(NostrAuthError::Serialization(_))

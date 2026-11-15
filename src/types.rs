@@ -1,4 +1,5 @@
 use nostr::key::PublicKey;
+use nostr::nips::nip19::ToBech32;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -17,7 +18,8 @@ pub enum AuthResult {
     Passkey(PasskeySession),
     /// Read-only: public key only, no signing capability
     ReadOnly(ReadOnlyHandle),
-    /// NIP-49: ncryptsec password-decrypted key (in-memory only)
+    /// NIP-49: ncryptsec password-decrypted key. The decrypted key stays in memory; the ncryptsec
+    /// it came from is what gets saved.
     Ncryptsec(RawKeySession),
     /// Raw nsec paste: in-memory key (only with `insecure_nsec_input` feature)
     #[cfg(feature = "insecure_nsec_input")]
@@ -177,7 +179,8 @@ impl AuthResult {
         }
     }
 
-    /// Build a `PersistedSession` for localStorage (never stores the user's identity key).
+    /// Build a `PersistedSession` for localStorage. It never stores a decrypted key: an ncryptsec
+    /// session saves the still-encrypted ncryptsec, and a session without one saves nothing.
     pub fn to_persisted_session(&self) -> Option<PersistedSession> {
         match self {
             Self::Extension(h) => Some(PersistedSession {
@@ -186,6 +189,7 @@ impl AuthResult {
                 bunker_uri: None,
                 bunker_client_secret_hex: None,
                 passkey_credential_id: None,
+                ncryptsec: None,
             }),
             Self::Bunker(s) => Some(PersistedSession {
                 public_key_hex: s.public_key.to_hex(),
@@ -193,6 +197,7 @@ impl AuthResult {
                 bunker_uri: s.uri_to_persist(),
                 bunker_client_secret_hex: Some(s.client_secret_hex()),
                 passkey_credential_id: None,
+                ncryptsec: None,
             }),
             Self::Passkey(s) => Some(PersistedSession {
                 public_key_hex: s.public_key.to_hex(),
@@ -203,6 +208,7 @@ impl AuthResult {
                     &base64::engine::general_purpose::URL_SAFE_NO_PAD,
                     &s.credential_id,
                 )),
+                ncryptsec: None,
             }),
             Self::ReadOnly(h) => Some(PersistedSession {
                 public_key_hex: h.public_key.to_hex(),
@@ -210,8 +216,16 @@ impl AuthResult {
                 bunker_uri: None,
                 bunker_client_secret_hex: None,
                 passkey_credential_id: None,
+                ncryptsec: None,
             }),
-            Self::Ncryptsec(_) => None,
+            Self::Ncryptsec(s) => s.ncryptsec().map(|ncryptsec| PersistedSession {
+                public_key_hex: s.public_key.to_hex(),
+                method: PersistedMethod::Ncryptsec,
+                bunker_uri: None,
+                bunker_client_secret_hex: None,
+                passkey_credential_id: None,
+                ncryptsec: Some(ncryptsec.to_owned()),
+            }),
             #[cfg(feature = "insecure_nsec_input")]
             Self::RawNsec(_) => None,
         }
@@ -237,12 +251,13 @@ impl core::fmt::Debug for AuthResult {
 
 /// What gets written to localStorage.
 ///
-/// Never contains the user's Nostr identity secret key. **Does** contain a live NIP-46 pairing key
-/// (`bunker_client_secret_hex`) for a bunker session, which `logout` does not revoke. See
-/// "Bunkers" and "Security limits" in the README.
+/// Never contains a decrypted Nostr identity key. **Does** contain a live NIP-46 pairing key
+/// (`bunker_client_secret_hex`) for a bunker session, which `logout` does not revoke, and the
+/// still-encrypted `ncryptsec` for an ncryptsec session, whose password can be guessed offline by
+/// anyone who reads it. See "Bunkers" and "Security limits" in the README.
 ///
-/// `Debug` prints `bunker_uri` and `bunker_client_secret_hex` as `<redacted>`. Serde output carries
-/// them in full.
+/// `Debug` prints `bunker_uri`, `bunker_client_secret_hex` and `ncryptsec` as `<redacted>`. Serde
+/// output carries them in full.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PersistedSession {
@@ -257,6 +272,10 @@ pub struct PersistedSession {
     pub bunker_client_secret_hex: Option<String>,
     /// Passkey: base64url credential ID — used to call `credentials.get()`
     pub passkey_credential_id: Option<String>,
+    /// Ncryptsec: the NIP-49 `ncryptsec1...` string. Useless without the password, which is never
+    /// stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ncryptsec: Option<String>,
 }
 
 impl core::fmt::Debug for PersistedSession {
@@ -272,6 +291,7 @@ impl core::fmt::Debug for PersistedSession {
                 &self.bunker_client_secret_hex.as_ref().map(|_| REDACTED),
             )
             .field("passkey_credential_id", &self.passkey_credential_id)
+            .field("ncryptsec", &self.ncryptsec.as_ref().map(|_| REDACTED))
             .finish()
     }
 }
@@ -288,6 +308,8 @@ pub enum PersistedMethod {
     Passkey,
     /// Read-only public key.
     ReadOnly,
+    /// NIP-49 ncryptsec. Restores only with its password.
+    Ncryptsec,
 }
 
 impl PersistedMethod {
@@ -297,12 +319,35 @@ impl PersistedMethod {
             Self::Bunker => LoginMethod::Bunker,
             Self::Passkey => LoginMethod::Passkey,
             Self::ReadOnly => LoginMethod::ReadOnly,
+            Self::Ncryptsec => LoginMethod::Ncryptsec,
         }
     }
 }
 
+/// A saved session that `show_login` signs in with the user's action: a passkey with one tap, an
+/// ncryptsec with its password.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LockedSession {
+    /// The saved key. It is not proof of identity; it is what localStorage claims.
+    pub public_key: PublicKey,
+    /// `Passkey` or `Ncryptsec` today; match with a `_` arm.
+    pub method: LoginMethod,
+}
+
+impl LockedSession {
+    /// The key as an npub, or hex if bech32 encoding fails, as `NostrAuthContext::npub`.
+    pub fn npub(&self) -> String {
+        npub_or_hex(&self.public_key)
+    }
+}
+
+pub fn npub_or_hex(pk: &PublicKey) -> String {
+    pk.to_bech32().unwrap_or_else(|_| pk.to_hex())
+}
+
 /// Which login methods to show in the modal.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LoginMethod {
     /// NIP-07 browser extension.
@@ -541,10 +586,11 @@ mod tests {
             bunker_uri: Some(format!("bunker://x?secret={SENTINEL}")),
             bunker_client_secret_hex: Some(SENTINEL.to_owned()),
             passkey_credential_id: Some("credential".to_owned()),
+            ncryptsec: Some(format!("ncryptsec1{SENTINEL}")),
         };
         for text in [format!("{full:?}"), format!("{full:#?}")] {
             assert!(!text.contains(SENTINEL), "{text}");
-            assert_eq!(text.matches("<redacted>").count(), 2, "{text}");
+            assert_eq!(text.matches("<redacted>").count(), 3, "{text}");
             assert!(text.contains(&"ab".repeat(32)), "{text}");
             assert!(text.contains("Bunker"), "{text}");
             assert!(text.contains("credential"), "{text}");
@@ -553,11 +599,45 @@ mod tests {
         let empty = PersistedSession {
             bunker_uri: None,
             bunker_client_secret_hex: None,
+            ncryptsec: None,
             ..full
         };
         let text = format!("{empty:?}");
         assert!(text.contains("bunker_uri: None"), "{text}");
         assert!(text.contains("bunker_client_secret_hex: None"), "{text}");
+        assert!(text.contains("ncryptsec: None"), "{text}");
+    }
+
+    const CRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+    const CRYPTSEC_PUBKEY: &str =
+        "672a31bfc59d3f04548ec9b7daeeba2f61814e8ccc40448045007f5479f693a3";
+    const CRYPTSEC_SECRET_HEX: &str =
+        "3501454135014541350145413501453fefb02227e449e57cf4d3a3ce05378683";
+
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
+    fn ncryptsec_login_persists_only_ncryptsec_and_key() {
+        use crate::signers::RawKeySession;
+        let auth = AuthResult::Ncryptsec(RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap());
+        let saved = auth.to_persisted_session().unwrap();
+        assert_eq!(saved.method, PersistedMethod::Ncryptsec);
+        assert_eq!(saved.ncryptsec.as_deref(), Some(CRYPTSEC));
+        assert_eq!(saved.public_key_hex, CRYPTSEC_PUBKEY);
+        assert!(saved.bunker_uri.is_none());
+        assert!(saved.bunker_client_secret_hex.is_none());
+        assert!(saved.passkey_credential_id.is_none());
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(!json.contains(CRYPTSEC_SECRET_HEX), "{json}");
+        assert!(!json.contains("nostr\""), "{json}");
+        let back: PersistedSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, saved);
+    }
+
+    #[test]
+    fn ncryptsec_session_without_its_string_persists_nothing() {
+        use crate::signers::RawKeySession;
+        let auth = AuthResult::Ncryptsec(RawKeySession::for_tests(Keys::generate()));
+        assert!(auth.to_persisted_session().is_none());
     }
 
     #[test]

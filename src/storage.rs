@@ -1,9 +1,14 @@
+use std::sync::Arc;
+
 use nostr::key::PublicKey;
 
 use crate::signers::{
-    BunkerSession, Nip07Handle, PasskeySession, PendingPasskey, ReadOnlyHandle, public_key_from_hex,
+    BunkerSession, Nip07Handle, PasskeySession, PendingPasskey, RawKeySession, ReadOnlyHandle,
+    parse_ncryptsec, public_key_from_hex,
 };
-use crate::types::{AuthResult, LoginMethod, NostrAuthError, PersistedMethod, PersistedSession};
+use crate::types::{
+    AuthResult, LockedSession, LoginMethod, NostrAuthError, PersistedMethod, PersistedSession,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestorePlan {
@@ -13,6 +18,8 @@ pub enum RestorePlan {
     Restore,
     /// A stored passkey, which restores only from the login click. No prompt, session kept.
     AwaitClick,
+    /// A stored ncryptsec, which restores only with its password. No prompt, session kept.
+    AwaitPassword,
 }
 
 pub fn restore_plan(
@@ -26,6 +33,8 @@ pub fn restore_plan(
                 RestorePlan::NotAllowed
             } else if session.method == PersistedMethod::Passkey {
                 RestorePlan::AwaitClick
+            } else if session.method == PersistedMethod::Ncryptsec {
+                RestorePlan::AwaitPassword
             } else {
                 RestorePlan::Restore
             }
@@ -108,6 +117,75 @@ pub fn passkey_restore_target(
     Ok((stored_pk, cred_id))
 }
 
+/// The stored key and ncryptsec, after the checks that need no password and no scrypt.
+pub fn ncryptsec_restore_target(
+    session: &PersistedSession,
+) -> Result<(PublicKey, &str), NostrAuthError> {
+    let stored_pk = public_key_from_hex(&session.public_key_hex)?;
+    let ncryptsec = session
+        .ncryptsec
+        .as_deref()
+        .filter(|_| session.method == PersistedMethod::Ncryptsec)
+        .ok_or_else(|| NostrAuthError::InvalidNcryptsec("no ncryptsec stored".into()))?;
+    parse_ncryptsec(ncryptsec)?;
+    Ok((stored_pk, ncryptsec))
+}
+
+/// Refuses a key other than the stored one, so unlock never signs in as a key it did not show. A
+/// store rewritten in both fields still opens: the shown key is what localStorage claims.
+pub fn check_unlocked(
+    expected: &PublicKey,
+    session: RawKeySession,
+) -> Result<RawKeySession, NostrAuthError> {
+    if session.public_key == *expected {
+        Ok(session)
+    } else {
+        Err(NostrAuthError::InvalidNcryptsec(
+            "it opens a different key than the one saved with it".into(),
+        ))
+    }
+}
+
+/// A stored ncryptsec session's key (hex) and ncryptsec: all the unlock step copies out of storage.
+pub type NcryptsecId = (String, Arc<str>);
+
+pub fn is_ncryptsec_of(session: &PersistedSession, (key_hex, ncryptsec): &NcryptsecId) -> bool {
+    session.method == PersistedMethod::Ncryptsec
+        && session.public_key_hex == *key_hex
+        && session.ncryptsec.as_deref() == Some(&**ncryptsec)
+}
+
+/// The saved session `show_login` will unlock, or `None`. `refused` is a stored value the unlock
+/// step proved can never open.
+pub fn locked_session_of(
+    persist: bool,
+    stored: Option<&PersistedSession>,
+    refused: Option<&NcryptsecId>,
+    allowed: &[LoginMethod],
+) -> Option<LockedSession> {
+    let s = stored?;
+    if refused.is_some_and(|id| is_ncryptsec_of(s, id)) {
+        return None;
+    }
+    match restore_plan(persist, Some(s), allowed) {
+        RestorePlan::AwaitClick | RestorePlan::AwaitPassword => awaited_session(s).ok(),
+        _ => None,
+    }
+}
+
+/// A passkey or ncryptsec session that waits for the user, validated: the one rule behind
+/// `locked_session` and the load-time `restore_error`.
+pub fn awaited_session(session: &PersistedSession) -> Result<LockedSession, NostrAuthError> {
+    let public_key = match session.method {
+        PersistedMethod::Ncryptsec => ncryptsec_restore_target(session)?.0,
+        _ => passkey_restore_target(session)?.0,
+    };
+    Ok(LockedSession {
+        public_key,
+        method: session.method.login_method(),
+    })
+}
+
 /// A passkey restore whose `get` has already started.
 pub struct PendingRestore {
     pending: PendingPasskey,
@@ -138,7 +216,8 @@ pub fn begin_passkey_restore(
 /// its prompt. Public docs and the README quote it as "30 s".
 pub const EXTENSION_RESTORE_TIMEOUT_MS: u32 = 30_000;
 
-/// Restore a stored session. A passkey fails closed, never prompting; see
+/// Restore a stored session. A passkey fails closed, never prompting, and an ncryptsec never
+/// decrypts; see
 /// [`begin_passkey_restore`]. The extension's answer is bounded by
 /// [`EXTENSION_RESTORE_TIMEOUT_MS`]. A timeout is `ExtensionTimeout`, and the caller keeps the
 /// session as for any failure.
@@ -185,6 +264,12 @@ async fn restore_session_within(
             passkey_restore_target(session)?;
             Err(NostrAuthError::PasskeyFailed(
                 "a passkey restores only from the login click".into(),
+            ))
+        }
+        PersistedMethod::Ncryptsec => {
+            ncryptsec_restore_target(session)?;
+            Err(NostrAuthError::InvalidNcryptsec(
+                "an ncryptsec restores only with its password".into(),
             ))
         }
         PersistedMethod::ReadOnly => Ok(AuthResult::ReadOnly(ReadOnlyHandle {
@@ -238,6 +323,7 @@ pub mod tests {
             bunker_uri: None,
             bunker_client_secret_hex: None,
             passkey_credential_id: None,
+            ncryptsec: None,
         }
     }
 
@@ -261,11 +347,12 @@ pub mod tests {
         }
     }
 
-    const METHODS: [PersistedMethod; 4] = [
+    const METHODS: [PersistedMethod; 5] = [
         PersistedMethod::Extension,
         PersistedMethod::Bunker,
         PersistedMethod::Passkey,
         PersistedMethod::ReadOnly,
+        PersistedMethod::Ncryptsec,
     ];
 
     #[test]
@@ -442,6 +529,116 @@ pub mod tests {
         assert!(e.to_string().contains("login click"));
     }
 
+    const CRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+    const CRYPTSEC_PUBKEY: &str =
+        "672a31bfc59d3f04548ec9b7daeeba2f61814e8ccc40448045007f5479f693a3";
+
+    fn ncryptsec_session(pk: &str, ncryptsec: Option<&str>) -> PersistedSession {
+        PersistedSession {
+            ncryptsec: ncryptsec.map(str::to_owned),
+            ..session(pk, PersistedMethod::Ncryptsec)
+        }
+    }
+
+    #[test]
+    fn ncryptsec_target_rejects_unopenable_stored_data() {
+        use nostr::nips::nip19::{FromBech32, ToBech32};
+        use nostr::nips::nip49::EncryptedSecretKey;
+        let mut bytes = EncryptedSecretKey::from_bech32(CRYPTSEC).unwrap().as_vec();
+        *bytes.get_mut(1).unwrap() = EncryptedSecretKey::MAX_LOG_N + 1;
+        let over = EncryptedSecretKey::from_slice(&bytes)
+            .unwrap()
+            .to_bech32()
+            .unwrap();
+        for bad in [
+            ncryptsec_session("zz", Some(CRYPTSEC)),
+            ncryptsec_session(OFF_CURVE, Some(CRYPTSEC)),
+            ncryptsec_session(USER, None),
+            ncryptsec_session(USER, Some("not-an-ncryptsec")),
+            ncryptsec_session(USER, Some(&over)),
+        ] {
+            assert!(ncryptsec_restore_target(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn ncryptsec_target_returns_key_and_string() {
+        let stored = ncryptsec_session(CRYPTSEC_PUBKEY, Some(CRYPTSEC));
+        let (pk, nc) = ncryptsec_restore_target(&stored).unwrap();
+        assert_eq!(pk.to_hex(), CRYPTSEC_PUBKEY);
+        assert_eq!(nc, CRYPTSEC);
+    }
+
+    #[test]
+    fn restore_session_never_decrypts_ncryptsec() {
+        let e = restore_err(&ncryptsec_session(CRYPTSEC_PUBKEY, Some(CRYPTSEC)));
+        assert!(e.to_string().contains("with its password"));
+    }
+
+    #[test]
+    fn unlock_refuses_another_key() {
+        let opened = || RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap();
+        let other = PublicKey::from_hex(OTHER).unwrap();
+        assert!(matches!(
+            check_unlocked(&other, opened()),
+            Err(NostrAuthError::InvalidNcryptsec(m)) if m.contains("different key")
+        ));
+        let own = PublicKey::from_hex(CRYPTSEC_PUBKEY).unwrap();
+        assert!(check_unlocked(&own, opened()).is_ok());
+    }
+
+    fn id_of(s: &PersistedSession) -> NcryptsecId {
+        (
+            s.public_key_hex.clone(),
+            Arc::from(s.ncryptsec.as_deref().unwrap_or_default()),
+        )
+    }
+
+    #[test]
+    fn locked_session_of_table() {
+        let all = LoginMethod::all();
+        let nc = ncryptsec_session(CRYPTSEC_PUBKEY, Some(CRYPTSEC));
+        let locked = |s: &PersistedSession, refused: Option<&PersistedSession>| {
+            let refused = refused.map(id_of);
+            locked_session_of(true, Some(s), refused.as_ref(), &all)
+                .map(|l| (l.public_key.to_hex(), l.method))
+        };
+        assert_eq!(
+            locked(&nc, None),
+            Some((CRYPTSEC_PUBKEY.to_owned(), LoginMethod::Ncryptsec))
+        );
+        assert_eq!(locked(&nc, Some(&nc)), None);
+        let other_key = ncryptsec_session(USER, Some(CRYPTSEC));
+        let other_string = PersistedSession {
+            ncryptsec: Some(format!("{CRYPTSEC}x")),
+            ..nc.clone()
+        };
+        assert!(locked(&nc, Some(&other_key)).is_some());
+        assert!(locked(&nc, Some(&other_string)).is_some());
+        let passkey = passkey_session(USER, Some("AAEC"));
+        assert_eq!(
+            locked(&passkey, None),
+            Some((USER.to_owned(), LoginMethod::Passkey))
+        );
+        assert_eq!(
+            locked(&session(USER, PersistedMethod::ReadOnly), None),
+            None
+        );
+        assert_eq!(
+            locked(&session(USER, PersistedMethod::Extension), None),
+            None
+        );
+        assert_eq!(locked(&ncryptsec_session(USER, None), None), None);
+        let without: Vec<_> = all
+            .iter()
+            .filter(|m| **m != LoginMethod::Ncryptsec)
+            .cloned()
+            .collect();
+        assert!(locked_session_of(true, Some(&nc), None, &without).is_none());
+        assert!(locked_session_of(false, Some(&nc), None, &all).is_none());
+        assert!(locked_session_of(true, None, None, &all).is_none());
+    }
+
     #[test]
     fn undecodable_json_is_an_error() {
         assert!(
@@ -466,6 +663,16 @@ pub mod tests {
         ];
         for (stored, want) in cases {
             assert_eq!(restore_is_current(stored.as_ref(), &restored), want);
+        }
+        let unlocked =
+            AuthResult::Ncryptsec(RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap());
+        let cases = [
+            (ncryptsec_session(CRYPTSEC_PUBKEY, Some(CRYPTSEC)), true),
+            (ncryptsec_session(USER, Some(CRYPTSEC)), false),
+            (session(CRYPTSEC_PUBKEY, PersistedMethod::ReadOnly), false),
+        ];
+        for (stored, want) in cases {
+            assert_eq!(restore_is_current(Some(&stored), &unlocked), want);
         }
     }
 
@@ -541,6 +748,7 @@ pub mod tests {
             (Some(&stored), Some(next.clone())),
             (Some(&stored), None),
             (None, Some(next)),
+            (None, Some(ncryptsec_session(USER, Some(CRYPTSEC)))),
         ] {
             assert!(matches!(action(false, s, n), LoginStorageAction::Keep));
         }
@@ -558,10 +766,10 @@ pub mod tests {
                 restore_plan(true, Some(&s), &without),
                 RestorePlan::NotAllowed
             );
-            let want = if method == PersistedMethod::Passkey {
-                RestorePlan::AwaitClick
-            } else {
-                RestorePlan::Restore
+            let want = match method {
+                PersistedMethod::Passkey => RestorePlan::AwaitClick,
+                PersistedMethod::Ncryptsec => RestorePlan::AwaitPassword,
+                _ => RestorePlan::Restore,
             };
             assert_eq!(restore_plan(true, Some(&s), &LoginMethod::all()), want);
         }
@@ -591,6 +799,8 @@ pub mod tests {
             (true, RestorePlan::Nothing, false),
             (false, RestorePlan::AwaitClick, false),
             (true, RestorePlan::AwaitClick, false),
+            (false, RestorePlan::AwaitPassword, false),
+            (true, RestorePlan::AwaitPassword, false),
         ] {
             assert_eq!(initial_restoring(hydrating, plan), want);
         }
@@ -670,6 +880,7 @@ mod wasm_tests {
             bunker_uri: None,
             bunker_client_secret_hex: None,
             passkey_credential_id: None,
+            ncryptsec: None,
         }
     }
 
@@ -892,6 +1103,7 @@ mod tampered_bunker {
             )),
             bunker_client_secret_hex: Some(client.secret_key().to_secret_hex()),
             passkey_credential_id: None,
+            ncryptsec: None,
         }
     }
 

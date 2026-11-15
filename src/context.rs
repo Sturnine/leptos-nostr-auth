@@ -10,16 +10,17 @@ use leptos::task::spawn_local;
 use leptos_use_event_listener::use_event_listener;
 use leptos_use_storage::{UseStorageError, UseStorageOptions, use_local_storage_with_options};
 use leptos_use_window::use_window;
-use nostr::nips::nip19::ToBech32;
 
 use crate::modal::{Attempt, NostrAuthModal, ProviderLink};
 use crate::platform::{effective_rp_id, page_has_been_active, prompt_allowed};
 use crate::storage::{
-    LoginStorageAction, RestorePlan, begin_passkey_restore, initial_restoring,
-    is_logout_storage_event, login_storage_action, passkey_restore_target, restore_is_current,
-    restore_plan, restore_session,
+    LoginStorageAction, NcryptsecId, RestorePlan, awaited_session, begin_passkey_restore,
+    initial_restoring, is_logout_storage_event, is_ncryptsec_of, locked_session_of,
+    login_storage_action, restore_is_current, restore_plan, restore_session,
 };
-use crate::types::{AuthResult, NostrAuthConfig, NostrAuthError, PersistedSession};
+use crate::types::{
+    AuthResult, LockedSession, NostrAuthConfig, NostrAuthError, PersistedSession, npub_or_hex,
+};
 
 /// Reactive auth context — available anywhere inside [`NostrAuthProvider`].
 ///
@@ -43,7 +44,8 @@ pub struct NostrAuthContext {
     /// passkey, from the login click.
     ///
     /// False on the first hydrated render, because server HTML cannot know storage, and false at
-    /// load for a stored passkey, which restores only from the login click. It can stay true for
+    /// load for a stored passkey or ncryptsec, which restore only from the login click or with
+    /// their password. It can stay true for
     /// minutes while a bunker relay is down, and an extension restore gives up after 30 s with
     /// `ExtensionTimeout`. Do not hide the login button behind it. A login, a logout or a logout in
     /// another tab ends it at once.
@@ -56,14 +58,22 @@ pub struct NostrAuthContext {
     /// restorable stored, it reads true with nothing saved until logout, reload or a refetch from
     /// another tab's change.
     pub has_saved_session: Signal<bool>,
+    /// The saved passkey or ncryptsec that `show_login` unlocks, and whose key it is. `Some` only
+    /// when nobody is logged in, no restore is running, and the method is allowed and can open.
+    /// A stored value that can never open, found at load or by the unlock step, reads `None` and
+    /// is reported in `restore_error`: offer "Forget". A key that does not match its ncryptsec shows
+    /// only once the unlock decrypts it, and reads `None` then until the page reloads. A failed
+    /// passkey click keeps it `Some`. As `has_saved_session`, `None` on the first hydrated render.
+    pub locked_session: Signal<Option<LockedSession>>,
     /// Why the stored session did not restore. It is kept and retried on the next load, or for a
-    /// passkey, on the next login click. `None` for a passkey awaiting that click, since nothing has
-    /// failed; stored passkey data that can never restore is reported at load. Cleared by a login,
-    /// a logout, a logout in another tab or a new attempt.
+    /// passkey, on the next login click. `None` for a passkey or ncryptsec awaiting its click or
+    /// password, since nothing has failed; stored data of either that can never open is reported at
+    /// load. Cleared by a login, a logout, a logout in another tab or a new attempt.
     ///
     /// Treat the text as untrusted display text: it can carry words from an extension or a relay.
     pub restore_error: Signal<Option<NostrAuthError>>,
-    /// Open the login modal, or restore a stored passkey.
+    /// Open the login modal, or restore a stored passkey. With a stored ncryptsec the modal opens
+    /// on a password-only unlock step for that key.
     ///
     /// Call `show_login` from a user gesture, such as a click handler, with nothing deferred before
     /// it, so that restoring a passkey takes one tap. Before the user's first interaction with the
@@ -117,19 +127,23 @@ pub fn try_use_nostr_auth() -> Option<NostrAuthContext> {
 /// Wraps your application root to provide reactive Nostr authentication state.
 ///
 /// Automatically attempts to restore a cached session from localStorage on mount, except a stored
-/// passkey, which restores only from [`NostrAuthContext::show_login`] and never prompts on load.
+/// passkey, which restores only from [`NostrAuthContext::show_login`] and never prompts on load, and
+/// a stored ncryptsec, which needs its password and is asked for it by `show_login`.
 /// Renders [`NostrAuthModal`] internally so you don't need to add it yourself.
 ///
 /// # Session restore
 ///
-/// A login is saved under [`NostrAuthConfig::storage_key`] unless it is an ncryptsec or raw nsec
-/// login, and never with the user's Nostr secret key. A failed or cancelled prompt never clears the
-/// stored session:
+/// A login is saved under [`NostrAuthConfig::storage_key`] unless it is a raw nsec login, and never
+/// with a decrypted key: an ncryptsec login saves the ncryptsec, which is useless without the
+/// password. A failed or cancelled prompt never clears the stored session:
 ///
 /// | Case | Stored session | Result |
 /// |---|---|---|
 /// | `logout`, logged in or not | Deleted | Logged out. An open modal closes, a login in it is cancelled and typed input is discarded |
 /// | Stored passkey at page load | Kept | Logged out, no prompt. `restore_error` stays `None` unless the stored data can never restore. The login click restores it |
+/// | Stored ncryptsec at page load | Kept | Logged out, no prompt and no decrypting. `restore_error` stays `None` unless the stored data can never open. `show_login` opens a password-only unlock step |
+/// | Wrong password at unlock | Kept | The step shows the error and stays |
+/// | Unlock finds the saved ncryptsec can never open (it is invalid, or opens another key than the stored one) | Kept | Switches to the full ncryptsec step; `restore_error` says why and `locked_session` reads `None`, until the page reloads, a login or a logout. A reload offers it again, and the unlock decrypts again to find out |
 /// | Failed or cancelled restore, any method | Kept | Logged out, retried on the next load (once per load, never retried on a timer), or for a passkey on the next login click, whose failure also opens the modal |
 /// | Another key on restore, any method | Kept | The other key is never adopted. `restore_error` is `SignerKeyMismatch`; switching the signer back restores it |
 /// | Extension returns an invalid key string on restore | Kept | `restore_error` is `InvalidPublicKey`; restores once the extension returns the stored key |
@@ -243,6 +257,8 @@ pub fn NostrAuthProvider(
     let (restoring, set_restoring) = signal(initial_restoring(hydrating, setup_plan));
     let (settled, set_settled) = signal(!hydrating);
     let (restore_error, set_restore_error) = signal(None::<NostrAuthError>);
+    // Compared by value, so another tab's write lifts it.
+    let (refused, set_refused) = signal(None::<NcryptsecId>);
 
     let attempt = Attempt::new();
     let restore_handle = StoredValue::new(None::<AbortHandle>);
@@ -265,6 +281,7 @@ pub fn NostrAuthProvider(
         });
         set_restoring.set(false);
         set_restore_error.set(None);
+        set_refused.set(None);
         clear_on_write_failure.set_value(None);
     };
 
@@ -354,8 +371,8 @@ pub fn NostrAuthProvider(
                     }
                 });
             }
-            (RestorePlan::AwaitClick, Some(session)) => {
-                if let Err(e) = passkey_restore_target(&session) {
+            (RestorePlan::AwaitClick | RestorePlan::AwaitPassword, Some(session)) => {
+                if let Err(e) = awaited_session(&session) {
                     set_restore_error.set(Some(e));
                 }
             }
@@ -368,14 +385,8 @@ pub fn NostrAuthProvider(
 
     let public_key = Signal::derive(move || auth.with(|a| a.as_ref().map(AuthResult::public_key)));
 
-    let npub = Signal::derive(move || {
-        auth.with(|a| {
-            a.as_ref().map(|a| {
-                let pk = a.public_key();
-                pk.to_bech32().unwrap_or_else(|_| pk.to_hex())
-            })
-        })
-    });
+    let npub =
+        Signal::derive(move || auth.with(|a| a.as_ref().map(|a| npub_or_hex(&a.public_key()))));
 
     let is_authenticated = Signal::derive(move || auth.with(Option::is_some));
 
@@ -424,6 +435,25 @@ pub fn NostrAuthProvider(
     let has_saved_session =
         Signal::derive(move || settled.get() && stored_session.with(Option::is_some));
 
+    let locked_session: Signal<Option<LockedSession>> = Memo::new(move |_| {
+        if !settled.get() || restoring.get() || auth.with(Option::is_some) {
+            return None;
+        }
+        let refused = refused.get();
+        // `.with`: a clone would copy a bunker's pairing key.
+        stored_session.with(|s| {
+            cfg.with_value(|c| {
+                locked_session_of(
+                    c.persist_session,
+                    s.as_ref(),
+                    refused.as_ref(),
+                    &c.allowed_methods,
+                )
+            })
+        })
+    })
+    .into();
+
     let logout = Callback::new({
         let delete = delete_stored_session.clone();
         move |(): ()| {
@@ -442,6 +472,7 @@ pub fn NostrAuthProvider(
         is_authenticated,
         is_restoring: restoring.into(),
         has_saved_session,
+        locked_session,
         restore_error: restore_error.into(),
         show_login,
         logout,
@@ -476,9 +507,19 @@ pub fn NostrAuthProvider(
         set_show_modal.set(false);
     });
 
+    let refuse_saved = Callback::new(move |(id, error): (NcryptsecId, NostrAuthError)| {
+        if stored_session.with_untracked(|s| s.as_ref().is_some_and(|s| is_ncryptsec_of(s, &id))) {
+            set_refused.set(Some(id));
+            set_restore_error.set(Some(error));
+        }
+    });
+
     let link = ProviderLink {
         attempt,
         is_authenticated,
+        locked: locked_session,
+        saved: stored_session,
+        refuse_saved,
     };
 
     view! {
@@ -505,6 +546,19 @@ mod tests {
     const READ_ONLY_JSON: &str = r#"{"public_key_hex":"82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2","method":"ReadOnly","bunker_uri":null,"bunker_client_secret_hex":null,"passkey_credential_id":null}"#;
     const BUNKER_JSON: &str = r#"{"public_key_hex":"aa","method":"Bunker","bunker_uri":"bunker://bb?relay=wss%3A%2F%2Frelay.example","bunker_client_secret_hex":"cc","passkey_credential_id":null}"#;
 
+    const NCRYPTSEC_JSON: &str = r#"{"public_key_hex":"aa","method":"Ncryptsec","bunker_uri":null,"bunker_client_secret_hex":null,"passkey_credential_id":null,"ncryptsec":"ncryptsec1xx"}"#;
+
+    fn ncryptsec() -> PersistedSession {
+        PersistedSession {
+            public_key_hex: "aa".to_owned(),
+            method: PersistedMethod::Ncryptsec,
+            bunker_uri: None,
+            bunker_client_secret_hex: None,
+            passkey_credential_id: None,
+            ncryptsec: Some("ncryptsec1xx".to_owned()),
+        }
+    }
+
     fn read_only() -> PersistedSession {
         PersistedSession {
             public_key_hex: "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2"
@@ -513,6 +567,7 @@ mod tests {
             bunker_uri: None,
             bunker_client_secret_hex: None,
             passkey_credential_id: None,
+            ncryptsec: None,
         }
     }
 
@@ -523,6 +578,7 @@ mod tests {
             bunker_uri: Some("bunker://bb?relay=wss%3A%2F%2Frelay.example".to_owned()),
             bunker_client_secret_hex: Some("cc".to_owned()),
             passkey_credential_id: None,
+            ncryptsec: None,
         }
     }
 
@@ -531,6 +587,7 @@ mod tests {
         let enc = |s| JsonSerdeCodec::encode(&Some(s)).unwrap();
         assert_eq!(enc(read_only()), READ_ONLY_JSON);
         assert_eq!(enc(bunker()), BUNKER_JSON);
+        assert_eq!(enc(ncryptsec()), NCRYPTSEC_JSON);
     }
 
     #[test]
@@ -549,6 +606,7 @@ mod tests {
         let dec = |s| <JsonSerdeCodec as Decoder<Option<PersistedSession>>>::decode(s).unwrap();
         assert_eq!(dec(READ_ONLY_JSON), Some(read_only()));
         assert_eq!(dec(BUNKER_JSON), Some(bunker()));
+        assert_eq!(dec(NCRYPTSEC_JSON), Some(ncryptsec()));
     }
 }
 
@@ -572,6 +630,7 @@ mod stale_restore {
             bunker_uri: None,
             bunker_client_secret_hex: None,
             passkey_credential_id: None,
+            ncryptsec: None,
         }))
         .unwrap()
     }
