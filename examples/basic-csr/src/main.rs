@@ -58,6 +58,21 @@ fn HomePage() -> impl IntoView {
                         "Login with Nostr"
                     </button>
                     <Show when=move || auth.has_saved_session.get() fallback=|| ()>
+                        {move || {
+                            auth.locked_session
+                                .get()
+                                .map(|locked| {
+                                    let who = locked.npub();
+                                    view! {
+                                        <button
+                                            class="btn"
+                                            on:click=move |_| auth.show_login.run(())
+                                        >
+                                            {format!("Unlock {who}")}
+                                        </button>
+                                    }
+                                })
+                        }}
                         <p class="meta">
                             {move || {
                                 auth.restore_error

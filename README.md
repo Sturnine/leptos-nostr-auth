@@ -9,7 +9,7 @@ A headless Nostr login modal for [Leptos](https://leptos.dev) 0.8. It ships the 
 | Nostr Connect / bunker (NIP-46) | Always. Paste a `bunker://` URI; `nostrconnect://` is not supported | Yes | Yes, through the stored relays |
 | Passkey (WebAuthn PRF) | WebAuthn exists and PRF is not reported unsupported. Listed first on macOS and iOS | Yes | Yes, from the next login click only |
 | Read-only (npub) | Always | No | Yes |
-| Encrypted key (NIP-49 `ncryptsec`) | Always | Yes | No, the user decrypts again |
+| Encrypted key (NIP-49 `ncryptsec`) | Always | Yes | Asks for the password only, from the next `show_login` |
 | Raw `nsec` paste | Only with the `insecure_nsec_input` feature and `LoginMethod::RawNsec` in `allowed_methods` | Yes | No |
 
 ## Install
@@ -60,8 +60,14 @@ fn Home() -> impl IntoView {
             when=move || auth.is_authenticated.get()
             fallback=move || view! {
                 <button on:click=move |_| auth.show_login.run(())>"Log in with Nostr"</button>
-                // A kept session that cannot restore needs a way out
+                // A kept session needs a way out, and may be one the user can unlock
                 <Show when=move || auth.has_saved_session.get()>
+                    {move || auth.locked_session.get().map(|locked| {
+                        let who = locked.npub();
+                        view! {
+                            <button on:click=move |_| auth.show_login.run(())>{format!("Unlock {who}")}</button>
+                        }
+                    })}
                     <p>{move || auth.restore_error.get().map(|e| format!("Not restored: {e}"))}</p>
                     <button on:click=move |_| auth.logout.run(())>"Forget saved session"</button>
                 </Show>
@@ -85,8 +91,9 @@ fn Home() -> impl IntoView {
 | `is_authenticated` | A session is present. Not proof of identity, see [Security limits](#security-limits) |
 | `is_restoring` | A saved session is being restored |
 | `has_saved_session` | localStorage holds a session, restored or not |
+| `locked_session` | A saved passkey or ncryptsec that `show_login` unlocks, with its key and method. `None` if it can never open (see `restore_error`) |
 | `restore_error` | Why the saved session did not restore. Untrusted display text |
-| `show_login` | Opens the modal, or restores a saved passkey. Call it from a click handler |
+| `show_login` | Opens the modal, or restores a saved passkey. With a saved ncryptsec it opens a password-only unlock step. Call it from a click handler |
 | `logout` | Logs out, deletes the saved session, closes the modal and ends a bunker session for good |
 
 The full contracts are on [docs.rs](https://docs.rs/leptos-nostr-auth).
@@ -371,19 +378,39 @@ memory.
 
 ## Session restore
 
-A successful login is saved to localStorage, except encrypted-key and raw `nsec` logins. The Nostr
-secret key is never saved. The provider restores a saved session on load. A passkey waits for the
-next `show_login`.
+A successful login is saved to localStorage, except raw `nsec` logins. A decrypted key is never
+saved. The provider restores a saved session on load. A passkey and an encrypted key wait for the
+next `show_login`: the passkey for one tap, the encrypted key for its password.
+
+What is saved per method, besides the public key:
+
+| Method | Saved |
+|---|---|
+| Extension | Nothing more. It is asked for its key again |
+| Bunker | The secret-stripped `bunker://` URI and the NIP-46 pairing key |
+| Passkey | The credential ID |
+| Read-only | Nothing more |
+| Encrypted key | The `ncryptsec1...` string. It is useless without the password, which is never saved |
+| Raw `nsec` | Nothing: not saved at all |
 
 - **A failed restore keeps the session.** The user is logged out, `restore_error` says why, and
   restore is tried again on the next load. Only `logout`, or a login as a different identity,
   removes it. So show a "forget saved session" button when `has_saved_session` is true and
   `is_authenticated` is false, as in the quick start.
+- **Offer "Unlock" when `locked_session` is `Some`.** Call `show_login` from it, as in the quick
+  start, and keep "Forget saved session" beside it in every case. A saved ncryptsec otherwise
+  leaves a logged-out page after every reload. A wrong password keeps it; a stored value no
+  password can open, found at load or at unlock, is reported in `restore_error` and not offered
+  again until the page reloads (a key that does not match its ncryptsec only shows when the unlock
+  decrypts it, so a reload offers it once more). A login or a logout removes it.
 - **Never hide the login button behind `is_restoring`.** With a relay down a restore can take
   minutes, and an extension restore gives up after 30 s with `ExtensionTimeout`. A login or logout
   ends it at once. It is false on the first hydrated render.
 - An extension that asks permission on every call prompts on every load until the user forgets
   the session.
+- **A login replaces the saved session, even for the same key.** Someone with a saved extension
+  session who logs in once with their ncryptsec is asked for the password on every reload until
+  they log in with the extension again.
 - Removing the saved session in one tab logs out the others.
 
 The full rules, per case and across tabs, are on `NostrAuthProvider` on docs.rs.
@@ -406,7 +433,10 @@ Every element has a `data-nostr-*` attribute:
 [data-nostr-badge]           { /* "Recommended" */ }
 [data-nostr-divider]         { /* "More options" */ }
 [data-nostr-advanced]        { /* "Advanced" disclosure */ }
-[data-nostr-step]            { /* a login step; the value names it */ }
+[data-nostr-step]            { /* a login step; the value names it: extension, bunker, passkey,
+                                 readonly, ncryptsec, ncryptsec-unlock, nsec-warn, nsec */ }
+[data-nostr-busy]            { /* on a step while it waits for a signer, a ceremony or a decrypt */ }
+[data-nostr-switch-key]      { /* "Use a different key" on the unlock step */ }
 [data-nostr-tip]             { /* tip */ }
 [data-nostr-info]            { /* note */ }
 [data-nostr-warning]         { /* security warning */ }
@@ -434,6 +464,13 @@ pasted key. Prefer an extension or a bunker, which keep the key out of the page.
 - **Serve a strict Content-Security-Policy.** The SSR example sends one.
 - **`is_authenticated` is not proof of identity.** A read-only login is any pasted `npub`, and a
   script on the page can change what the page believes. A server must check a signed challenge.
+- **A saved ncryptsec can be guessed offline.** Anyone who can read localStorage (a script on the
+  page, a malicious extension, a disk read) gets the encrypted key and can try passwords at
+  scrypt's cost, which a weak password does not survive. Tell users to choose a strong password,
+  or set `persist_session: false` to save nothing.
+- **A password manager may save the ncryptsec password for this site.** Then the saved ncryptsec
+  and its password sit on the same device, and anyone who can use that password manager there needs
+  nothing else.
 - **Passkey, encrypted-key and raw `nsec` sessions hold the secret key in wasm memory.** A script
   on the page can read it, or read the PRF output by hooking `navigator.credentials.get`.
   Extension and bunker sessions keep the key out, but a script can still ask them to sign or
@@ -448,7 +485,8 @@ pasted key. Prefer an extension or a bunker, which keep the key out of the page.
 ### What is wiped, and what is not
 
 Wiped: the login fields' Rust buffers (on submit, on rejection and on leaving the step), the
-submitted bunker URI and `ncryptsec` copies, the passkey PRF bytes, and the key inside `Keys` on
+submitted bunker URI and `ncryptsec` copies, the `ncryptsec` copy an encrypted-key session keeps for
+saving, the passkey PRF bytes, and the key inside `Keys` on
 drop (`nostr`'s best-effort `non_secure_erase`). With the `ncryptsec` worker, the password, the
 encrypted payload and the decrypted key cross to and from the worker only as transferred byte
 buffers. The worker zero-fills the inputs it receives, the main thread zero-fills the returned
