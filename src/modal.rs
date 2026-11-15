@@ -8,6 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_use_event_listener::use_event_listener;
 use leptos_use_window::use_window;
+use nostr::key::PublicKey;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::{Os, Platform, effective_rp_id, passkey_option_visible, prf_capability};
@@ -16,7 +17,12 @@ use crate::signers::{
     auth_url_host, current_auth_url, dismiss_auth_prompt, register_auth_presenter,
     unregister_auth_presenter,
 };
-use crate::types::{AuthResult, LoginMethod, NostrAuthConfig, NostrAuthError};
+use std::sync::Arc;
+
+use crate::storage::{NcryptsecId, check_unlocked, ncryptsec_restore_target};
+use crate::types::{
+    AuthResult, LockedSession, LoginMethod, NostrAuthConfig, NostrAuthError, PersistedSession,
+};
 
 #[derive(Clone, PartialEq)]
 enum ModalStep {
@@ -26,6 +32,7 @@ enum ModalStep {
     Passkey,
     ReadOnly,
     Ncryptsec,
+    NcryptsecUnlock,
     #[cfg(feature = "insecure_nsec_input")]
     RawNsecWarn,
     #[cfg(feature = "insecure_nsec_input")]
@@ -41,6 +48,7 @@ impl ModalStep {
             Self::Passkey => "Passkey",
             Self::ReadOnly => "Read-Only Access",
             Self::Ncryptsec => "Encrypted Key",
+            Self::NcryptsecUnlock => "Unlock your key",
             #[cfg(feature = "insecure_nsec_input")]
             Self::RawNsecWarn | Self::RawNsec => "Secret Key",
         }
@@ -92,6 +100,10 @@ pub(crate) struct ProviderLink {
     /// The provider's modal's login in flight, cancelled synchronously on logout and removal.
     pub(crate) attempt: Attempt,
     pub(crate) is_authenticated: Signal<bool>,
+    pub(crate) locked: Signal<Option<LockedSession>>,
+    pub(crate) saved: Signal<Option<PersistedSession>>,
+    /// Marks a stored value the unlock step proved can never open, so `locked` reads `None`.
+    pub(crate) refuse_saved: Callback<(NcryptsecId, NostrAuthError)>,
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -116,6 +128,12 @@ fn has_more_options(methods: &[LoginMethod]) -> bool {
         LoginMethod::RawNsec => true,
         LoginMethod::Extension | LoginMethod::Bunker | LoginMethod::Passkey => false,
     })
+}
+
+fn unlock_step(locked: Option<&LockedSession>) -> Option<ModalStep> {
+    locked
+        .filter(|locked| locked.method == LoginMethod::Ncryptsec)
+        .map(|_| ModalStep::NcryptsecUnlock)
 }
 
 fn to_method_list(
@@ -203,8 +221,9 @@ fn deliver(
 /// reuses them, and nothing here can reach copies inside `nostr`. Emptying a field does not undo
 /// a paste, so a secret pasted in the wrong field should be treated as exposed.
 ///
-/// The secret key and read-only inputs empty on every submit. The password input does too, except
-/// on a submit refused for an empty ncryptsec field, which keeps it. A bunker URI stays after a
+/// The secret key and read-only inputs empty on every submit. The password inputs do too, except
+/// on a submit refused for an empty ncryptsec field, which keeps it. The unlock step never holds the
+/// saved ncryptsec in a field. A bunker URI stays after a
 /// failed login, in clear text with any secret, until the user leaves the step, unless it is
 /// [`NostrAuthError::InvalidBunkerUri`], which empties it. An ncryptsec string stays after
 /// [`NostrAuthError::WrongPassword`] and [`NostrAuthError::NcryptsecDecryptAborted`], and empties on
@@ -260,6 +279,9 @@ pub fn NostrAuthModal(
 
     let link = use_context::<ProviderLink>();
     let attempt = link.map_or_else(Attempt::new, |link| link.attempt);
+    let locked = link.map_or_else(|| Signal::stored(None), |link| link.locked);
+    let saved = link.map_or_else(|| Signal::stored(None), |link| link.saved);
+    let refuse = link.map_or_else(|| Callback::new(|_| {}), |link| link.refuse_saved);
     on_cleanup(move || {
         attempt.cancel();
     });
@@ -277,9 +299,13 @@ pub fn NostrAuthModal(
         }
     };
 
+    // The step for the next open is chosen while closed, so the first frame is already right. It
+    // reads `locked` only then: a change while open must not move the user.
     Effect::new(move |_| {
         if !open.get() {
             to_list();
+            let step = locked.with(|locked| unlock_step(locked.as_ref()));
+            set_step.set(step.unwrap_or(ModalStep::MethodSelect));
         }
     });
 
@@ -343,6 +369,7 @@ pub fn NostrAuthModal(
                                         platform=platform
                                         config=config.get_value()
                                         set_step=set_step
+                                        locked=locked
                                     />
                                 }.into_any(),
                                 ModalStep::Extension => view! {
@@ -381,6 +408,18 @@ pub fn NostrAuthModal(
                                         attempt=attempt
                                         on_auth=on_auth
                                         set_error=set_error
+                                        config=config.get_value()
+                                    />
+                                }.into_any(),
+                                ModalStep::NcryptsecUnlock => view! {
+                                    <StepNcryptsecUnlock
+                                        attempt=attempt
+                                        on_auth=on_auth
+                                        set_error=set_error
+                                        set_step=set_step
+                                        saved=saved
+                                        locked=locked
+                                        refuse=refuse
                                         config=config.get_value()
                                     />
                                 }.into_any(),
@@ -532,6 +571,7 @@ fn StepMethodSelect(
     platform: ReadSignal<Platform>,
     config: NostrAuthConfig,
     set_step: WriteSignal<ModalStep>,
+    locked: Signal<Option<LockedSession>>,
 ) -> impl IntoView {
     let methods = config.allowed_methods;
     let has = |m: &LoginMethod| methods.contains(m);
@@ -619,7 +659,13 @@ fn StepMethodSelect(
                     icon=icon_ncryptsec
                     title="Encrypted Key"
                     subtitle="Decrypt an ncryptsec1... key with your password"
-                    on_click=move || set_step.set(ModalStep::Ncryptsec)
+                    on_click=move || {
+                        set_step.set(
+                            locked
+                                .with_untracked(|locked| unlock_step(locked.as_ref()))
+                                .unwrap_or(ModalStep::Ncryptsec),
+                        );
+                    }
                 />
             </Show>
 
@@ -729,7 +775,7 @@ fn StepExtension(
     Effect::new(move |_| login());
 
     view! {
-        <div data-nostr-step="extension">
+        <div data-nostr-step="extension" data-nostr-busy=move || loading.get().then_some("")>
             <Show when=move || loading.get()>
                 <span
                     aria-label="Waiting for extension…"
@@ -798,7 +844,7 @@ fn StepBunker(
     };
 
     view! {
-        <div data-nostr-step="bunker">
+        <div data-nostr-step="bunker" data-nostr-busy=move || loading.get().then_some("")>
             <p>
                 "Paste a "
                 <code>
@@ -885,7 +931,10 @@ fn StepPasskey(
         };
 
     view! {
-        <div data-nostr-step="passkey">
+        <div
+            data-nostr-step="passkey"
+            data-nostr-busy=move || (sub_step.get() == PasskeySubStep::Loading).then_some("")
+        >
             <Show when=move || orphan.get()>
                 <div data-nostr-info="">
                     "A passkey may have been saved anyway. Remove the 'nostr' passkey from your password manager or device before trying again."
@@ -990,6 +1039,136 @@ const fn clears_ncryptsec(e: &NostrAuthError) -> bool {
     matches!(e, NostrAuthError::InvalidNcryptsec(_))
 }
 
+const BUSY_COPY: &str = "Unlocking your key, this takes a few seconds";
+
+#[component]
+fn SubmitButton(
+    loading: Signal<bool>,
+    idle: &'static str,
+    on_click: impl Fn() + 'static,
+) -> impl IntoView {
+    view! {
+        <button
+            disabled=move || loading.get()
+            on:click=move |_| on_click()
+        >
+            <Show when=move || loading.get() fallback=move || idle>
+                <span data-nostr-spinner="" />
+                {BUSY_COPY}
+            </Show>
+        </button>
+    }
+}
+
+#[component]
+fn PasswordInput(
+    password: ReadSignal<String>,
+    set_password: WriteSignal<String>,
+    on_submit: impl Fn() + 'static,
+) -> impl IntoView {
+    view! {
+        <input
+            type="password"
+            placeholder="Password"
+            autocomplete="current-password"
+            spellcheck="false"
+            data-nostr-input="ncryptsec-password"
+            aria-label="ncryptsec decryption password"
+            on:input=move |e| replace_secret(set_password, event_target_value(&e))
+            prop:value=move || password.get()
+            on:keydown=move |e: web_sys::KeyboardEvent| {
+                if e.key() == "Enter" { on_submit(); }
+            }
+        />
+    }
+}
+
+/// What both ncryptsec steps share. It owns the password signal, so build it in the component body.
+#[derive(Clone, Copy)]
+struct DecryptForm {
+    attempt: Attempt,
+    on_auth: Callback<AuthResult>,
+    set_error: WriteSignal<Option<String>>,
+    worker_url: StoredValue<Option<String>>,
+    password: ReadSignal<String>,
+    set_password: WriteSignal<String>,
+    loading: ReadSignal<bool>,
+    set_loading: WriteSignal<bool>,
+}
+
+impl DecryptForm {
+    fn new(
+        attempt: Attempt,
+        on_auth: Callback<AuthResult>,
+        set_error: WriteSignal<Option<String>>,
+        config: NostrAuthConfig,
+    ) -> Self {
+        let (password, set_password) = secret_signal();
+        let (loading, set_loading) = signal(false);
+        Self {
+            attempt,
+            on_auth,
+            set_error,
+            worker_url: StoredValue::new(config.ncryptsec_worker_url),
+            password,
+            set_password,
+            loading,
+            set_loading,
+        }
+    }
+
+    /// With `expected`, a key that belongs to someone else is refused. `on_error` runs before the
+    /// error is shown.
+    fn submit(
+        self,
+        ncryptsec: impl AsRef<str> + 'static,
+        expected: Option<PublicKey>,
+        on_error: impl FnOnce(&NostrAuthError) + 'static,
+    ) {
+        let Self {
+            attempt,
+            on_auth,
+            set_error,
+            worker_url,
+            password,
+            set_password,
+            set_loading,
+            ..
+        } = self;
+        if password.with_untracked(String::is_empty) {
+            set_error.set(Some("Please enter your password.".into()));
+            return;
+        }
+        let password = take_secret(set_password);
+        set_error.set(None);
+        set_loading.set(true);
+        let url = worker_url.get_value();
+        attempt.spawn(async move {
+            let opened = RawKeySession::from_ncryptsec_off_thread(
+                ncryptsec.as_ref(),
+                &password,
+                url.as_deref(),
+            )
+            .await
+            .and_then(|session| match expected {
+                Some(expected) => check_unlocked(&expected, session),
+                None => Ok(session),
+            });
+            match opened {
+                Ok(session) => {
+                    set_loading.set(false);
+                    on_auth.run(AuthResult::Ncryptsec(session));
+                }
+                Err(e) => {
+                    on_error(&e);
+                    set_error.set(Some(e.to_string()));
+                    set_loading.set(false);
+                }
+            }
+        });
+    }
+}
+
 #[component]
 fn StepNcryptsec(
     attempt: Attempt,
@@ -997,13 +1176,11 @@ fn StepNcryptsec(
     set_error: WriteSignal<Option<String>>,
     config: NostrAuthConfig,
 ) -> impl IntoView {
-    let worker_url = StoredValue::new(config.ncryptsec_worker_url);
     let (ncryptsec, set_ncryptsec) = secret_signal();
-    let (password, set_password) = secret_signal();
-    let (loading, set_loading) = signal(false);
+    let form = DecryptForm::new(attempt, on_auth, set_error, config);
 
     let decrypt = move || {
-        if loading.get_untracked() {
+        if form.loading.get_untracked() {
             return;
         }
         let nc = ncryptsec.with_untracked(|v| Zeroizing::new(v.trim().to_owned()));
@@ -1011,33 +1188,15 @@ fn StepNcryptsec(
             set_error.set(Some("Please paste your ncryptsec1... key.".into()));
             return;
         }
-        if password.with_untracked(String::is_empty) {
-            set_error.set(Some("Please enter your password.".into()));
-            return;
-        }
-        let pw = take_secret(set_password);
-        set_error.set(None);
-        set_loading.set(true);
-        let url = worker_url.get_value();
-        attempt.spawn(async move {
-            match RawKeySession::from_ncryptsec_off_thread(&nc, &pw, url.as_deref()).await {
-                Ok(session) => {
-                    set_loading.set(false);
-                    on_auth.run(AuthResult::Ncryptsec(session));
-                }
-                Err(e) => {
-                    if clears_ncryptsec(&e) {
-                        clear_secret(set_ncryptsec);
-                    }
-                    set_error.set(Some(e.to_string()));
-                    set_loading.set(false);
-                }
+        form.submit(nc, None, move |e| {
+            if clears_ncryptsec(e) {
+                clear_secret(set_ncryptsec);
             }
         });
     };
 
     view! {
-        <div data-nostr-step="ncryptsec">
+        <div data-nostr-step="ncryptsec" data-nostr-busy=move || form.loading.get().then_some("")>
             <p>
                 "Paste your "
                 <code>
@@ -1057,28 +1216,95 @@ fn StepNcryptsec(
                 prop:value=move || ncryptsec.get()
             />
 
-            <input
-                type="password"
-                placeholder="Password"
-                autocomplete="off"
-                spellcheck="false"
-                data-nostr-input="ncryptsec-password"
-                aria-label="ncryptsec decryption password"
-                on:input=move |e| replace_secret(set_password, event_target_value(&e))
-                prop:value=move || password.get()
-                on:keydown=move |e: web_sys::KeyboardEvent| {
-                    if e.key() == "Enter" { decrypt(); }
-                }
+            <PasswordInput
+                password=form.password
+                set_password=form.set_password
+                on_submit=decrypt
+            />
+
+            <SubmitButton
+                loading=form.loading.into()
+                idle="Decrypt and sign in"
+                on_click=decrypt
+            />
+        </div>
+    }
+}
+
+#[component]
+fn StepNcryptsecUnlock(
+    attempt: Attempt,
+    on_auth: Callback<AuthResult>,
+    set_error: WriteSignal<Option<String>>,
+    set_step: WriteSignal<ModalStep>,
+    saved: Signal<Option<PersistedSession>>,
+    locked: Signal<Option<LockedSession>>,
+    refuse: Callback<(NcryptsecId, NostrAuthError)>,
+    config: NostrAuthConfig,
+) -> impl IntoView {
+    let form = DecryptForm::new(attempt, on_auth, set_error, config);
+    let who = move || locked.with(|locked| locked.as_ref().map(LockedSession::npub));
+
+    let to_full_step = move |message: Option<&str>| {
+        attempt.cancel();
+        clear_secret(form.set_password);
+        set_step.set(ModalStep::Ncryptsec);
+        set_error.set(message.map(str::to_owned));
+    };
+
+    let unlock = move || {
+        if form.loading.get_untracked() {
+            return;
+        }
+        // Another tab may have logged out or stored someone else since this step opened.
+        let target = saved.with_untracked(|saved| {
+            let saved = saved.as_ref()?;
+            let (public_key, ncryptsec) = ncryptsec_restore_target(saved).ok()?;
+            Some((
+                public_key,
+                (saved.public_key_hex.clone(), Arc::from(ncryptsec)),
+            ))
+        });
+        let Some((public_key, id)) = target else {
+            to_full_step(Some(
+                "Your saved key has changed. Paste your ncryptsec1... key.",
+            ));
+            return;
+        };
+        form.submit(Arc::clone(&id.1), Some(public_key), move |e| {
+            if clears_ncryptsec(e) {
+                let _ = refuse.try_run((id, e.clone()));
+                to_full_step(Some(&e.to_string()));
+            }
+        });
+    };
+
+    view! {
+        <div data-nostr-step="ncryptsec-unlock" data-nostr-busy=move || form.loading.get().then_some("")>
+            <p>
+                {move || who().map_or_else(
+                    || "Enter the password for your saved key.".into_any(),
+                    |npub| view! { "Enter the password for " <code>{npub}</code> }.into_any(),
+                )}
+            </p>
+
+            <PasswordInput
+                password=form.password
+                set_password=form.set_password
+                on_submit=unlock
+            />
+
+            <SubmitButton
+                loading=form.loading.into()
+                idle="Unlock"
+                on_click=unlock
             />
 
             <button
-                disabled=move || loading.get()
-                on:click=move |_| decrypt()
+                data-nostr-switch-key=""
+                on:click=move |_| to_full_step(None)
             >
-                <Show when=move || loading.get() fallback=|| view! { "Decrypt and sign in" }>
-                    <span data-nostr-spinner="" />
-                    "Decrypting…"
-                </Show>
+                "Use a different key"
             </button>
         </div>
     }
@@ -1242,6 +1468,20 @@ mod tests {
     }
 
     #[test]
+    fn unlock_step_only_for_a_locked_ncryptsec() {
+        let key = nostr::key::Keys::generate().public_key();
+        let locked = |method| LockedSession {
+            public_key: key,
+            method,
+        };
+        assert!(unlock_step(None).is_none());
+        assert!(unlock_step(Some(&locked(LoginMethod::Passkey))).is_none());
+        assert!(
+            unlock_step(Some(&locked(LoginMethod::Ncryptsec))) == Some(ModalStep::NcryptsecUnlock)
+        );
+    }
+
+    #[test]
     fn escape_action_table() {
         assert_eq!(escape_action(true, false), EscapeAction::Close);
         assert_eq!(escape_action(true, true), EscapeAction::Close);
@@ -1283,7 +1523,7 @@ mod tests {
                 supports_webauthn: true,
             });
             let (_, set_step) = signal(ModalStep::MethodSelect);
-            view! { <StepMethodSelect platform=platform config=NostrAuthConfig::default() set_step=set_step /> }
+            view! { <StepMethodSelect platform=platform config=NostrAuthConfig::default() set_step=set_step locked=Signal::stored(None) /> }
                 .to_html()
         });
         assert!(!html.contains("Secret Key"), "{html}");
@@ -1306,7 +1546,7 @@ mod tests {
                 allowed_methods,
                 ..NostrAuthConfig::default()
             };
-            view! { <StepMethodSelect platform=platform config=config set_step=set_step /> }
+            view! { <StepMethodSelect platform=platform config=config set_step=set_step locked=Signal::stored(None) /> }
                 .to_html()
         })
     }
@@ -1374,6 +1614,12 @@ mod tests {
         )));
         assert!(!clears_ncryptsec(&NostrAuthError::WrongPassword));
         assert!(!clears_ncryptsec(&NostrAuthError::NcryptsecDecryptAborted));
+        let other = nostr::key::Keys::generate().public_key();
+        let opened = RawKeySession::for_tests(nostr::key::Keys::generate());
+        let Err(mismatch) = check_unlocked(&other, opened) else {
+            unreachable!("another key opened");
+        };
+        assert!(clears_ncryptsec(&mismatch));
     }
 
     #[cfg(feature = "ssr")]
@@ -1385,6 +1631,44 @@ mod tests {
     }
 
     #[cfg(feature = "ssr")]
+    const CRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+
+    #[cfg(feature = "ssr")]
+    fn unlock_html(saved: Option<PersistedSession>, locked: Option<LockedSession>) -> String {
+        in_owner(|set_error, on_auth| {
+            let (_, set_step) = signal(ModalStep::NcryptsecUnlock);
+            view! {
+                <StepNcryptsecUnlock
+                    attempt=Attempt::new()
+                    on_auth=on_auth
+                    set_error=set_error
+                    set_step=set_step
+                    saved=Signal::stored(saved)
+                    locked=Signal::stored(locked)
+                    refuse=Callback::new(|_| {})
+                    config=NostrAuthConfig::default()
+                />
+            }
+            .to_html()
+        })
+    }
+
+    #[cfg(feature = "ssr")]
+    fn locked_ncryptsec() -> LockedSession {
+        let saved = saved_ncryptsec();
+        LockedSession {
+            public_key: PublicKey::from_hex(&saved.public_key_hex).unwrap(),
+            method: LoginMethod::Ncryptsec,
+        }
+    }
+
+    #[cfg(feature = "ssr")]
+    fn saved_ncryptsec() -> PersistedSession {
+        let auth = AuthResult::Ncryptsec(RawKeySession::from_ncryptsec(CRYPTSEC, "nostr").unwrap());
+        auth.to_persisted_session().unwrap()
+    }
+
+    #[cfg(feature = "ssr")]
     fn read_only_html() -> String {
         in_owner(|set_error, on_auth| {
             view! { <StepReadOnly on_auth=on_auth set_error=set_error /> }.to_html()
@@ -1392,25 +1676,97 @@ mod tests {
     }
 
     #[cfg(feature = "ssr")]
-    fn assert_inputs_opt_out(html: &str, inputs: usize) {
+    fn assert_inputs_autocomplete(html: &str, autocomplete: &[&str]) {
         let tags: Vec<&str> = html
             .split("<input")
             .skip(1)
             .filter_map(|rest| rest.split('>').next())
             .collect();
-        assert_eq!(tags.len(), inputs, "{html}");
-        for tag in tags {
-            assert!(tag.contains(r#"autocomplete="off""#), "{tag}");
+        assert_eq!(tags.len(), autocomplete.len(), "{html}");
+        for (tag, want) in tags.into_iter().zip(autocomplete) {
+            assert!(tag.contains(&format!(r#"autocomplete="{want}""#)), "{tag}");
             assert!(tag.contains(r#"spellcheck="false""#), "{tag}");
+            assert!(!tag.contains("onpaste"), "{tag}");
+            if *want == "current-password" {
+                assert!(tag.contains(r#"type="password""#), "{tag}");
+            }
         }
     }
 
     #[cfg(feature = "ssr")]
     #[test]
     fn secret_inputs_opt_out_of_autofill() {
-        assert_inputs_opt_out(&bunker_html(), 1);
-        assert_inputs_opt_out(&ncryptsec_html(), 2);
-        assert_inputs_opt_out(&read_only_html(), 1);
+        assert_inputs_autocomplete(&bunker_html(), &["off"]);
+        assert_inputs_autocomplete(&ncryptsec_html(), &["off", "current-password"]);
+        assert_inputs_autocomplete(
+            &unlock_html(Some(saved_ncryptsec()), Some(locked_ncryptsec())),
+            &["current-password"],
+        );
+        assert_inputs_autocomplete(&read_only_html(), &["off"]);
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn unlock_step_html() {
+        let saved = saved_ncryptsec();
+        let npub = locked_ncryptsec().npub();
+        let html = unlock_html(Some(saved), Some(locked_ncryptsec()));
+        assert!(
+            html.contains(r#"data-nostr-step="ncryptsec-unlock""#),
+            "{html}"
+        );
+        assert!(html.contains(&npub), "{html}");
+        assert!(html.contains("Unlock"), "{html}");
+        assert!(html.contains("Use a different key"), "{html}");
+        assert!(!html.contains("data-nostr-busy"), "{html}");
+        assert!(!html.contains(CRYPTSEC), "{html}");
+        let gone = unlock_html(Some(saved_ncryptsec()), None);
+        assert!(
+            gone.contains("Enter the password for your saved key."),
+            "{gone}"
+        );
+        assert!(!gone.contains("<code"), "{gone}");
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn submit_button_busy_html() {
+        let render = |loading: bool| {
+            Owner::new().with(|| {
+                view! { <SubmitButton loading=Signal::stored(loading) idle="Go" on_click=|| {} /> }
+                    .to_html()
+            })
+        };
+        let busy = render(true);
+        assert!(busy.contains("disabled"), "{busy}");
+        assert!(busy.contains("data-nostr-spinner"), "{busy}");
+        assert!(busy.contains(BUSY_COPY), "{busy}");
+        let idle = render(false);
+        assert!(idle.contains("Go") && !idle.contains("disabled"), "{idle}");
+        assert!(
+            !idle.contains("data-nostr-spinner") && !idle.contains(BUSY_COPY),
+            "{idle}"
+        );
+    }
+
+    #[cfg(feature = "ssr")]
+    #[test]
+    fn steps_expose_busy_only_while_waiting() {
+        assert!(!ncryptsec_html().contains("data-nostr-busy"));
+        assert!(!bunker_html().contains("data-nostr-busy"));
+        let waiting = Owner::new().with(|| {
+            let (_, set_error) = signal(None::<String>);
+            view! {
+                <StepExtension
+                    attempt=Attempt::new()
+                    on_auth=Callback::new(|_: AuthResult| {})
+                    set_error=set_error
+                    on_back=Callback::new(|(): ()| {})
+                />
+            }
+            .to_html()
+        });
+        assert!(waiting.contains("data-nostr-busy"), "{waiting}");
     }
 
     #[cfg(all(feature = "ssr", feature = "insecure_nsec_input"))]
@@ -1419,7 +1775,7 @@ mod tests {
         let html = in_owner(|set_error, on_auth| {
             view! { <StepRawNsec on_auth=on_auth set_error=set_error /> }.to_html()
         });
-        assert_inputs_opt_out(&html, 1);
+        assert_inputs_autocomplete(&html, &["off"]);
     }
 
     #[cfg(feature = "ssr")]

@@ -18,7 +18,9 @@ impl RawKeySession {
         password: &str,
         worker_url: Option<&str>,
     ) -> Result<Self, NostrAuthError> {
-        imp::from_ncryptsec_off_thread(ncryptsec, password, worker_url).await
+        imp::from_ncryptsec_off_thread(ncryptsec, password, worker_url)
+            .await
+            .map(|session| session.with_ncryptsec(ncryptsec))
     }
 }
 
@@ -346,7 +348,7 @@ mod imp {
             warn_once(cause);
         }
         yield_for_paint().await;
-        RawKeySession::from_ncryptsec(ncryptsec, password)
+        RawKeySession::decrypt_bare(ncryptsec, password)
     }
 
     fn spawn(url: &str) -> Option<Worker> {
@@ -590,14 +592,16 @@ mod imp {
         #[wasm_bindgen_test]
         async fn falls_back_without_worker() {
             assert!(!Reflect::has(&js_sys::global(), &"Worker".into()).unwrap());
-            let session = from_ncryptsec_off_thread(
-                &cheap_key_bech32(),
+            let key = cheap_key_bech32();
+            let session = RawKeySession::from_ncryptsec_off_thread(
+                &key,
                 "pw",
                 Some("/nostr-auth-worker_loader.js"),
             )
             .await
             .unwrap();
             assert_eq!(session.public_key.to_hex(), cheap_pubkey());
+            assert_eq!(session.ncryptsec(), Some(key.as_str()));
         }
 
         #[wasm_bindgen_test]
@@ -607,12 +611,15 @@ mod imp {
             );
             let over = from_ncryptsec_off_thread(&over_cap_key(), "pw", Some("/w.js")).await;
             let after_over = eval("globalThis.__nw").as_f64();
-            let cheap = from_ncryptsec_off_thread(&cheap_key_bech32(), "pw", Some("/w.js")).await;
+            let key = cheap_key_bech32();
+            let cheap = RawKeySession::from_ncryptsec_off_thread(&key, "pw", Some("/w.js")).await;
             let after_cheap = eval("globalThis.__nw").as_f64();
             eval("delete globalThis.Worker; delete globalThis.__nw");
             assert!(matches!(over, Err(NostrAuthError::InvalidNcryptsec(_))));
             assert_eq!(after_over, Some(0.0));
-            assert_eq!(cheap.unwrap().public_key.to_hex(), cheap_pubkey());
+            let cheap = cheap.unwrap();
+            assert_eq!(cheap.public_key.to_hex(), cheap_pubkey());
+            assert_eq!(cheap.ncryptsec(), Some(key.as_str()));
             assert_eq!(after_cheap, Some(1.0));
         }
 
@@ -633,7 +640,7 @@ mod imp {
         password: &str,
         _worker_url: Option<&str>,
     ) -> Result<RawKeySession, NostrAuthError> {
-        RawKeySession::from_ncryptsec(ncryptsec, password)
+        RawKeySession::decrypt_bare(ncryptsec, password)
     }
 
     pub(super) const fn run_worker() {}
@@ -726,5 +733,6 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(session.public_key.to_hex(), CRYPTSEC_PUBKEY);
+        assert_eq!(session.ncryptsec(), Some(CRYPTSEC));
     }
 }

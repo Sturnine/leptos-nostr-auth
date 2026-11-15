@@ -61,7 +61,8 @@ pub use signers::{
     BunkerSession, Nip07Handle, PasskeySession, RawKeySession, ReadOnlyHandle, run_ncryptsec_worker,
 };
 pub use types::{
-    AuthResult, LoginMethod, NostrAuthConfig, NostrAuthError, PersistedMethod, PersistedSession,
+    AuthResult, LockedSession, LoginMethod, NostrAuthConfig, NostrAuthError, PersistedMethod,
+    PersistedSession,
 };
 
 mod types;

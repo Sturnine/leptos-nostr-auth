@@ -31,6 +31,7 @@ pub(crate) use nip46::{
 pub use passkey::PasskeySession;
 pub(crate) use passkey::PendingPasskey;
 pub use raw_key::RawKeySession;
+pub(crate) use raw_key::parse_ncryptsec;
 pub use read_only::ReadOnlyHandle;
 
 use nostr::event::FinalizeEvent;
